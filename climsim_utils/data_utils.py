@@ -4,8 +4,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import pickle
 import glob, os
+import gc
 import re
-import tensorflow as tf
+#import tensorflow as tf
 import netCDF4
 import copy
 import string
@@ -168,6 +169,11 @@ class data_utils:
                                                                     # SHR_CONST_RDAIR   = SHR_CONST_RGAS/SHR_CONST_MWDAIR
                                                                     # SHR_CONST_RGAS    = SHR_CONST_AVOGAD*SHR_CONST_BOLTZ
         self.rho_h20 = 1.e3       # density of fresh water     ~ kg/m^ 3
+       
+        self.vars_2D_inp = []
+        self.vars_1D_inp = []
+        self.vars_2D_outp = []
+        self.vars_1D_outp = []
         
         self.v1_inputs = ['state_t',
                           'state_q0001',
@@ -770,6 +776,38 @@ class data_utils:
                 filelist = filelist + glob.glob(self.data_path + "*/" + regexp)
             self.test_filelist = sorted(filelist)[start_idx:end_idx:self.test_stride_sample]
 
+        file = filelist[0]
+        ds_input = self.get_input(file)
+        ds_target = self.get_target(file)
+
+        vars_1D_inp = []; vars_2D_inp = []
+        all_vars = list(ds_input.keys())
+        for var in all_vars:
+            if 'lev' in ds_input[var].dims:
+                vars_2D_inp.append(var)
+            else:
+                vars_1D_inp.append(var)  
+                
+        print("2D Input variables: {}".format(vars_2D_inp), flush=True)
+        print("1D (scalar) Input variables: {}".format(vars_1D_inp), flush=True)
+
+        vars_1D_outp = []; vars_2D_outp = []
+
+        all_vars = list(ds_target.keys())
+        for var in all_vars:
+            if 'lev' in ds_target[var].dims:
+                vars_2D_outp.append(var)
+            else:
+                vars_1D_outp.append(var)  
+
+        print("2D Output variables: {}".format(vars_2D_outp), flush=True)
+        print("1D (scalar) Output variables: {}".format(vars_1D_outp), flush=True) 
+        
+        self.vars_1D_inp = vars_1D_inp
+        self.vars_2D_inp = vars_2D_inp
+        self.vars_1D_outp = vars_1D_outp
+        self.vars_2D_outp = vars_2D_outp
+            
     def get_filelist(self, data_split):
         '''
         This function returns the filelist corresponding to data splits for train, val, scoring, and test.
@@ -787,6 +825,175 @@ class data_utils:
         elif data_split == 'test':
             assert self.test_filelist is not None, 'filelist for test is not set.'
             return self.test_filelist
+        
+        
+    def generator_keeplev(self, data_split):
+        filelist = self.get_filelist(data_split)
+                
+        print("Starting generator, len of filelist is {}".format(len(filelist)), flush=True)
+        for file in filelist:
+           # print(file)
+            # read inputs
+            ds_input = self.get_input(file)
+            # read targets
+            ds_target = self.get_target(file)
+           # print(ds_input)
+           # print("shape ds input", ds_input.shape)
+
+            # normalization, scaling
+            if self.normalize:
+                ds_input = (ds_input - self.input_mean)/(self.input_max - self.input_min)
+                ds_target = ds_target*self.output_scale
+            else:
+                ds_input = ds_input.drop(['lat','lon'])
+
+            # stack
+            # ds = ds.stack({'batch':{'sample','ncol'}})
+            ds_input = ds_input.stack({'batch':{'ncol'}})
+            #print(ds_input)
+
+            #vars_1D_inp = []; vars_2D_inp = []
+            #all_vars = list(ds_input.keys())
+            #for var in all_vars:
+            #    if 'lev' in ds_input[var].dims:
+            #        vars_2D_inp.append(var)
+            #    else:
+            #        vars_1D_inp.append(var)  
+            vars_1D_inp = self.vars_1D_inp
+            vars_2D_inp = self.vars_2D_inp
+
+            #print(vars_2D)
+            if "lat" in vars_1D_inp:
+                vars_1D_inp.remove('lat'); vars_1D_inp.remove('lon')        
+
+            ds_input_lev = ds_input[vars_2D_inp]
+            ds_input_lev = ds_input_lev.to_dataarray(dim='features', name='inputs_lev')
+
+            ds_input_scalar = ds_input[vars_1D_inp]
+            ds_input_scalar = ds_input_scalar.to_dataarray(dim='features', name='inputs_scalar')
+            #ds_input = ds_input.to_stacked_array('mlvar', sample_dims=['batch'], name=data.input_abbrev)
+            #ds_input = ds_input.to_stacked_array('mlvar', sample_dims=['batch','lev'], name=data.input_abbrev)
+
+
+            # dso = dso.stack({'batch':{'sample','ncol'}})
+            ds_target = ds_target.stack({'batch':{'ncol'}})
+
+            #vars_1D_outp = []; vars_2D_outp = []
+            #all_vars = list(ds_target.keys())
+            #for var in all_vars:
+            #    if 'lev' in ds_target[var].dims:
+            #        vars_2D_outp.append(var)
+            #    else:
+            #        vars_1D_outp.append(var)  
+            vars_1D_outp = self.vars_1D_outp
+            vars_2D_outp = self.vars_2D_outp
+            
+            #print(vars_2D)
+
+            ds_target_lev = ds_target[vars_2D_outp]
+            ds_target_lev = ds_target_lev.to_dataarray(dim='features', name='outputs_lev')
+
+            ds_target_scalar = ds_target[vars_1D_outp]
+            ds_target_scalar = ds_target_scalar.to_dataarray(dim='features', name='outputs_scalar')
+
+          #  ds_target = ds_target.to_stacked_array('mlvar', sample_dims=['batch'], name=data.output_abbrev)
+            #print(ds_input_lev.values.shape)
+
+            #yield (ds_input.values, ds_target.values)
+            input_lev = np.transpose(ds_input_lev.values)
+            input_sca = np.transpose(ds_input_scalar.values)
+            output_lev = np.transpose(ds_target_lev.values)
+            output_sca = np.transpose(ds_target_scalar.values)
+            ds_input.close(); ds_target.close()
+            ds_input_lev.close(); ds_input_scalar.close()
+            ds_target_lev.close(); ds_target_scalar.close()
+            
+            yield input_lev, input_sca, output_lev, output_sca
+
+    
+    def save_as_h5_keeplev(self,
+                 data_split, 
+                 save_path = '',
+                 save_filename = ''):
+        '''
+        This function saves the training data as a .h5 file while keeping vertical structure
+        '''
+        i = 0
+        for item in self.generator_keeplev(data_split):
+            npy_input_lev0 = item[0]
+            npy_input_sca0 = item[1]
+            npy_output_lev0 = item[2]
+            npy_output_sca0 = item[3]    
+            
+            if i % 20 == 1: 
+                print("i = {}, shape input lev {}; input_sca {}  ".format(i, npy_input_lev.shape, npy_input_sca.shape),flush=True)
+
+            if self.normalize:
+                # replace inf and nan with 0
+                npy_input_lev0[np.isinf(npy_input_lev0)] = 0 ; npy_input_lev0[np.isnan(npy_input_lev0)] = 0
+                npy_input_sca0[np.isinf(npy_input_sca0)] = 0 ; npy_input_sca0[np.isnan(npy_input_sca0)] = 0
+                npy_output_lev0[np.isinf(npy_output_lev0)] = 0 ; npy_output_lev0[np.isnan(npy_output_lev0)] = 0
+                npy_output_sca0[np.isinf(npy_output_sca0)] = 0 ; npy_output_sca0[np.isnan(npy_output_sca0)] = 0
+
+
+            if i==0:
+                npy_input_lev = npy_input_lev0
+                npy_input_sca = npy_input_sca0
+                npy_output_lev = npy_output_lev0
+                npy_output_sca = npy_output_sca0
+            else:
+                npy_input_lev = np.concatenate((npy_input_lev, npy_input_lev0 ))
+                npy_input_sca = np.concatenate((npy_input_sca, npy_input_sca0 ))
+                npy_output_lev = np.concatenate((npy_output_lev,npy_output_lev0 ))
+                npy_output_sca = np.concatenate((npy_output_sca, npy_output_sca0 ))
+                
+            del item
+            gc.collect()
+
+            #print(item[0].dtype, item[0].shape)
+            #print(item[1].dtype, item[1].shape)
+            #print(item[2].dtype, item[2].shape)
+            #print(item[3].dtype, item[3].shape)
+            #print(npy_input_lev.shape,npy_input_sca.shape, npy_output_lev0.shape, npy_output_sca0.shape  )
+            i += 1 
+
+        # if save_path not exist, create it
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+        # add "/" to the end of save_path if it does not exist
+        if save_path[-1] != '/':
+            save_path = save_path + '/'
+            
+        if save_filename == '':
+            save_filename = 'data.h5'
+
+        if save_filename[-3:] !='.h5':
+            save_filename = save_filename + '.h5'
+            
+        h5_path = save_path + data_split + "_" + save_filename
+        compression_level = 8
+        print("Attempting to Save daily data input/output file to {}".format(h5_path), flush=True)
+        print("Min max inputs_lev ({},{})".format(npy_input_lev.min(), npy_input_lev.max()))
+        print("Min max inputs_sca ({},{})".format(npy_input_sca.min(), npy_input_sca.max()))
+        print("Min max output_lev ({},{})".format(npy_output_lev.min(), npy_output_lev.max()))
+        print("Min max output_sca ({},{})".format(npy_output_sca.min(), npy_output_sca.max()))
+
+        with h5py.File(h5_path, 'w') as hdf:
+            hdf.create_dataset('input_lev', data=npy_input_lev, 
+                            compression='gzip', compression_opts=compression_level,
+                            dtype='float32')
+            hdf.create_dataset('input_sca', data=npy_input_sca, 
+                            compression='gzip', compression_opts=compression_level,
+                            dtype='float32')            
+            hdf.create_dataset('output_lev', data=npy_output_lev, 
+                            compression='gzip', compression_opts=compression_level,
+                            dtype='float32') 
+            hdf.create_dataset('output_sca', data=npy_output_sca, 
+                            compression='gzip', compression_opts=compression_level,
+                            dtype='float32') 
+
+        del npy_input_lev, npy_input_sca, npy_output_lev, npy_output_sca
+   
     
     def load_ncdata_with_generator(self, data_split):
         '''

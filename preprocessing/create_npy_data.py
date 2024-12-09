@@ -1,0 +1,80 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+print("script started", flush=True)
+
+import sys
+print(sys.version)
+
+from climsim_utils.data_utils import *
+
+grid_path = '../grid_info/ClimSim_low-res_grid-info.nc'
+norm_path = './normalizations/'
+
+grid_info = xr.open_dataset(grid_path)
+input_mean = xr.open_dataset(norm_path + 'inputs/input_mean.nc').astype(np.float32)
+input_max = xr.open_dataset(norm_path + 'inputs/input_max.nc').astype(np.float32)
+input_min = xr.open_dataset(norm_path + 'inputs/input_min.nc').astype(np.float32)
+output_scale = xr.open_dataset(norm_path + 'outputs/output_scale.nc').astype(np.float32)
+
+ml_backend = 'pytorch'
+input_abbrev = 'mlexpand'
+output_abbrev = 'mlo'
+data = data_utils(grid_info = grid_info, 
+                  input_mean = input_mean, 
+                  input_max = input_max, 
+                  input_min = input_min, 
+                  output_scale = output_scale,
+                  ml_backend = ml_backend,
+                  normalize = True,
+                  input_abbrev = input_abbrev,
+                  output_abbrev = output_abbrev,
+                  save_h5=True,
+                  save_npy=False,
+                  )
+print("data object initialized", flush=True)
+
+
+# set data path
+data.data_path = "/network/group/aopp/predict/HMC009_UKKONEN_CLIMSIM/ClimSim_data/ClimSim_low-res-expanded/train/"
+data_save_path =  "/network/group/aopp/predict/HMC009_UKKONEN_CLIMSIM/ClimSim_data/ClimSim_low-res-expanded/train/preprocessed/"
+# set inputs and outputs to V1 subset
+#data.set_to_v1_vars()
+data.set_to_v2_vars()
+print("Set to v2 vars", flush=True)
+
+# set regular expressions for selecting training data
+#data.set_regexps(data_split = 'train', 
+#                 regexps = ['E3SM-MMF.mli.000[1234567]-*-*-*.nc', # years 1 through 7
+#                            'E3SM-MMF.mli.0008-01-*-*.nc']) # first month of year 8
+
+#regexp0 = 'E3SM-MMF.mlexpand.0001-02-01-*.nc'
+#regexp0 = 'E3SM-MMF.mlexpand.000[123]-*-*-*.nc'
+#regexp0 = 'E3SM-MMF.mlexpand.000[12]-*-*-*.nc'
+regexp0 = 'E3SM-MMF.mlexpand.0001-0[2345]-*-*.nc'
+
+
+
+
+data.set_regexps(data_split = 'train',
+                regexps = [regexp0]) # years 1   month 2
+                 #regexps = ['E3SM-MMF.mlexpand.0001-02-*-*.nc']) # years 1   month 2
+
+print("Set regexps to {}".format(regexp0), flush=True)
+
+# set temporal subsampling
+#data.set_stride_sample(data_split = 'train', stride_sample = 7)
+data.set_stride_sample(data_split = 'train', stride_sample = 1)
+
+print("Set stride to 1", flush=True)
+
+# create list of files to extract data from
+data.set_filelist(data_split = 'train')
+print("Created list of files to extract data from", flush=True)
+
+#savename = regexp0.removesuffix('*.nc')   
+savename = 'y123'
+savename = 'first4months'
+
+print("Saving to ", data_save_path, flush=True)
+data.save_as_h5_keeplev(data_split = 'train', save_path = data_save_path, save_filename = savename)
+
