@@ -7,9 +7,9 @@
 # use default queue 
 #SBATCH --ntasks=1
 # No parallelisation
-#SBATCH --time=100:00:00 
+#SBATCH --time=3:00:00 
 # Guide on how long this will run for 
-#SBATCH --mem-per-cpu=250gb
+#SBATCH --mem-per-cpu=200gb
 # Bigger jobs need more memory allocation
 
 

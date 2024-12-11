@@ -977,20 +977,29 @@ class data_utils:
         print("Min max inputs_sca ({},{})".format(npy_input_sca.min(), npy_input_sca.max()))
         print("Min max output_lev ({},{})".format(npy_output_lev.min(), npy_output_lev.max()))
         print("Min max output_sca ({},{})".format(npy_output_sca.min(), npy_output_sca.max()))
-
+        
         with h5py.File(h5_path, 'w') as hdf:
-            hdf.create_dataset('input_lev', data=npy_input_lev, 
+            hf = hdf.create_dataset('input_lev', data=npy_input_lev, 
                             compression='gzip', compression_opts=compression_level,
                             dtype='float32')
-            hdf.create_dataset('input_sca', data=npy_input_sca, 
+            hf.attrs['varnames'] =self.vars_2D_inp 
+            
+            hf2 = hdf.create_dataset('input_sca', data=npy_input_sca, 
                             compression='gzip', compression_opts=compression_level,
-                            dtype='float32')            
-            hdf.create_dataset('output_lev', data=npy_output_lev, 
+                            dtype='float32')    
+            hf2.attrs['varnames'] =self.vars_1D_inp 
+
+            
+            hf3 = hdf.create_dataset('output_lev', data=npy_output_lev, 
                             compression='gzip', compression_opts=compression_level,
                             dtype='float32') 
-            hdf.create_dataset('output_sca', data=npy_output_sca, 
+            hf3.attrs['varnames'] =self.vars_2D_outp
+ 
+            
+            hf4 = hdf.create_dataset('output_sca', data=npy_output_sca, 
                             compression='gzip', compression_opts=compression_level,
                             dtype='float32') 
+            hf4.attrs['varnames'] =self.vars_1D_outp
 
         del npy_input_lev, npy_input_sca, npy_output_lev, npy_output_sca
    
