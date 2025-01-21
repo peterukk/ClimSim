@@ -145,7 +145,7 @@ class RNN_autoreg(nn.Module):
                 use_initial_mlp=False, ensemble_size=1,
                 random_init_cx=False,
                 use_intermediate_mlp=True,
-                add_pres=False,
+                # add_pres=False,
                 third_rnn=False,
                 add_stochastic_layer=False,
                 coeff_stochastic = 0.0,
@@ -159,10 +159,10 @@ class RNN_autoreg(nn.Module):
         self.ny_sfc = ny_sfc
         self.nneur = nneur 
         self.use_initial_mlp=use_initial_mlp
-        self.add_pres = add_pres
-        if self.add_pres:
-            self.preslay = LayerPressure()
-            nx = nx +1
+        # self.add_pres = add_pres
+        # if self.add_pres:
+            # self.preslay = LayerPressure()
+            # nx = nx +1
         self.nh_rnn1 = self.nneur[0]
         self.nx_rnn2 = self.nneur[0]
         self.nh_rnn2 = self.nneur[1]
@@ -288,10 +288,10 @@ class RNN_autoreg(nn.Module):
             inputs_sfc = inputs_sfc.flatten(0,1)
                     
         batch_size = inputs_main.shape[0]
-        if self.add_pres:
-            sp = inputs_sfc[:,-1]
-            pres  = self.preslay(sp)
-            inputs_main = torch.cat((inputs_main,torch.unsqueeze(pres,2)),dim=2)
+        # if self.add_pres:
+        #     sp = inputs_sfc[:,-1]
+        #     pres  = self.preslay(sp)
+        #     inputs_main = torch.cat((inputs_main,torch.unsqueeze(pres,2)),dim=2)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
      
         if self.rnn1_mem is None: 
@@ -387,4 +387,433 @@ class RNN_autoreg(nn.Module):
             return out, out_sfc
         else:
             return out 
+        
+
+class SpaceStateModel(nn.Module):
+    def __init__(self, nlay=30, nx = 4, nx_sfc=3, ny = 4, nneur=(64,64),model_type='LRU', 
+                 use_initial_mlp=True, add_pres=False,  concat=False,
+                 third_rnn=False, init_with_state_and_sfc=False, memory=None,
+                 dtype=torch.float32,
+                 device=None):
+        super(SpaceStateModel, self).__init__()
+        self.nx = nx
+        self.ny = ny 
+        self.nlay = nlay 
+        self.nx_sfc = nx_sfc 
+        self.nneur = nneur 
+        self.add_pres = add_pres
+        if self.add_pres:
+            self.preslay = LayerPressure()
+            nx = nx +1
+        self.nh_rnn1 = self.nneur[0]
+        self.nh_rnn2 = self.nneur[1]
+        self.ny_rnn1 = self.nh_rnn1
+        self.use_initial_mlp=use_initial_mlp
+        self.init_with_state_and_sfc = init_with_state_and_sfc
+        self.model_type=model_type
+        self.dtype=dtype
+        self.device=device
+        if self.device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print("Using model type {}".format(model_type))
+        if self.model_type in ["Mamba","GSS"]:#,"QRNN"]:  #Mamba doesnt support providing the state
+            print("WARNING: this SSM type doesn't support providing the state, so the surface variables are instead added to each point in the sequence")
+            
+            # concatenate the vertical (sequence) inputs with tiled scalars
+            self.init_with_state_and_sfc=False
+            self.use_initial_mlp=True
+            nx = nx + nx_sfc
+        if self.use_initial_mlp: 
+            self.nh_mlp1 = self.nh_rnn1
+            self.nx_rnn1 = self.nh_rnn1
+        else:
+            self.nx_rnn1 = nx
+        self.use_intermediate_mlp = False
+        if memory == 'None':
+            print("Building non-autoregressive SSM, but may be stateful")
+            self.autoregressive = False
+        elif memory == 'Hidden':
+            print("Building autoregressive SSM that feeds a hidden memory at t0,z0 to SSM1 at t1,z0")
+            self.autoregressive = True
+            self.rnn1_mem = None
+            # self.rnn2_mem = None
+            # self.use_intermediate_mlp = True
+            
+        # if self.use_intermediate_mlp:
+        #     self.nh_latent = self.nh_rnn2
+        self.nh_latent = self.nh_rnn2
+        glu_expand_factor = 2
+        # if model_type in ['S5','GSS','QRNN','Mamba','GateLoop','SRU','LRU']:
+        if model_type in ['S5','GSS','QRNN','Mamba','GateLoop','SRU','SRU_2D','LRU']:
+            self.use_initial_mlp = True
+            self.use_intermediate_mlp = True; self.nh_latent = self.nh_rnn2
+            self.nx_rnn1 = self.nh_rnn1 
+            self.nx_rnn2 = self.nh_rnn2
+            if self.autoregressive and model_type != 'SRU_2D':
+                # This is a bit tricky with these SSMs as they expect 
+                # num_inputs = num_hidden. Therefore we need MLPs that halve 
+                # the size of both inputs and the final hidden variable, e.g.
+                # SSM = 128 neurons, Xlay = 64 neurons, Xhidden = 64 neurons,
+                # X = concat(Xlay,Xhidden)
+                # Similarly, to feed the latent variable to RNN2, we would need an MLP before it
+                # that halves the size of  the output from RNN1
+                #    mlp1      concat(mlp1,hfin=64)     RNN1(128)     MLP2     concat(mlp2,hfin=64)      RNN2(128)     mlpfin
+                # nx ----> 64 ---------------------> 128 -------> 128 ---> 64 ---------------------> 128 --------> 128 ----->  64
+                #   OR let second SSMs hidden size be bigger
+                #    mlp1      concat(mlp1,hfin=64)     RNN1(128)      concat(hfin=64)           RNN2(192)     mlpfin
+                # nx ----> 64 ---------------------> 128 -------> 128 ---------------------> 192 --------> 192 ----->  64  
+                # or Dont bother making RNN2 autoregressive?
+                # mlp1        concat(hfin=128)          RNN1(256)     GLU      RNN2(128)    GLU      RNN3
+                # nx ---> 128 ---------------------> 256 -------> 256 ---> 128 -------> 128 ---> 128 --->  128
+
+                self.nh_latent = self.nh_rnn1//2
+                self.ny_rnn1 = self.nh_rnn1//2
+                self.nh_mlp1  = self.nh_rnn1//2 
+                self.nh_mlp2  = self.nh_rnn1
+                # self.nh_rnn2 = self.nh_rnn1  + self.nh_latent
+                # self.nx_rnn2 = self.nh_rnn2
+                # self.nh_rnn2 = self.nh_rnn1 
+                self.nx_rnn2 = self.nh_rnn2
+                glu_expand_factor = 1
+        else:
+            self.nx_rnn2 = self.nh_rnn1
+            if self.autoregressive:
+                self.nx_rnn1 = self.nx_rnn1 + self.nh_latent 
+                # self.nx_rnn2 = self.nh_rnn1 + self.nh_latent 
+
+        if self.use_initial_mlp:
+            self.mlp_initial = nn.Linear(nx, self.nh_mlp1 )
+        self.third_rnn=third_rnn
+
+        print("nx rnn1", self.nx_rnn1, "nh rnn1", self.nh_rnn1, "ny rnn1", self.ny_rnn1)
+        print("nx rnn2", self.nx_rnn2, "nh rnn2", self.nh_rnn2)  
+        if self.autoregressive: 
+            print("nh_memory", self.nh_latent)
+        self.concat = concat
+
+        if self.init_with_state_and_sfc:
+            self.state1 = None
+            # self.state2 = None 
+            self.mlp_surface1  = nn.Linear(nx_sfc + self.nh_rnn1, self.nh_rnn1)
+        else:
+            self.mlp_surface1  = nn.Linear(nx_sfc, self.nh_rnn1)
+
+        if model_type == 'LRU':
+            from models_torch_kernels_LRU import LRU
+            self.rnn1= LRU(in_features=self.nx_rnn1,out_features=self.nh_rnn1,state_features=self.nh_rnn1)
+            self.rnn2= LRU(in_features=self.nx_rnn2,out_features=self.nh_rnn2,state_features=self.nh_rnn2)
+        elif model_type == "MinGRU":
+            # MinGRU = models_torch_kernels.MinGRU
+            from models_torch_kernels import MinGRU as MinGRU
+            self.rnn1= MinGRU(self.nx_rnn1,self.nh_rnn1)
+            self.rnn2= MinGRU(self.nx_rnn2,self.nh_rnn2)
+            # from models_torch_kernels import minGRU as MinGRU
+            # self.rnn1= MinGRU(self.nh_rnn1)
+            # self.rnn2= MinGRU(self.nh_rnn2)
+            if self.third_rnn:
+                self.rnn3= MinGRU(self.nx_rnn2,self.nh_rnn2)
+        elif model_type == 'S5':
+            from s5 import S5
+            self.liquid=False
+            self.pres_step_scale = False
+            # S5 outputs shape equals inputs?
+            # self.rnn1= S5(self.nx_rnn1,self.nh_rnn1,liquid=self.liquid)
+            # self.rnn2= S5(self.nx_rnn2,self.nh_rnn2,liquid=self.liquid)   
+            # self.rnn1= S5(self.nh_rnn1,liquid=self.liquid)
+            # self.rnn2= S5(self.nh_rnn2,liquid=self.liquid)   
+            self.rnn1= S5(self.nx_rnn1,liquid=self.liquid)
+            self.rnn2= S5(self.nx_rnn2,liquid=self.liquid)  
+        elif model_type == 'Mamba':
+            from mamba_ssm import Mamba
+            self.rnn1 = Mamba(
+                # This module uses roughly 3 * expand * d_model^2 parameters
+                d_model=self.nx_rnn1, # Model dimension d_model
+                d_state=16,  # SSM state expansion factor
+                d_conv=4,    # Local convolution width
+                expand=2,    # Block expansion factor
+                )
+            self.rnn2 = Mamba(
+                # This module uses roughly 3 * expand * d_model^2 parameters
+                d_model=self.nx_rnn2, # Model dimension d_model
+                d_state=16,  # SSM state expansion factor
+                d_conv=4,    # Local convolution width
+                expand=2,    # Block expansion factor
+                )
+        elif model_type == 'GSS':
+            from gated_state_spaces_pytorch import GSS
+            self.rnn1= GSS(dim=self.nx_rnn1,dss_kernel_N=self.nh_rnn1,dss_kernel_H=self.nh_rnn1)
+            self.rnn2= GSS(dim=self.nx_rnn2,dss_kernel_N=self.nh_rnn2,dss_kernel_H=self.nh_rnn2)
+        elif model_type == 'QRNN':
+            from models_torch_kernels import QRNNLayer, QRNNLayer_noncausal
+            kernelsize = 3
+            self.rnn1= QRNNLayer_noncausal(self.nx_rnn1,self.nh_rnn1, kernel_size=3, pad =(0,1))
+            self.rnn2= QRNNLayer_noncausal(self.nx_rnn2,self.nh_rnn2, kernel_size=3) 
+            
+            if self.init_with_state_and_sfc:
+                self.mlp_surface2  = nn.Linear(nx_sfc + self.nh_rnn1, self.nh_rnn1)
+            else:
+                self.mlp_surface2  = nn.Linear(nx_sfc, self.nh_rnn1)  
+        elif model_type == 'SRU':
+            from models_torch_kernels import SRU
+            self.rnn1= SRU(self.nx_rnn1,self.nh_rnn1)
+            self.rnn2= SRU(self.nx_rnn2,self.nh_rnn2)  
+            # from sru import SRU
+            # self.rnn1= SRU(self.nx_rnn1,self.nh_rnn1,num_layers=1)
+            # self.rnn2= SRU(self.nx_rnn2,self.nh_rnn2,num_layers=1)
+        elif model_type == "SRU_2D":
+            from models_torch_kernels import SRU, SRU2
+            self.rnn1= SRU2(self.nx_rnn1,self.nh_rnn1)
+            self.rnn2= SRU(self.nx_rnn2,self.nh_rnn2)  
+        elif model_type == 'GateLoop':
+            from gateloop_transformer import SimpleGateLoopLayer
+            self.rnn1= SimpleGateLoopLayer(self.nx_rnn1) #, use_jax_associative_scan=True)
+            self.rnn2= SimpleGateLoopLayer(self.nx_rnn2) #, use_jax_associative_scan=True)
+            if self.third_rnn:
+                self.rnn3= SimpleGateLoopLayer(self.nneur[2])
+                
+            if self.init_with_state_and_sfc:
+                self.mlp_surface2  = nn.Linear(nx_sfc + self.nh_rnn1, self.nh_rnn1)
+            else:
+                self.mlp_surface2  = nn.Linear(nx_sfc, self.nh_rnn1)
+        else:
+            
+            raise NotImplementedError()
+
+        # if model_type in ['LRU','S5','GSS','QRNN','Mamba']:
+        # if model_type in ['LRU','SRU','S5','GSS','QRNN','GateLoop','MinGRU']:
+        # if model_type in ['LRU','SRU','S5','GSS','QRNN','GateLoop','MinGRU','Mamba']:
+        if model_type in ['LRU','SRU','SRU_2D','S5','QRNN','GateLoop','MinGRU',]:
+
+            self.use_glu_layers = True 
+        else:
+            self.use_glu_layers = False
+            
+        self.reduce_dim_with_mlp=False
+        if self.use_glu_layers:
+            print("Using GLU layers in between for nonlinearity, expand factor (1 means halving output) for GLU1 is ", glu_expand_factor)
+            glu_layernorm=True
+            # glu_layernorm=False
+
+            # self.rnn1= LRU(in_features=nx_rnn1,out_features=self.nneur[0],state_features=self.nneur[0])
+            # self.mlp  = nn.Linear(self.nneur[0], self.nneur[0])
+            # self.SeqLayer1 = SequenceLayer(nlay=self.nlay,nneur=self.nneur[0],layernorm=True)
+            self.SeqLayer1 = GLU(nlay=self.nlay,nneur=self.nh_rnn1,layernorm=glu_layernorm, expand_factor=glu_expand_factor)
+    
+            # self.rnn2= LRU(in_features=nx_rnn2,out_features=self.nneur[1],state_features=self.nneur[0])
+            # self.mlp2  = nn.Linear(self.nneur[1], self.nneur[1])
+            # self.SeqLayer2 = SequenceLayer(nlay=self.nlay,nneur=self.nneur[1],layernorm=True)
+            self.SeqLayer2 = GLU(nlay=self.nlay,nneur=self.nh_rnn2,layernorm=glu_layernorm)
+
+            # self.SeqLayer15 = GLU(nlay=self.nlay,nneur=self.nneur[0],layernorm=glu_layernorm)
+        else:
+            if self.autoregressive and model_type in ['S5','GSS','QRNN','Mamba','GateLoop','SRU','SRU_2D''LRU']:
+                   self.reduce_dim_with_mlp=True
+                   self.reduce_dim_mlp = nn.Linear(self.nh_rnn1, self.nx_rnn2)
+                   
+        if self.third_rnn:
+            # self.rnn3= LRU(in_features=nx_rnn2,out_features=self.nneur[1],state_features=self.nneur[0])
+            # self.rnn3= LRU(in_features=self.nneur[1],out_features=self.nneur[1],state_features=self.nneur[1])
+            # self.mlp3  = nn.Linear(self.nneur[1], self.nneur[1])
+            # self.SeqLayer3 = SequenceLayer(nlay=self.nlay,nneur=self.nneur[1],layernorm=True)
+            if self.use_glu_layers: self.SeqLayer3 = GLU(nlay=self.nlay,nneur=self.nneur[2],layernorm=glu_layernorm)
+
+        if self.concat:
+            nx_last = self.ny_rnn1 + self.nh_rnn2
+            if self.third_rnn:  
+                nx_last += self.nh_rnn2
+        else:
+            nx_last = self.nh_rnn2
+            
+        if self.use_intermediate_mlp:
+            self.mlp_latent = nn.Linear(nx_last, self.nh_latent)
+            nx_last = self.nh_latent
+
+        self.mlp_output        = nn.Linear(nx_last, self.ny)
+
+    def reset_states(self):
+        if self.init_with_state_and_sfc:
+            self.state1 = None
+        if self.autoregressive:
+            self.rnn1_mem = None
+            # self.rnn2_mem = None
+
+    def detach_states(self):
+        if self.init_with_state_and_sfc:
+            self.state1 = self.state1.detach()
+        if self.autoregressive:
+            self.rnn1_mem = self.rnn1_mem.detach()
+            # self.rnn2_mem = self.rnn2_mem.detach()
+        
+    def forward(self, inputs_main, inputs_sfc):
+
+        # print("Shape inputs main", inputs_main.shape)
+        batch_size = inputs_main.shape[0]
+        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device=self.device
+        if self.autoregressive:
+            if self.rnn1_mem is None: 
+                self.rnn1_mem = torch.randn((batch_size, self.nlay, self.nh_latent),dtype=self.dtype,device=device)
+    
+            # if self.rnn2_mem is None: 
+            #     self.rnn2_mem = torch.randn(batch_size, self.nlay, self.nh_latent ,device=device)
+        if self.add_pres:
+            sp = inputs_sfc[:,-1]
+            pres  = self.preslay(sp)
+            inputs_main = torch.cat((inputs_main,torch.unsqueeze(pres,2)),dim=2)
+        
+        if self.model_type=="S5" and self.pres_step_scale:
+                refp = inputs_main[:,:,-1].clone().detach()
+        
+        inputs_main = torch.flip(inputs_main, [1])
+        
+        if self.model_type=="S5" and self.pres_step_scale:
+                refp_rev = inputs_main[:,:,-1].clone().detach()
+
+        if self.model_type in ["Mamba","GSS"]:#,,"QRNN"]:
+            #Mamba doesnt support providing the state, so as a hack we instead
+            # concatenate the vertical (sequence) inputs with tiled scalars
+            inputs_sfc_tiled = torch.tile(torch.unsqueeze(inputs_sfc,1),(1,self.nlay,1))
+            inputs_main = torch.cat((inputs_main,inputs_sfc_tiled), dim=2)
+        else:
+            # Initial states can be a vector of shape (state_features,) or a matrix of shape (batch_size, state_features)
+            if self.init_with_state_and_sfc:
+                if self.state1==None:
+                    self.state1 =  torch.randn((batch_size, self.nh_rnn1),dtype=self.dtype,device=device)
+    
+                init_inputs = torch.cat((inputs_sfc,self.state1), dim=1)
+            else:
+                init_inputs = inputs_sfc
+                
+            init_states = self.mlp_surface1(init_inputs)
+            # init_states = nn.Softsign()(init_states)
+            init_states = nn.Tanh()(init_states)
+            # print("shape init states" , init_states.shape)
+        # print("shape inp main inp", inputs_main.shape)
+
+        if self.use_initial_mlp:
+            rnn1_input = self.mlp_initial(inputs_main)
+            rnn1_input = nn.Tanh()(rnn1_input)
+        else:
+            rnn1_input = inputs_main
+        # print("shape rnn1 inp", rnn1_input.shape)
+
+        if self.autoregressive and self.model_type != "SRU_2D":
+            rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
+
+        # print("shape rnn1 inp", rnn1_input.shape)
+            
+        # B_tilde, C_tilde = self.rnn1.seq.get_BC_tilde()
+        # print("shape B tild", B_tilde.shape, "C tild", C_tilde.shape)
+        # shape B tild torch.Size([96, 96]) C tild torch.Size([96, 96])
+        
+        # if self.layernorm:
+        #     rnn1_input = self.norm(rnn1_input)
+        if self.model_type=="S5":
+            if self.pres_step_scale:
+                out = self.rnn1(rnn1_input,state=init_states, step_scale=refp_rev)
+                # pres_rev = torch.flip(pres, [1])        
+                # out = self.rnn1(rnn1_input,state=init_states, step_scale=pres_rev)
+            else:
+                out = self.rnn1(rnn1_input,state=init_states)
+                # out,h = self.rnn1(rnn1_input,state=init_states,return_state=True)
+                # print("OUT", out[0,-1,0], "STATE", h[0,0])
+                # OUT tensor(-0.2206, device='cuda:0', grad_fn=<SelectBackward0>) STATE tensor(0.0096+0.0025j
+        elif self.model_type in ["Mamba","GSS"]:#,"QRNN"]:
+            out = self.rnn1(rnn1_input) 
+        elif self.model_type == "QRNN":
+            init_states2 = self.mlp_surface2(init_inputs)
+            init_states2 = nn.Tanh()(init_states2)
+            init_states = (init_states, init_states2)
+            out = self.rnn1(rnn1_input,init_states) 
+
+        elif self.model_type=="SRU":
+            # print("init shape", init_states.shape)
+            # init_states = init_states.view((1,batch_size,-1)) 
+            out,c = self.rnn1(rnn1_input,init_states) 
+        elif self.model_type=="SRU_2D":
+            # print("init shape", init_states.shape)
+            out,c = self.rnn1(rnn1_input,init_states, self.rnn1_mem) 
+        elif self.model_type=="MinGRU":
+            init_states = init_states.view((batch_size,1, -1)) 
+            out = self.rnn1(rnn1_input,init_states)      
+        elif self.model_type=="GateLoop":
+            init_states2 = self.mlp_surface2(init_inputs)
+            init_states2 = nn.Tanh()(init_states2)
+            cache = [init_states.view(batch_size*self.nh_rnn1,1), init_states2.view(batch_size*self.nh_rnn1,1)]
+            out = self.rnn1(rnn1_input,cache=cache)          
+            # out = self.rnn1(rnn1_input)          
+
+        else:
+            # out = self.rnn1(rnn1_input,state=init_states) 
+            out = self.rnn1(rnn1_input,init_states) 
+        # out = self.rnn1(rnn1_input)
+        
+        if self.init_with_state_and_sfc: 
+            self.state1 = out[:,-1,:].clone()
+            
+        init_states2 = None 
+            
+        out = torch.flip(out, [1])
+        # print("shape rnn1 out", out.shape)
+
+        if self.use_glu_layers: 
+            out = self.SeqLayer1(out)
+            # out = self.SeqLayer15(out)
+        elif self.reduce_dim_with_mlp:
+            out = self.reduce_dim_mlp(out)
+        # if self.autoregressive:
+        #     rnn2_input = torch.cat((out,self.rnn2_mem), axis=2)
+        # else:
+        #     rnn2_input = out 
+        rnn2_input = out  
+        # print("shape rnn2 inp", rnn2_input.shape)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
+        if self.model_type=="S5":
+            if self.pres_step_scale:
+                out2 = self.rnn2(rnn2_input, state=init_states2,step_scale=refp)
+            else:
+                out2 = self.rnn2(rnn2_input, state=init_states2)
+        elif self.model_type in ["Mamba","GSS"]:#,,"QRNN"]:
+            out2 = self.rnn2(rnn2_input)    
+        elif self.model_type in ["SRU","SRU_2D"]:
+            out2,c = self.rnn2(rnn2_input,init_states2) 
+        elif self.model_type=="MinGRU":
+            init_states2 = torch.randn((batch_size, 1, self.nh_rnn2),dtype=self.dtype,device=device)
+            out2 = self.rnn2(rnn2_input,init_states2)   
+        elif self.model_type=="GateLoop":
+            out2 = self.rnn2(rnn2_input)      
+        else:
+            out2 = self.rnn2(rnn2_input,init_states2)
+        # if self.layernorm:
+        #     out2 = self.normrnn2(out2)                                                                                                                                                                                                                                                                                                                            
+        # self.state2 = self._detach_state(state2)
+        #self.state = state
+        
+        if self.use_glu_layers: 
+            out2 = self.SeqLayer2(out2)
+
+
+        if self.concat:
+            outs  = torch.cat((out,out2),axis=2)
+        else:
+            outs = out2
+            
+        if self.use_intermediate_mlp:
+            outs = self.mlp_latent(outs)
+            
+        if self.autoregressive:
+            
+            # self.rnn2_mem = torch.clone(hidden_fin)
+            # if self.third_rnn: 
+            #     self.rnn1_mem = torch.clone(hidden_fin, [1])
+            # else:
+            #     out3 = torch.flip(out3, [1])
+            self.rnn1_mem = torch.flip(outs, [1])
+        
+        outs = self.mlp_output(outs)
+        
+        if self.dtype==torch.bfloat16:
+            outs = outs.to(torch.float32)
+            
+        return outs
         

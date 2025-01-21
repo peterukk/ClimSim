@@ -10,6 +10,7 @@ import numpy as np
 import torch 
 import torch.nn as nn
 
+
 def corrcoeff_pairs_batchfirst(A, B):
     nb, nlev, nx = A.shape
     # A and B are (N,M1,M2) vectors. 
@@ -93,18 +94,18 @@ def mse(y_true, y_pred):
     return mse
 
 
-def loss_con(y_true_norm, y_pred_norm, y_true, y_pred, sp, _lambda):
+# def loss_con(y_true_norm, y_pred_norm, y_true, y_pred, sp, _lambda):
 
-    energy = energy_metric(y_true, y_pred, sp, hyai,hybi)
-    #mse = torch.mean(torch.square(y_pred- y_true))
-    mse = my_mse_flatten(y_true_norm, y_pred_norm)
-    loss = mse + _lambda*energy
-    return loss, energy, mse
+#     energy = energy_metric(y_true, y_pred, sp, hyai,hybi)
+#     #mse = torch.mean(torch.square(y_pred- y_true))
+#     mse = my_mse_flatten(y_true_norm, y_pred_norm)
+#     loss = mse + _lambda*energy
+#     return loss, energy, mse
 
-def get_loss_con(hyai, hybi, _lambda, denorm_func):
-    def hybrid_loss(y_true_norm, y_pred_norm, y_true, y_pred, sp):
-        return loss_con(y_true_norm, y_pred_norm, y_true, y_pred, sp, _lambda)
-    return hybrid_loss
+# def get_loss_con(hyai, hybi, _lambda, denorm_func):
+#     def hybrid_loss(y_true_norm, y_pred_norm, y_true, y_pred, sp):
+#         return loss_con(y_true_norm, y_pred_norm, y_true, y_pred, sp, _lambda)
+#     return hybrid_loss
 
 def my_hybrid_loss(mse, energy, _lambda):
     loss = mse + _lambda*energy
@@ -114,8 +115,3 @@ def get_hybrid_loss(_lambda):
     def hybrid_loss(mse, energy):
         return my_hybrid_loss(mse, energy, _lambda)
     return hybrid_loss
-
-# metric_h_con = get_energy_metric(hyai, hybi)
-# #loss_fn = my_mse_flatten
-# _lambda = torch.tensor(1.0e-7) 
-# loss_fn = get_hybrid_loss(_lambda)
