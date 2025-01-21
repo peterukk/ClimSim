@@ -1,15 +1,15 @@
 #!/bin/sh 
 #SBATCH --job-name=create_data
 # name for the queue  
-#SBATCH --output=%x.%j.out
+#SBATCH --output=logs/%x.%j.out
 # output filename  
 #SBATCH --partition=shared 
 # use default queue 
 #SBATCH --ntasks=1
 # No parallelisation
-#SBATCH --time=3:00:00 
+#SBATCH --time=12:00:00 
 # Guide on how long this will run for 
-#SBATCH --mem-per-cpu=200gb
+#SBATCH --mem-per-cpu=12gb
 # Bigger jobs need more memory allocation
 
 
@@ -29,7 +29,9 @@ cd /network/group/aopp/predict/HMC009_UKKONEN_CLIMSIM/ClimSim/preprocessing/
 bash -c "python -c \"print('hello world'); import sys; print(sys.version) \""
 
 echo "running python"
-python3 create_npy_data.py
+# python3 create_npy_data.py
+python3 create_npy_data_new.py
+
 echo "got here"
 #python create_npy_data.py &
 wait

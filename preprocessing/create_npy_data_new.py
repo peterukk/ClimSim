@@ -11,9 +11,9 @@ grid_path = '../grid_info/ClimSim_low-res_grid-info.nc'
 norm_path = './normalizations/'
 
 grid_info = xr.open_dataset(grid_path)
-input_mean = xr.open_dataset(norm_path + 'inputs/input_mean.nc').astype(np.float32)
-input_max = xr.open_dataset(norm_path + 'inputs/input_max.nc').astype(np.float32)
-input_min = xr.open_dataset(norm_path + 'inputs/input_min.nc').astype(np.float32)
+input_mean = xr.open_dataset(norm_path + 'inputs/input_mean_v4_pervar.nc').astype(np.float32)
+input_max = xr.open_dataset(norm_path + 'inputs/input_max_v4_pervar.nc').astype(np.float32)
+input_min = xr.open_dataset(norm_path + 'inputs/input_min_v4_pervar.nc').astype(np.float32)
 output_scale = xr.open_dataset(norm_path + 'outputs/output_scale.nc').astype(np.float32)
 
 ml_backend = 'pytorch'
@@ -39,8 +39,8 @@ data.data_path = "/network/group/aopp/predict/HMC009_UKKONEN_CLIMSIM/ClimSim_dat
 data_save_path =  "/network/group/aopp/predict/HMC009_UKKONEN_CLIMSIM/ClimSim_data/ClimSim_low-res-expanded/train/preprocessed/"
 # set inputs and outputs to V1 subset
 #data.set_to_v1_vars()
-data.set_to_v2_vars()
-print("Set to v2 vars", flush=True)
+data.set_to_v4_rnn_vars()
+
 
 # set regular expressions for selecting training data
 #data.set_regexps(data_split = 'train', 
@@ -50,13 +50,13 @@ print("Set to v2 vars", flush=True)
 #regexp0 = 'E3SM-MMF.mlexpand.0001-02-01-*.nc'
 #regexp0 = 'E3SM-MMF.mlexpand.000[123]-*-*-*.nc'
 #regexp0 = 'E3SM-MMF.mlexpand.000[1]-*-*-*.nc'
-regexp0 = 'E3SM-MMF.mlexpand.000[4]-*-*-*.nc'
+
+year = 6
+regexp0 = 'E3SM-MMF.mlexpand.000[{}]-*-*-*.nc'.format(year)
 #regexp0 = 'E3SM-MMF.mlexpand.0001-0[2345]-*-*.nc'
 
 #savename = regexp0.removesuffix('*.nc')   
-savename = 'y123'
-savename = 'first4months'
-savename = "y4"
+savename = 'data_v4_rnn_year{}'.format(year)
 
 
 data.set_regexps(data_split = 'train',
@@ -76,6 +76,6 @@ data.set_filelist(data_split = 'train')
 print("Created list of files to extract data from", flush=True)
 
 print("Saving to ", data_save_path, flush=True)
-data.save_as_h5_keeplev(data_split = 'train', save_path = data_save_path, save_filename = savename)
+data.save_as_h5_keeplev_new(save_path = data_save_path, save_filename = savename)
 
 

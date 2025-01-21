@@ -300,6 +300,10 @@ class data_utils:
                             'slat',
                             'icol',] 
         
+        v4_rnn_inputs = [ x for x in self.v4_inputs if "prvphy" not in x ]  
+        v4_rnn_inputs = [ x for x in v4_rnn_inputs if "icol" not in x ]  
+        self.v4_rnn_inputs = v4_rnn_inputs
+
         self.v5_inputs = ['state_t',
                             'state_rh',
                             'state_qn',
@@ -597,6 +601,31 @@ class data_utils:
         self.target_feature_len = 368
         self.full_vars = True
 
+    def set_to_vx_vars(self):
+        '''
+        This function sets the inputs and outputs to the V4-RNN subset.
+        It also indicates the index of the surface pressure variable.
+        '''
+        self.input_vars = self.v4_rnn_inputs
+        self.target_vars = self.v4_outputs
+        #self.ps_index = 1500
+        #self.input_feature_len = 1525
+        #self.target_feature_len = 368
+        self.full_vars = True
+
+    def set_to_v4_rnn_vars(self):
+        '''
+        This function sets the inputs and outputs to the V4-RNN subset.
+        It also indicates the index of the surface pressure variable.
+        '''
+        self.input_vars = self.v4_rnn_inputs
+        self.target_vars = self.v4_outputs
+        #self.ps_index = 1500
+        #self.input_feature_len = 1525
+        #self.target_feature_len = 368
+        self.full_vars = True
+
+    
     def set_to_v4_vars(self):
         '''
         This function sets the inputs and outputs to the V4 subset.
@@ -608,7 +637,7 @@ class data_utils:
         self.input_feature_len = 1525
         self.target_feature_len = 368
         self.full_vars = True
-    
+
     def set_to_v5_vars(self):
         '''
         This function sets the inputs and outputs to the V5 subset.
@@ -970,7 +999,9 @@ class data_utils:
         if save_filename[-3:] !='.h5':
             save_filename = save_filename + '.h5'
             
-        h5_path = save_path + data_split + "_" + save_filename
+        # h5_path = save_path + data_split + "_" + save_filename
+        h5_path = save_path  + save_filename
+
         compression_level = 8
         print("Attempting to Save daily data input/output file to {}".format(h5_path), flush=True)
         print("Min max inputs_lev ({},{})".format(npy_input_lev.min(), npy_input_lev.max()))
@@ -1003,7 +1034,171 @@ class data_utils:
 
         del npy_input_lev, npy_input_sca, npy_output_lev, npy_output_sca
    
-    
+
+
+    def save_as_h5_keeplev_new(self, save_path = '', save_filename = ''):
+        '''
+        This function saves the training data as a .h5 file while keeping vertical structure
+        '''
+        filelist = self.get_filelist('train')
+        i = 0
+
+        vars_1D_inp = self.vars_1D_inp
+        vars_2D_inp = self.vars_2D_inp
+        vars_1D_outp = self.vars_1D_outp
+        vars_2D_outp = self.vars_2D_outp
+
+        if "lat" in vars_1D_inp:
+            vars_1D_inp.remove('lat'); vars_1D_inp.remove('lon')   
+
+        compression = "gzip"
+        compression = "lzf"
+        comp_level = 8
+        comp_level = 5
+
+        nrows = 0 # keep track of total number of rows, grows with each new file 
+        nlev = 60 
+        nx      = len(self.vars_2D_inp)
+        nx_sfc  = len(self.vars_1D_inp)
+        ny      = len(self.vars_2D_outp)
+        ny_sfc  = len(self.vars_1D_outp)
+
+        # if save_path not exist, create it
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+        # add "/" to the end of save_path if it does not exist
+        if save_path[-1] != '/':
+            save_path = save_path + '/'
+
+        if save_filename == '':
+            save_filename = 'data.h5'
+
+        if save_filename[-3:] !='.h5':
+            save_filename = save_filename + '.h5'
+
+        h5_path = save_path + save_filename
+        print("Shapes in new file will be: nx {} nx_sfc {} ny {} ny_sfc {}".format(nx,nx_sfc,ny,ny_sfc))
+        print("Saving preprocessed input/output data to {}".format(h5_path), flush=True)
+        print("Starting generator, len of filelist is {}".format(len(filelist)), flush=True)
+
+        with h5py.File(h5_path, 'w') as hdf:
+
+            for file in filelist:
+
+                # print(file)
+                # read inputs
+                ds_input = self.get_input(file)
+                # read targets
+                ds_target = self.get_target(file)
+                # print(ds_input)
+                # print("shape ds input", ds_input.shape)
+
+                # normalization, scaling
+                if self.normalize:
+                    ds_input = (ds_input - self.input_mean)/(self.input_max - self.input_min)
+                    ds_target = ds_target*self.output_scale
+                    # for varname in ds_input:
+                    #     ds_input = (ds_input - self.input_mean)/(self.input_max - self.input_min)
+                    #     ds_target = ds_target*self.output_scale
+                else:
+                    ds_input = ds_input.drop(['lat','lon'])
+
+                if i==0:
+
+                    for inpvar in vars_2D_inp:
+                        print("LEV-",inpvar, "min:", ds_input[inpvar].values.min(), "max:", ds_input[inpvar].values.max())
+
+                    for inpvar in vars_1D_inp:
+                        print("SCA-",inpvar, "min:", ds_input[inpvar].values.min(), "max:", ds_input[inpvar].values.max())
+
+                    for outpvar in vars_2D_outp:
+                        print("yLEV-",outpvar, "min:", ds_target[outpvar].values.min(), "max:", ds_target[outpvar].values.max())
+
+                    for outpvar in vars_1D_outp:
+                        print("ySCA-",outpvar, "min:", ds_target[outpvar].values.min(), "max:", ds_target[outpvar].values.max())
+
+
+                # stack
+                # ds = ds.stack({'batch':{'sample','ncol'}})
+                ds_input = ds_input.stack({'batch':{'ncol'}})
+
+                ds_input_lev = ds_input[vars_2D_inp]
+                ds_input_lev = ds_input_lev.to_dataarray(dim='features', name='inputs_lev')
+
+                ds_input_scalar = ds_input[vars_1D_inp]
+                ds_input_scalar = ds_input_scalar.to_dataarray(dim='features', name='inputs_scalar')
+                ds_target = ds_target.stack({'batch':{'ncol'}})
+
+                ds_target_lev = ds_target[vars_2D_outp]
+                ds_target_lev = ds_target_lev.to_dataarray(dim='features', name='outputs_lev')
+
+                ds_target_scalar = ds_target[vars_1D_outp]
+                ds_target_scalar = ds_target_scalar.to_dataarray(dim='features', name='outputs_scalar')
+
+
+                input_lev = np.transpose(ds_input_lev.values)
+                input_sca = np.transpose(ds_input_scalar.values)
+                output_lev = np.transpose(ds_target_lev.values)
+                output_sca = np.transpose(ds_target_scalar.values)
+
+                ds_input.close(); ds_target.close()
+                ds_input_lev.close(); ds_input_scalar.close()
+                ds_target_lev.close(); ds_target_scalar.close()
+
+                # if i % 20 == 1: 
+                #     print("i = {}, shape input lev {}; input_sca {}  ".format(i, npy_input_lev.shape, npy_input_sca.shape),flush=True)
+
+                if self.normalize:
+                    # replace inf and nan with 0
+                    input_lev[np.isinf(input_lev)] = 0 ; input_lev[np.isnan(input_lev)] = 0
+                    input_sca[np.isinf(input_sca)] = 0 ; input_sca[np.isnan(input_sca)] = 0
+                    output_lev[np.isinf(output_lev)] = 0 ; output_lev[np.isnan(output_lev)] = 0
+                    output_sca[np.isinf(output_sca)] = 0 ; output_sca[np.isnan(output_sca)] = 0
+
+                # Now save to the HDF5 file 
+                nrows = nrows + input_lev.shape[0]
+
+                if i==0:
+                    xlay = hdf.create_dataset("input_lev", (nrows, nlev, nx), maxshape=(None, nlev, nx),
+                                                    compression=compression, dtype='float32')#, compression_opts=comp_level)
+                    xsfc = hdf.create_dataset("input_sca", (nrows, nx_sfc), maxshape=(None, nx_sfc),
+                                                    compression=compression, dtype='float32')#, compression_opts=comp_level)
+
+                    ylay = hdf.create_dataset("output_lev", (nrows, nlev, ny), maxshape=(None, nlev, ny),
+                                                    compression=compression, dtype='float32')#, compression_opts=comp_level)
+                    ysfc = hdf.create_dataset("output_sca", (nrows, ny_sfc), maxshape=(None, ny_sfc),
+                                                    compression=compression, dtype='float32')#, compression_opts=comp_level)       
+
+                    xlay[:] = input_lev; xlay.attrs['varnames'] = vars_2D_inp
+                    xsfc[:] = input_sca; xsfc.attrs['varnames'] = vars_1D_inp
+
+                    ylay[:] = output_lev; ylay.attrs['varnames'] = vars_2D_outp
+                    ysfc[:] = output_sca; ysfc.attrs['varnames'] = vars_1D_outp
+
+                    print("Min, max shape xlay:", input_lev.min(), input_lev.max(), input_lev.shape)
+                    print("Min, max shape xsfc:", input_sca.min(), input_sca.max(), input_sca.shape)
+                    print("Min, max shape ylay:", output_lev.min(), output_lev.max(), output_lev.shape)
+                    print("Min, max shape ysfc:", output_sca.min(), output_sca.max(), output_sca.shape)
+
+                else:
+                    xlay =  hdf['input_lev']
+                    xsfc =  hdf['input_sca']
+                    ylay =  hdf['output_lev']
+                    ysfc =  hdf['output_sca']
+
+                    xlay.resize(nrows, axis=0); xlay[i0:nrows, :] = input_lev
+                    xsfc.resize(nrows, axis=0); xsfc[i0:nrows, :] = input_sca
+                    ylay.resize(nrows, axis=0); ylay[i0:nrows, :] = output_lev
+                    ysfc.resize(nrows, axis=0); ysfc[i0:nrows, :] = output_sca
+
+                i0 = nrows
+                i = i +1
+
+                gc.collect()
+
+            # del npy_input_lev, npy_input_sca, npy_output_lev, npy_output_sca
+
+
     def load_ncdata_with_generator(self, data_split):
         '''
         This function works as a dataloader when training the emulator with raw netCDF files.

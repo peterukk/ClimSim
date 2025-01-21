@@ -50,13 +50,13 @@ print("Set to v2 vars", flush=True)
 #regexp0 = 'E3SM-MMF.mlexpand.0001-02-01-*.nc'
 #regexp0 = 'E3SM-MMF.mlexpand.000[123]-*-*-*.nc'
 #regexp0 = 'E3SM-MMF.mlexpand.000[1]-*-*-*.nc'
-regexp0 = 'E3SM-MMF.mlexpand.000[4]-*-*-*.nc'
+regexp0 = 'E3SM-MMF.mlexpand.000[3]-*-*-*.nc'
 #regexp0 = 'E3SM-MMF.mlexpand.0001-0[2345]-*-*.nc'
 
 #savename = regexp0.removesuffix('*.nc')   
 savename = 'y123'
 savename = 'first4months'
-savename = "y4"
+savename = "y3"
 
 
 data.set_regexps(data_split = 'train',
@@ -77,5 +77,4 @@ print("Created list of files to extract data from", flush=True)
 
 print("Saving to ", data_save_path, flush=True)
 data.save_as_h5_keeplev(data_split = 'train', save_path = data_save_path, save_filename = savename)
-
 

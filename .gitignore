@@ -1,3 +1,4 @@
+*.out
 website/_build/
 website/demo_notebooks
 website/evaluation
