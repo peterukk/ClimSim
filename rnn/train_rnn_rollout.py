@@ -647,8 +647,7 @@ for epoch in range(num_epochs):
 R2 = val_runner.metrics["R2_lev"]
 
 import matplotlib.pyplot as plt
-plt.plot(R2[:,1],np.arange(60))
-plt.gca().invert_yaxis()
+
 
 labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
 y = np.arange(60)
@@ -663,18 +662,10 @@ for i in range(6):
     
 
 x = np.arange(60)
-ncols, nrows = 1,6
+ncols, nrows = 6,1
 fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
                         layout="constrained")
-axs[0].plot(x, R2[:,0]); axs[0].set_title("dT/dt")
-
-axs[1].plot(x, R2[:,1]); axs[1].set_title("dq/dt")
-
-axs[2].plot(x, R2[:,2]); axs[2].set_title("dqliq/dt")
-
-axs[3].plot(x, R2[:,3]); axs[3].set_title("dqice/dt")
-
-axs[4].plot(x, R2[:,4]); axs[4].set_title("dU/dt")
-axs[5].plot(x, R2[:,5]); axs[5].set_title("dV/dt")
-for i in range(5):
+for i in range(6):
+    axs[i].plot(x, R2[:,i]); 
+    axs[i].set_title(labels[i])
     axs[i].set_ylim(0,1)
