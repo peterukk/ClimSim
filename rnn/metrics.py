@@ -41,17 +41,52 @@ def my_mse(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
     mse2 = torch.mean(torch.square(y_pred_sfc - y_true_sfc))
     return (mse1+mse2)/2
 
-def my_mse_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
+# def my_mse_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
 
-    if len(y_true_lay.shape)==4: # autoregressive, time dimension included 
-        y_pred_flat =  torch.cat(( y_pred_lay.flatten(start_dim=0,end_dim=1).flatten(start_dim=1) , y_pred_sfc.flatten(start_dim=0,end_dim=1) ),dim=1)
-        y_true_flat =  torch.cat(( y_true_lay.flatten(start_dim=0,end_dim=1).flatten(start_dim=1) , y_true_sfc.flatten(start_dim=0,end_dim=1) ),dim=1)
-    else:
-        y_pred_flat =  torch.cat((y_pred_lay.flatten(start_dim=1),y_pred_sfc),dim=1)
-        y_true_flat =  torch.cat((y_true_lay.flatten(start_dim=1),y_true_sfc),dim=1)
+#     if len(y_true_lay.shape)==4: # autoregressive, time dimension included 
+#         y_pred_flat =  torch.cat(( y_pred_lay.flatten(start_dim=0,end_dim=1).flatten(start_dim=1) , y_pred_sfc.flatten(start_dim=0,end_dim=1) ),dim=1)
+#         y_true_flat =  torch.cat(( y_true_lay.flatten(start_dim=0,end_dim=1).flatten(start_dim=1) , y_true_sfc.flatten(start_dim=0,end_dim=1) ),dim=1)
+#     else:
+#         y_pred_flat =  torch.cat((y_pred_lay.flatten(start_dim=1),y_pred_sfc),dim=1)
+#         y_true_flat =  torch.cat((y_true_lay.flatten(start_dim=1),y_true_sfc),dim=1)
+
+#     mse = torch.mean(torch.square(y_pred_flat - y_true_flat))
+#     return mse
+
+def mse_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc, weights=None):
+
+    if weights is not None:
+        y_pred_lay = weights*y_pred_lay
+        y_true_lay = weights*y_true_lay
+        
+    y_pred_flat =  torch.cat((y_pred_lay.flatten(start_dim=1),y_pred_sfc),dim=1)
+    y_true_flat =  torch.cat((y_true_lay.flatten(start_dim=1),y_true_sfc),dim=1)
 
     mse = torch.mean(torch.square(y_pred_flat - y_true_flat))
     return mse
+
+def huber_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc, weights=None):
+    
+    if weights is not None:
+        y_pred_lay = weights*y_pred_lay
+        y_true_lay = weights*y_true_lay
+
+    y_pred_flat =  torch.cat((y_pred_lay.flatten(start_dim=1),y_pred_sfc),dim=1)
+    y_true_flat =  torch.cat((y_true_lay.flatten(start_dim=1),y_true_sfc),dim=1)
+    
+    criterion = nn.SmoothL1Loss()
+    err =  criterion(y_pred_flat, y_true_flat)
+    return err
+
+def get_mse_flatten(weights):
+    def my_mse_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
+        return mse_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc, weights=weights)
+    return my_mse_flatten
+
+def get_huber_flatten(weights):
+    def my_huber_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
+        return huber_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc, weights=weights)
+    return my_huber_flatten
 
 def energy_metric(yto, ypo, sp, hyai,hybi):
     
@@ -62,10 +97,11 @@ def energy_metric(yto, ypo, sp, hyai,hybi):
         thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
                              + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
     
-        dq_pred = ypo[:,:,0]
-        dT_pred = ypo[:,:,1] 
-        dq_true = yto[:,:,0]
-        dT_true = yto[:,:,1]
+        dT_pred = ypo[:,:,0]
+        dq_pred = ypo[:,:,1] 
+        
+        dT_true = yto[:,:,0]
+        dq_true = yto[:,:,1]
         
         energy=torch.mean(torch.square(torch.sum(dq_pred*thick*(Lv)+dT_pred*thick*cp,1)
                                 -      torch.sum(dq_true*thick*(Lv)+dT_true*thick*cp,1)))
@@ -92,6 +128,7 @@ def get_energy_metric(hyai, hybi):
 def mse(y_true, y_pred):
     mse = torch.mean(torch.square(y_pred- y_true))
     return mse
+
 
 
 # def loss_con(y_true_norm, y_pred_norm, y_true, y_pred, sp, _lambda):
