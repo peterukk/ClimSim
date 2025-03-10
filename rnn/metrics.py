@@ -41,6 +41,19 @@ def my_mse(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
     mse2 = torch.mean(torch.square(y_pred_sfc - y_true_sfc))
     return (mse1+mse2)/2
 
+
+def compute_biases(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
+    mean_t_lay = torch.nanmean(y_true_lay,dim=(0,1))
+    mean_p_lay = torch.nanmean(y_pred_lay,dim=(0,1))
+    
+    mean_t_sfc = torch.nanmean(y_true_sfc,dim=(0))
+    mean_p_sfc = torch.nanmean(y_pred_sfc,dim=(0))
+    
+    biases_lev = mean_t_lay - mean_p_lay
+    biases_sfc = mean_t_sfc - mean_p_sfc
+
+    return biases_lev.detach().cpu().numpy(), biases_sfc.detach().cpu().numpy()
+
 # def my_mse_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
 
 #     if len(y_true_lay.shape)==4: # autoregressive, time dimension included 

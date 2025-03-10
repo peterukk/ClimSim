@@ -1,5 +1,7 @@
 rnn/tmp
 rnn/wandb
+rnn/predfrac
+rnn/*.pt 
 
 *.out
 website/_build/

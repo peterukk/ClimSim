@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 import time 
 
 
+nneur = (128,128)
 
 
 fdir = "/media/peter/CrucialBX500/data/ClimSim/ClimSim/rnn/saved_models/"
@@ -35,6 +36,11 @@ use_initial_mlp = True
 use_intermediate_mlp = True
 memory = "Hidden"
 
+# model_path = fdir + "LSTM-Hidden_lr0.001.neur160-160.num32703.pt"  # nh_mem = 16
+# nneur = (160,160)
+
+
+
 
 
 nx, nx_sfc, ny, ny_sfc = 15, 19, 5, 8
@@ -50,7 +56,6 @@ add_refpres = False
 add_pres = True 
 ensemble_size = 1
 add_stochastic_lever = False
-nneur = (128,128)
 
 sfc_vars_remove = (17, 18, 19, 20, 21)
 
@@ -242,7 +247,7 @@ device = torch.device("cpu")
 scripted_model = torch.jit.script(new_model)
 scripted_model = scripted_model.eval()
 
-f
+
 
 fpath_data = '/media/peter/samsung/data/ClimSim_low_res_expanded/data_v4_rnn_nonorm_year8.h5'
 
@@ -296,7 +301,7 @@ for jj in range(ntime):
         # out_test, rnn1_mem = scripted_model(x0,x1,rnn1_mem)
         out_test = scripted_model(x0,x1,rnn1_mem)
         rnn1_mem = torch.reshape(out_test[:,368:], (bsize,60,16))
-        outs.append(out_test)
+        outs.append(out_test[:,0:360])
     j = j + bsize
     
 outs = torch.stack(outs)
@@ -323,13 +328,16 @@ gc.collect()
 
 
 R2 = np.zeros((60,6))
+bias = np.zeros((60,6))
 
 for i in range(6): 
     for j in range(60):
         # R2[j,i] = np.corrcoef(y_lev_np[:,j,i].flatten(),out_lev_np[:,j,i].flatten())[0,1]
         # R2[j,i] = np.corrcoef(y_lev_np[ns-bsize:ns,j,i].flatten(),out_lev_np[:,j,i].flatten())[0,1]
-        R2[j,i] = np.corrcoef(y_lev_np[:,j,i].flatten(),out_lev_np[:,j,i].flatten())[0,1]
-
+        truth, pred = y_lev_np[:,j,i].flatten(),out_lev_np[:,j,i].flatten()
+        R2[j,i] = np.corrcoef(truth, pred)[0,1]
+        bias[j,i] = np.nanmean(truth - pred)
+        
 R2[np.isnan(R2)] = 0
 
 
@@ -351,5 +359,19 @@ for i in range(6):
 
 fig.subplots_adjust(hspace=0)
 
-# save_file_torch = "v4_rnn-memory_wrapper_constrained_huber.pt"
+
+fig, axs = plt.subplots(ncols=nrows, nrows=ncols, figsize=(5.5, 3.5)) #layout="constrained")
+for i in range(6):
+    axs[i].plot(x, bias[:,i]); 
+    axs[i].set_title(labels[i])
+    # axs[i].set_ylim(0,1)
+    axs[i].set_xlim(0,60)
+    axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
+    # axs[i].set_yticklabels([])
+    # axs[i].set_xticklabels([])
+
+fig.subplots_adjust(hspace=0.6)
+# fig.suptitle("Bias for val first 2160 batches")
+
+# save_file_torch = "v4_rnn-memory_wrapper_constrained_huber_160.pt"
 # scripted_model.save(save_file_torch)

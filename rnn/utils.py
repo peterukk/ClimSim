@@ -10,6 +10,7 @@ import numpy as np
 from numba import config, njit, threading_layer
 import numpy as np
 import gc
+import metrics as metrics
 from torchmetrics.regression import R2Score
 import time
 from metrics import corrcoeff_pairs_batchfirst 
@@ -98,231 +99,251 @@ lbd_qn = np.array([10000000.        , 10000000.        , 10000000.        ,
 # liquid_ratio = (T_denorm - 253.16) / 20.0 
 # liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
         
-# class model_train_eval:
-#     def __init__(self, dataloader, model, batch_size, nlev, ny, 
-#                  autoregressive, train, scaler, optimizer, mp_autocast):
-#         super().__init__()
+class model_train_eval:
+    def __init__(self, dataloader, model, conf, train):
+                 #batch_size = 384, autoregressive=True, train=True):
+        super().__init__()
+        self.loader = dataloader
+        self.train = train
+        self.model = model 
+        self.report_freq = 800
+        self.batch_size = conf['batch_size']
+        self.nlay = conf['nlay']
+        self.autoregressive = conf['autoregressive']
+        self.cuda = conf['cuda']
+        self.device =  torch.device("cuda" if self.cuda else "cpu")
+        self.metric_R2 =  R2Score(num_outputs= conf['ny_pp']).to(self.device) 
+        self.metrics = {}
 
-#         self.loader = dataloader
-#         self.train = train
-#         self.report_freq = 800
-#         self.batch_size = batch_size
-#         self.model = model 
-#         self.scaler = scaler
-#         self.optimizer = optimizer
-#         self.mp_autocast = mp_autocast
-#         self.autoregressive = autoregressive
-#         if self.autoregressive:
-#             self.model.reset_states()
-#         self.nlev = nlev 
-#         self.ny = ny
-#         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#         self.metric_R2 =  R2Score().to(self.device) 
-#         self.metric_R2_heating =  R2Score().to(self.device) 
-#         self.metric_R2_precc =  R2Score().to(self.device) 
-#         self.metric_R2_moistening =  R2Score().to(self.device) 
-
-#         self.metrics= {'loss': 0, 'mean_squared_error': 0,  # the latter is just MSE
-#                         'mean_absolute_error': 0, 'R2' : 0, 'R2_heating' : 0,'R2_moistening' : 0,  
-#                         'R2_precc' : 0, 'R2_lev' : np.zeros((self.nlev,self.ny)),
-#                         'h_conservation' : 0 }
-
-#     def eval_one_epoch(self, epoch, timewindow=1):
-#         report_freq = self.report_freq
-#         running_loss = 0.0 
-#         epoch_loss = 0.0
-#         epoch_mse = 0.0; epoch_mae = 0.0
-#         epoch_R2precc = 0.0
-#         epoch_hcon = 0.0
-#         epoch_r2_lev = 0.0
-#         t_comp =0 
-#         if self.autoregressive:
-#             preds_lev = []; preds_sfc = []
-#             targets_lev = []; targets_sfc = [] 
-#             sps = []
-#         t0_it = time.time()
-#         j = 0; k = 0; k2=2    
-#         if self.autoregressive:
-#             loss_update_start_index = 60
-#         else:
-#             loss_update_start_index = 0
-#         for i,data in enumerate(self.loader):
-#             inputs_lev_chunks, inputs_sfc_chunks, targets_lev_chunks, targets_sfc_chunks = data
-#             inputs_lev_chunks   = inputs_lev_chunks.to(self.device)
-#             inputs_sfc_chunks   = inputs_sfc_chunks.to(self.device)
-#             targets_sfc_chunks  = targets_sfc_chunks.to(self.device)
-#             targets_lev_chunks  = targets_lev_chunks.to(self.device)
+    def eval_one_epoch(self, epoch, timewindow=1):
+        report_freq = self.report_freq
+        device = self.device
+        running_loss = 0.0; running_energy = 0.0
+        epoch_loss = 0.0; epoch_mse = 0.0; epoch_mae = 0.0
+        epoch_R2precc = 0.0; epoch_r2_lev = 0.0
+        epoch_hcon = 0.0
+        epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
+        epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
+        ny_pp = self.conf['ny_pp']; ny_sfc = self.conf['ny_sfc']
+        nlay = self.conf['nlay']
+        t_comp =0 
+        if self.autoregressive:
+            preds_lay = []; preds_sfc = []
+            targets_lay = []; targets_sfc = [] 
+            surf_pres = [];  x_lay_raw = []
+            yto_lay = []; yto_sfc = []
+        t0_it = time.time()
+        j = 0; k = 0 
+        if self.autoregressive:
+            rnn1_mem = torch.zeros(self.batch_size, self.nlay, self.model.nh_mem, device=self.device)
+            loss_update_start_index = 60
+        else:
+            loss_update_start_index = 0
             
-#             inputs_lev_chunks    = torch.split(inputs_lev_chunks, self.batch_size)
-#             inputs_sfc_chunks    = torch.split(inputs_sfc_chunks, self.batch_size)
-#             targets_sfc_chunks   = torch.split(targets_sfc_chunks, self.batch_size)
-#             targets_lev_chunks   = torch.split(targets_lev_chunks, self.batch_size)
-         
-#             # to speed-up IO, we loaded chunks=many batches, which now need to be divided into batches
-#             for ichunk in range(len(inputs_lev_chunks)):
-#                 inputs_lev = inputs_lev_chunks[ichunk]
-#                 inputs_sfc = inputs_sfc_chunks[ichunk]
-#                 target_lev = targets_lev_chunks[ichunk]
-#                 target_sfc = targets_sfc_chunks[ichunk]
-#                 sp = inputs_sfc[:,0:1] # surface pressure
+        for i,data in enumerate(self.loader):
 
+            # x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, ytos_lay_chk, ytos_sfc_chk, x_lay_raw_chk  = data
+            # x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk, ytos_lay_chk, ytos_sfc_chk  = data
+            x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk  = data
 
-#                 tcomp0= time.time()
-                    
-#                 if self.mp_autocast:
-#                     with torch.autocast(device_type=self.device.type, dtype=dtype):
-#                         pred_lev, pred_sfc = self.model(inputs_lev, inputs_sfc)
-#                 else:
-#                     pred_lev, pred_sfc = self.model(inputs_lev, inputs_sfc)
-                    
-#                 if self.autoregressive:
-#                     # In the autoregressive training case are gathering many time steps before computing loss
-#                     preds_lev.append(pred_lev)
-#                     preds_sfc.append(pred_sfc)
-#                     targets_lev.append(target_lev)
-#                     targets_sfc.append(target_sfc)
-#                     sps.append(sp) 
-                    
-#                 else:
-#                     preds_lev = pred_lev
-#                     preds_sfc = pred_sfc 
-#                     targets_lev = target_lev
-#                     targets_sfc = target_sfc
-#                     sps = sp
-                    
-#                 if (not self.autoregressive) or (self.autoregressive and (j+1) % timewindow==0):
+            # print(" x lay raw 0,50::", x_lay_raw_chk[0,50:,0])
+            x_lay_chk       = x_lay_chk.to(device)
+            x_lay_raw_chk   = x_lay_raw_chk.to(device)
+            x_sfc_chk       = x_sfc_chk.to(device)
+            targets_sfc_chk = targets_sfc_chk.to(device)
+            targets_lay_chk = targets_lay_chk.to(device)
             
-#                     if self.autoregressive:
-#                         preds_lev   = torch.stack(preds_lev)
-#                         preds_sfc   = torch.stack(preds_sfc)
-#                         targets_lev = torch.stack(targets_lev)
-#                         targets_sfc = torch.stack(targets_sfc)
-#                         sps         = torch.stack(sps)
-                                
-#                     if self.mp_autocast:
-#                         with torch.autocast(device_type=self.device.type, dtype=dtype):
-#                             #loss = loss_fn(targets_lev, targets_sfc, preds_lev, preds_sfc)
-                            
-#                             mse = my_mse_flatten(targets_lev, targets_sfc, preds_lev, preds_sfc)
-                            
-#                             ypo_lev, ypo_sfc = self.model.postprocessing(preds_lev, preds_sfc)
-#                             yto_lev, yto_sfc = self.model.postprocessing(targets_lev, targets_sfc)
-#                             sps_denorm = sp = sps*(sp_max - sp_min) + sp_mean
-#                             h_con = metric_h_con(yto_lev, ypo_lev, sps_denorm)
-                            
-#                             loss = loss_fn(mse, h_con)
-#                     else:
-#                         #loss = loss_fn(targets_lev, targets_sfc, preds_lev, preds_sfc)
-                        
-#                         mse = my_mse_flatten(targets_lev, targets_sfc, preds_lev, preds_sfc)
-#                         ypo_lev, ypo_sfc = self.model.postprocessing(preds_lev, preds_sfc)
-#                         yto_lev, yto_sfc = self.model.postprocessing(targets_lev, targets_sfc)
-#                         sps_denorm = sp = sps*(sp_max - sp_min) + sp_mean
-#                         h_con = metric_h_con(yto_lev, ypo_lev, sps_denorm)
-#                         loss = loss_fn(mse, h_con)
-                        
-#                     if self.train:
-#                         if use_scaler:
-#                             scaler.scale(loss).backward()
-#                             scaler.step(optimizer)
-#                             scaler.update()
-#                         else:
-#                             loss.backward()       
-#                             optimizer.step()
-            
-#                         optimizer.zero_grad()
-                            
-#                     running_loss    += loss.item()
-#                     #mae             = metrics.mean_absolute_error(targets_lev, preds_lev)
-#                     if j>loss_update_start_index:
-#                         with torch.no_grad():
-#                             epoch_loss      += loss.item()
-#                             #epoch_energy    += energy.item()
-#                             epoch_mse       += mse.item()
-#                             #epoch_mae       += mae.item()
-                        
-#                            # yto, ypo =  denorm_func(targets_lev, preds_lev)
-#                             # -------------- TO-DO:  DE-NORM OUTPUT --------------
-#                             #yto, ypo = targets_lev, preds_lev
+            x_lay_chk       = torch.split(x_lay_chk, self.batch_size)
+            x_lay_raw_chk   = torch.split(x_lay_raw_chk, self.batch_size)
+            x_sfc_chk       = torch.split(x_sfc_chk, self.batch_size)
+            targets_sfc_chk = torch.split(targets_sfc_chk, self.batch_size)
+            targets_lay_chk = torch.split(targets_lay_chk, self.batch_size)
 
-#                             epoch_hcon  += h_con.item()
-                            
-#                             self.metric_R2.update(ypo_lev.reshape((-1,ny)), yto_lev.reshape((-1,ny)))
-#                             self.metric_R2_heating.update(ypo_lev[:,:,0].reshape(-1,1), yto_lev[:,:,0].reshape(-1,1))
-#                             self.metric_R2_moistening.update(ypo_lev[:,:,1].reshape(-1,1), yto_lev[:,:,1].reshape(-1,1))
+            # to speed-up IO, we loaded chk=many batches, which now need to be divided into batches
+            # each batch is one time step
+            for ichunk in range(len(x_lay_chk)):
+                x_lay0 = x_lay_chk[ichunk]
+                x_lay_raw0 = x_lay_raw_chk[ichunk]
+                x_sfc0 = x_sfc_chk[ichunk]; sp0 = x_sfc0[:,0:1] 
+                target_lay0 = targets_lay_chk[ichunk]
+                target_sfc0 = targets_sfc_chk[ichunk]
 
-#                             self.metric_R2_precc.update(ypo_sfc[:,3].reshape(-1,1), yto_sfc[:,3].reshape(-1,1))
-                            
-#                             r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
-#                             epoch_R2precc += r2_np
-#                             #print("R2 numpy", r2_np, "R2 torch", self.metric_R2_precc(ypo_sfc[:,3:4], yto_sfc[:,3:4]) )
-
-#                             ypo_lev = ypo_lev.reshape(-1,self.nlev,self.ny).detach().cpu().numpy()
-#                             yto_lev = yto_lev.reshape(-1,self.nlev,self.ny).detach().cpu().numpy()
-
-#                             epoch_r2_lev += corrcoeff_pairs_batchfirst(ypo_lev, yto_lev) 
-#                            # if track_ks:
-#                            #     if (j+1) % max(timewindow*4,12)==0:
-#                            #         epoch_ks += kolmogorov_smirnov(yto,ypo).item()
-#                            #         k2 += 1
-#                             k += 1
-#                     if self.autoregressive:
-#                         preds_lev = []; preds_sfc = []
-#                         targets_lev = []; targets_sfc = [] 
-#                         sps = []
-#                     if self.autoregressive: 
-#                         self.model.detach_states()
+                tcomp0= time.time()
                 
-#                 t_comp += time.time() - tcomp0
-#                 # # print statistics 
-#                 if j % report_freq == (report_freq-1): # print every 200 minibatches
-#                     elaps = time.time() - t0_it
-#                     running_loss = running_loss / (report_freq/timewindow)
-#                     #running_energy = running_energy / (report_freq/timewindow)
-#                     r2raw = self.metric_R2.compute()
-#                     #r2raw_prec = self.metric_R2_precc.compute()
+                with torch.autocast(device_type=device.type, dtype=self.conf['dtype']):
+                    if self.autoregressive:
+                        preds_lay0, preds_sfc0, rnn1_mem = self.model(x_lay0, x_sfc0, rnn1_mem)
+                    else:
+                        preds_lay0, preds_sfc0 = self.model(x_lay0, x_sfc0)
 
+         
 
-#                     print("[{:d}, {:d}] Loss: {:.2e}  runR2: {:.2f},  elapsed {:.1f}s (compute {:.1f})" .format(epoch + 1, 
-#                                                     j+1, running_loss, r2raw, elaps, t_comp))
-#                     running_loss = 0.0
-#                     running_energy = 0.0
-#                     t0_it = time.time()
-#                     t_comp = 0
-#                 j += 1
+                if self.autoregressive:
+                    # In the autoregressive training case are gathering many time steps before computing loss
+                    preds_lay.append(preds_lay0)
+                    preds_sfc.append(preds_sfc0)
+                    targets_lay.append(target_lay0)
+                    targets_sfc.append(target_sfc0)
+                    surf_pres.append(sp0) 
+                    x_lay_raw.append(x_lay_raw0)                  
+                else:
+                    preds_lay = preds_lay0
+                    preds_sfc = preds_sfc0
+                    targets_lay = target_lay0
+                    targets_sfc = target_sfc0
+                    surf_pres = sp0
+                    x_lay_raw = x_lay_raw0
+                    # yto_lay = yto_lay0
+                    # yto_sfc = yto_sfc0
+                    
+                if (not self.autoregressive) or (self.autoregressive and (j+1) % timewindow==0):
+            
+                    if self.autoregressive:
+                        preds_lay   = torch.cat(preds_lay)
+                        preds_sfc   = torch.cat(preds_sfc)
+                        targets_lay = torch.cat(targets_lay)
+                        targets_sfc = torch.cat(targets_sfc)
+                        surf_pres   = torch.cat(surf_pres)
+                        x_lay_raw   = torch.cat(x_lay_raw)
+                        # yto_lay     = torch.cat(yto_lay)
+                        # yto_sfc     = torch.cat(yto_sfc)   
+                        
+                    with torch.autocast(device_type=device.type, dtype=self.conf['dtype']):
+                        #loss = loss_fn(targets_lay, targets_sfc, preds_lay, preds_sfc)
+                        
+                        main_loss = self.regular_loss(targets_lay, targets_sfc, preds_lay, preds_sfc)
+                        
+                        if self.conf['use_mp_constraint']:
+                            ypo_lay, ypo_sfc = self.model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
+                            with torch.no_grad(): 
+                                yto_lay, yto_sfc = self.model.pp_mp(targets_lay, targets_sfc, x_lay_raw )
+                            # ypo_lay, ypo_sfc, yto_lay, yto_sfc = model.pp_mp(preds_lay, preds_sfc, targets_lay, targets_sfc, x_lay_raw )
+                            # if i>10: print ("yto lay true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
+                            # if i>10: print ("yto lay pp-true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
 
-#         self.metrics['loss'] =  epoch_loss / k
-#         self.metrics['mean_squared_error'] = epoch_mse / k
-#         self.metrics["h_conservation"] =  epoch_hcon / k
+                        else:
+                            ypo_lay, ypo_sfc = self.model.postprocessing(preds_lay, preds_sfc)
+                            yto_lay, yto_sfc = self.model.postprocessing(targets_lay, targets_sfc)
+                        surf_pres_denorm = surf_pres*(self.sp_max - self.sp_min) + self.sp_mean
+                        h_con = self.metric_h_con(yto_lay, ypo_lay, surf_pres_denorm)
+                        
+                        if self.conf['use_energy_loss']: 
+                            loss = self.loss_fn(main_loss, h_con)
+                        else:
+                            loss = main_loss
 
-#         #self.metrics['energymetric'] = epoch_energy / k
-#         #self.metrics['mean_absolute_error'] = epoch_mae / k
-#         #self.metrics['ks'] =  epoch_ks / k2
-#         self.metrics['R2'] = self.metric_R2.compute()
-#         self.metrics['R2_heating'] = self.metric_R2_heating.compute()
-#         self.metrics['R2_moistening'] = self.metric_R2_moistening.compute()
+                    if self.train:
+                        if self.conf['use_scaler']:
+                            self.scaler.scale(loss).backward()
+                            self.scaler.step(self.optimizer)
+                            self.scaler.update()
+                        else:
+                            loss.backward()       
+                            self.optimizer.step()
+            
+                        self.optimizer.zero_grad()
+                            
+                    running_loss    += loss.item()
+                    running_energy  += h_con.item()
+                    #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
+                    if j>loss_update_start_index:
+                        with torch.no_grad():
+                            epoch_loss      += loss.item()
+                            if self.conf['loss_fn'] =="huber":
+                                epoch_mse       += main_loss.item()
+                            else:
+                                epoch_mse       += self.mse(targets_lay, targets_sfc, preds_lay, preds_sfc)
+                            #epoch_mae       += mae.item()
+                        
+                            epoch_hcon  += h_con.item()
+                            
+                            biases_lev, biases_sfc = metrics.compute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc)
+                            epoch_bias_lev += np.mean(biases_lev)
+                            epoch_bias_heating += biases_lev[0]
+                            epoch_bias_clw += biases_lev[2]
+                            epoch_bias_cli += biases_lev[3]
 
-#         #self.metrics['R2_precc'] = self.metric_R2_precc.compute()
-#         self.metrics['R2_precc'] = epoch_R2precc / k
+                            epoch_bias_sfc += np.mean(biases_sfc)
+
+                            self.metric_R2.update(ypo_lay.reshape((-1,ny_pp)), yto_lay.reshape((-1,ny_pp)))
+                                   
+                            r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
+                            epoch_R2precc += r2_np
+                            #print("R2 numpy", r2_np, "R2 torch", self.metric_R2_precc(ypo_sfc[:,3:4], yto_sfc[:,3:4]) )
+
+                            ypo_lay = ypo_lay.reshape(-1,nlay,ny_pp).detach().cpu().numpy()
+                            yto_lay = yto_lay.reshape(-1,nlay,ny_pp).detach().cpu().numpy()
+
+                            epoch_r2_lev += metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay) 
+                           # if track_ks:
+                           #     if (j+1) % max(timewindow*4,12)==0:
+                           #         epoch_ks += kolmogorov_smirnov(yto,ypo).item()
+                           #         k2 += 1
+                            k += 1
+                    if self.autoregressive:
+                        preds_lay = []; preds_sfc = []
+                        targets_lay = []; targets_sfc = [] 
+                        surf_pres = []; x_lay_raw = []
+                        yto_lay = []; yto_sfc = []
+                        
+                    if self.autoregressive: 
+                        # model.detach_states()
+                        rnn1_mem = rnn1_mem.detach()
+                        
+                t_comp += time.time() - tcomp0
+                # # print statistics 
+                if j % report_freq == (report_freq-1): # print every 200 minibatches
+                    elaps = time.time() - t0_it
+                    running_loss = running_loss / (report_freq/timewindow)
+                    running_energy = running_energy / (report_freq/timewindow)
+                    
+                    r2raw = self.metric_R2.compute()
+                    #r2raw_prec = self.metric_R2_precc.compute()
+
+                    #ypo_lay, ypo_sfc = model.postprocessing(preds_lay, preds_sfc)
+                    #yto_lay, yto_sfc = model.postprocessing(targets_lay, targets_sfc) 
+                    #r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
+
+                    print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  runR2: {:.2f},  elapsed {:.1f}s (compute {:.1f})" .format(epoch + 1, 
+                                                    j+1, running_loss,running_energy, r2raw, elaps, t_comp))
+                    running_loss = 0.0
+                    running_energy = 0.0
+                    t0_it = time.time()
+                    t_comp = 0
+                j += 1
+
+        self.metrics['loss'] =  epoch_loss / k
+        self.metrics['mean_squared_error'] = epoch_mse / k
+        self.metrics["h_conservation"] =  epoch_hcon / k
         
-#         self.metrics['R2_lev'] = epoch_r2_lev / k
+        self.metrics["bias_lev"] = epoch_bias_lev / k 
+        self.metrics["bias_sfc"] = epoch_bias_sfc / k 
+        self.metrics["bias_heating"] = epoch_bias_heating / k 
+        self.metrics["bias_cldliq"] = epoch_bias_clw / k 
+        self.metrics["bias_cldice"] = epoch_bias_cli / k 
 
-#         self.metric_R2.reset(); self.metric_R2_heating.reset(); self.metric_R2_precc.reset()
-#         if self.autoregressive:
-#             self.model.reset_states()
+        self.metrics['R2'] = self.metric_R2.compute()
         
-#         datatype = "TRAIN" if self.train else "VAL"
-#         print('Epoch {} {} loss: {:.2e}  MSE: {:.2e}  h-con:  {:.2e}   R2: {:.2f}  R2-dT/dt: {:.2f}   R2-dq/dt: {:.2f}   R2-precc: {:.3f}'.format(epoch+1, datatype, 
-#                                                             self.metrics['loss'], 
-#                                                             self.metrics['mean_squared_error'], 
-#                                                             self.metrics['h_conservation'],
-#                                                             self.metrics['R2'],
-#                                                             self.metrics['R2_heating'],
-#                                                             self.metrics['R2_moistening'],                                                              
-#                                                             self.metrics['R2_precc'] ))
+        self.metrics['R2_heating'] = epoch_r2_lev[:,0].mean() / k
+        R2_moistening = epoch_r2_lev[:,1].mean() / k
+        self.metrics['R2_precc'] = epoch_R2precc / k
+        self.metrics['R2_lev'] = epoch_r2_lev / k
+        
+        self.metric_R2.reset() 
 
-#     if torch.cuda.is_available(): torch.cuda.empty_cache()
-#     gc.collect()
+        datatype = "TRAIN" if self.train else "VAL"
+        print('Epoch {} {} loss: {:.2e}  MSE: {:.2e}  h-con:  {:.2e}   R2: {:.2f}  R2-dT/dt: {:.2f}   R2-dq/dt: {:.2f}   R2-precc: {:.3f}'.format(epoch+1, datatype, 
+                                                            self.metrics['loss'], 
+                                                            self.metrics['mean_squared_error'], 
+                                                            self.metrics['h_conservation'],
+                                                            self.metrics['R2'],
+                                                            self.metrics['R2_heating'],
+                                                            R2_moistening, # self.metrics['R2_moistening'],                                                              
+                                                            self.metrics['R2_precc'] ))
+
+        if self.cuda: torch.cuda.empty_cache()
+        gc.collect()
+    
 @njit(fastmath=True)    
 def v4_to_v5_inputs_numba(x_lev_b, liq_ratio):
     (ns,nlev,nx) = x_lev_b.shape
@@ -379,6 +400,9 @@ class generator_xy(torch.utils.data.Dataset):
                  ycoeffs_ref=None,
                  v4_to_v5_inputs=False,
                  remove_past_sfc_inputs=False,
+                 qinput_prune=False,
+                 rh_prune=False,
+                 output_prune=False,
                  mp_mode=0): # 0 = regular outputs, 1 = mp constraint, 2 = pred liq ratio
                  # use_mp_constraint=False):
         self.filepath = filepath
@@ -391,6 +415,9 @@ class generator_xy(torch.utils.data.Dataset):
         self.cloud_exp_norm = True
         self.remove_past_sfc_inputs = remove_past_sfc_inputs
         self.mp_mode = mp_mode
+        self.qinput_prune = qinput_prune
+        self.rh_prune = rh_prune 
+        self.output_prune=output_prune
         if self.mp_mode==1:
             self.use_mp_constraint = True 
             self.pred_liq_ratio  = False
@@ -558,14 +585,14 @@ class generator_xy(torch.utils.data.Dataset):
             hdf = h5py.File(self.filepath, 'r')
             # hdf = self.hdf
 
-            # x_lev_b = hdf['input_lev'][indices,:]
-            # x_sfc_b = hdf['input_sca'][indices,:]
-            # y_lev_b = hdf['output_lev'][indices,:]
-            # y_sfc_b = hdf['output_sca'][indices,:]
-            x_lev_b = hdf['input_lev'][indices[0]:indices[-1]+1,:]
-            x_sfc_b = hdf['input_sca'][indices[0]:indices[-1]+1,:]
-            y_lev_b = hdf['output_lev'][indices[0]:indices[-1]+1,:]
-            y_sfc_b = hdf['output_sca'][indices[0]:indices[-1]+1,:]
+            x_lev_b = hdf['input_lev'][indices,:]
+            x_sfc_b = hdf['input_sca'][indices,:]
+            y_lev_b = hdf['output_lev'][indices,:]
+            y_sfc_b = hdf['output_sca'][indices,:]
+            # x_lev_b = hdf['input_lev'][indices[0]:indices[-1]+1,:]
+            # x_sfc_b = hdf['input_sca'][indices[0]:indices[-1]+1,:]
+            # y_lev_b = hdf['output_lev'][indices[0]:indices[-1]+1,:]
+            # y_sfc_b = hdf['output_sca'][indices[0]:indices[-1]+1,:]
             
             if self.separate_timedim:
                 # print("inds", indices)
@@ -619,12 +646,12 @@ class generator_xy(torch.utils.data.Dataset):
             # numba optimized
             if self.cloud_exp_norm and self.use_numba:
                 v4_to_v5_inputs_numba(x_lev_b, liq_frac_constrained) 
+                if self.qinput_prune:
+                    x_lev_b[:,0:15,2] = 0.0
             else:
                 qn   = x_lev_b[:,:,2]  + x_lev_b[:,:,3]
-                prune=True
-                if prune:
+                if self.qinput_prune:
                     qn[:,0:15] = 0.0
-                    x_lev_b[:,:,1] = np.clip(x_lev_b[:,:,1], 0.0, 1.2)
                 x_lev_b[:,:,2] = qn
                 x_lev_b[:,:,3] = liq_frac_constrained
                 if self.cloud_exp_norm:
@@ -640,7 +667,9 @@ class generator_xy(torch.utils.data.Dataset):
                     # print("min max liq", x_lev_b[:,:,2].min(), x_lev_b[:,:,2].max() )
                     # print("min max ice", x_lev_b[:,:,3].min(), x_lev_b[:,:,3].max() )
                      
-    
+        if self.rh_prune:
+            x_lev_b[:,:,1] = np.clip(x_lev_b[:,:,1], 0.0, 1.2)
+
         # elaps = time.time() - t0_it
         # print("Runtime cloudnorm {:.2f}s".format(elaps))         
         # t0_it = time.time()
@@ -737,7 +766,12 @@ class generator_xy(torch.utils.data.Dataset):
             apply_output_norm_numba(y_lev_b, self.yscale_lev)
         else:
             y_lev_b  = y_lev_b * self.yscale_lev
+        
+        if self.output_prune:
+            y_lev_b[:,0:12,1:] = 0.0
+            
         y_sfc_b  = y_sfc_b * self.yscale_sca    
+
         
         # elaps = time.time() - t0_it
         # print("Runtime out norm {:.2f}s".format(elaps))
@@ -777,14 +811,21 @@ def chunkize(filelist, chunk_size, shuffle_before_chunking=False, shuffle_after_
             yield filelist[i:i + chunk_size]  
     if shuffle_before_chunking:
         random.shuffle(filelist)
-        # we need the indices to be sorted within a chunk because these indices
-        # are used to index into the first dimension of a H5 file
-        for i in range(filelist):
-            filelist[i] = sorted(filelist[i])
+        # # we need the indices to be sorted within a chunk because these indices
+        # # are used to index into the first dimension of a H5 file
+        # for i in range(filelist):
+        #     filelist[i] = sorted(filelist[i])
             
     mylist = list(divide(filelist,chunk_size))
     if shuffle_after_chunking:
         random.shuffle(mylist)  
+        
+    if shuffle_before_chunking:
+        # random.shuffle(filelist)
+        # # we need the indices to be sorted within a chunk because these indices
+        # # are used to index into the first dimension of a H5 file
+        for i in range(len(mylist)):
+            mylist[i] = sorted(mylist[i])
     return mylist
 
 

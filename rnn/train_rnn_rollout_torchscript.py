@@ -28,7 +28,7 @@ device = torch.device("cuda" if cuda else "cpu")
 print(device)
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from models import RNN_autoreg, MyRNN, LSTM_autoreg_torchscript, SpaceStateModel
+from models import RNN_autoreg, MyRNN, LSTM_autoreg_torchscript, SpaceStateModel, LSTM_torchscript
 from utils import generator_xy, BatchSampler
 # from metrics import get_energy_metric, get_hybrid_loss, my_mse_flatten
 import metrics as metrics
@@ -42,6 +42,9 @@ norm_path = '../preprocessing/normalizations/'
 tr_data_path = data_dir + "train_v4_rnn_nonorm_febtofeb_y1-5_nocompress_chunk3.h5"
 nloc = 1920 
 
+tr_data_path = data_dir + "train_v4_rnn_nonorm_febtofeb_y1_3_5_7_nocompress_chunk3.h5"
+nloc = 1536 
+
 val_data_fname = "data_v4_rnn_nonorm_year8_nocompress_chunk3.h5"
 val_data_dir = "/media/peter/CrucialBX500/data/ClimSim/low_res_expanded/"
 nloc_val = 384 
@@ -51,12 +54,16 @@ val_data_path = val_data_dir + val_data_fname
 use_val = False 
 use_val = True
 shuffle_data = False 
+shuffle_data = True 
 
 output_norm_per_level = True
-# output_norm_per_level = False
+output_norm_per_level = False
 
 input_norm_per_level = True
-# input_norm_per_level = False
+input_norm_per_level = False
+
+rh_prune = True; qinput_prune=True
+output_prune = True
 
 loss_fn = "mse"
 loss_fn = "huber"
@@ -69,9 +76,11 @@ if mp_mode>0:
     use_mp_constraint=True
 else:
     use_mp_constraint=False 
-    
+if (not output_norm_per_level) and mp_mode==0:
+    raise NotImplementedError()
+
 v4_to_v5_inputs = True
-v4_to_v5_inputs = False
+# v4_to_v5_inputs = False
 remove_past_sfc_inputs = True # remove pbuf_* 
 preprocess_on_the_fly = False
 # Predict total cloud water instead of liquid and ice, optimize for this during training,
@@ -116,12 +125,15 @@ concat = False
 add_refpres = False
 use_initial_mlp = False 
 use_intermediate_mlp = False
-use_initial_mlp = True 
-use_intermediate_mlp = True
+# use_initial_mlp = True 
+# use_intermediate_mlp = True
 
 if memory=="None":
     autoregressive=False
     use_intermediate_mlp = False
+else:
+    shuffle_data = False 
+    
 use_memory = autoregressive
 
 
@@ -598,16 +610,28 @@ else:
 print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
 
 if model_type=="LSTM":
-    model = LSTM_autoreg_torchscript(hyam,hybm,
-                out_scale = yscale_lev,
-                out_sfc_scale = yscale_sca, 
-                nx = nx, nx_sfc=nx_sfc, 
-                ny = ny, ny_sfc=ny_sfc, 
-                nneur=nneur, 
-                use_initial_mlp = use_initial_mlp,
-                use_intermediate_mlp=use_intermediate_mlp,
-                add_pres=add_pres,
-                use_memory=use_memory)
+    if autoregressive:
+        model = LSTM_autoreg_torchscript(hyam,hybm,
+                    out_scale = yscale_lev,
+                    out_sfc_scale = yscale_sca, 
+                    nx = nx, nx_sfc=nx_sfc, 
+                    ny = ny, ny_sfc=ny_sfc, 
+                    nneur=nneur, 
+                    use_initial_mlp = use_initial_mlp,
+                    use_intermediate_mlp=use_intermediate_mlp,
+                    add_pres=add_pres,
+                    output_prune=output_prune,
+                    use_memory=use_memory)
+    else:
+        model = LSTM_torchscript(hyam,hybm,
+                    out_scale = yscale_lev,
+                    out_sfc_scale = yscale_sca, 
+                    nx = nx, nx_sfc=nx_sfc, 
+                    ny = ny, ny_sfc=ny_sfc, 
+                    nneur=nneur, 
+                    use_initial_mlp = use_initial_mlp,
+                    use_intermediate_mlp=use_intermediate_mlp,
+                    add_pres=add_pres, output_prune=output_prune)
 else:
     model = SpaceStateModel(hyam, hybm, 
                 out_scale = yscale_lev,
@@ -697,7 +721,11 @@ else:
     x_lay = x_lay.to(device)
     x_sfc = x_sfc.to(device)
 
-    out, out_sfc, rnn1_mem = model(x_lay, x_sfc, rnn1_mem)
+    if autoregressive:
+        out, out_sfc, rnn1_mem = model(x_lay, x_sfc, rnn1_mem)
+    else:
+        out, out_sfc = model(x_lay, x_sfc)
+
     print(out.shape, out_sfc.shape)
     
 
@@ -767,6 +795,7 @@ if use_val:
 
 train_data = generator_xy(tr_data_path, nloc=nloc, add_refpres=add_refpres, remove_past_sfc_inputs=remove_past_sfc_inputs, 
                               mp_mode=mp_mode,v4_to_v5_inputs=v4_to_v5_inputs,
+                              rh_prune=rh_prune, qinput_prune=qinput_prune,output_prune=output_prune,
                              ycoeffs=ycoeffs_gen, xcoeffs=xcoeffs_gen, ycoeffs_ref=ycoeffs_gen_ref, xcoeffs_ref=xcoeffs_gen_ref)
 train_batch_sampler = BatchSampler(num_samples_per_chunk_tr, 
                                    # num_samples=train_data.ntimesteps*nloc, shuffle=shuffle_data)
@@ -788,6 +817,7 @@ if use_val:
     
     val_data = generator_xy(val_data_path, nloc=nloc_val, add_refpres=add_refpres, remove_past_sfc_inputs=remove_past_sfc_inputs, 
                             mp_mode=mp_mode,v4_to_v5_inputs=v4_to_v5_inputs,
+                            rh_prune=rh_prune, qinput_prune=qinput_prune,output_prune=output_prune,
                             ycoeffs=ycoeffs_gen, xcoeffs=xcoeffs_gen, ycoeffs_ref=ycoeffs_gen_ref, xcoeffs_ref=xcoeffs_gen_ref)
 
     val_batch_sampler = BatchSampler(num_samples_per_chunk_val, 
@@ -868,6 +898,9 @@ config = dict(((k, eval(k)) for k in ("num_files",
                                       "ny",
                                       "ny_pp",
                                       "ny_sfc",
+                                      "rh_prune",
+                                      "qinput_prune",
+                                      "output_prune",
                                       "loss_fn",
                                       "use_energy_loss",
                                       "use_intermediate_mlp",
@@ -916,11 +949,13 @@ class model_train_eval:
         # self.metric_R2_precc =  R2Score().to(device) 
         # self.metric_R2_moistening =  R2Score().to(device) 
 
-        self.metrics= {'loss': 0, 'mean_squared_error': 0,  # the latter is just MSE
-                        'mean_absolute_error': 0, 'R2' : 0, 'R2_heating' : 0,
-                        # 'R2_moistening' : 0,  
-                        'R2_precc' : 0, 'R2_lev' : np.zeros((nlev,ny_pp)),
-                        'h_conservation' : 0 }
+        self.metrics = {}
+        # self.metrics= {'loss': 0, 'mean_squared_error': 0,  # the latter is just MSE
+        #                 'mean_absolute_error': 0, 'R2' : 0, 'R2_heating' : 0,
+        #                 # 'R2_moistening' : 0,  
+        #                 'R2_precc' : 0, 'R2_lev' : np.zeros((nlev,ny_pp)),
+        #                 'h_conservation' : 0,
+        #                 "bias_lev" : 0, "bias_heating" : 0, "bias_sfc" : 0}
 
     def eval_one_epoch(self, epoch, timewindow=1):
         report_freq = self.report_freq
@@ -930,6 +965,9 @@ class model_train_eval:
         epoch_R2precc = 0.0
         epoch_hcon = 0.0
         epoch_r2_lev = 0.0
+        epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
+        epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
+
         t_comp =0 
         if self.autoregressive:
             preds_lay = []; preds_sfc = []
@@ -986,10 +1024,17 @@ class model_train_eval:
                     
                 if mp_autocast:
                     with torch.autocast(device_type=device.type, dtype=dtype):
-                        preds_lay0, preds_sfc0, rnn1_mem = self.model(x_lay0, x_sfc0, rnn1_mem)
+                        if autoregressive:
+                            preds_lay0, preds_sfc0, rnn1_mem = self.model(x_lay0, x_sfc0, rnn1_mem)
+                        else:
+                            preds_lay0, preds_sfc0 = self.model(x_lay0, x_sfc0)
+
                 else:
-                    preds_lay0, preds_sfc0, rnn1_mem = self.model(x_lay0, x_sfc0, rnn1_mem)
-                    
+                    if autoregressive:
+                        preds_lay0, preds_sfc0, rnn1_mem = self.model(x_lay0, x_sfc0, rnn1_mem)
+                    else:
+                        preds_lay0, preds_sfc0 = self.model(x_lay0, x_sfc0)
+
                 if self.autoregressive:
                     # In the autoregressive training case are gathering many time steps before computing loss
                     preds_lay.append(preds_lay0)
@@ -1099,6 +1144,14 @@ class model_train_eval:
                             epoch_hcon  += h_con.item()
                             # print("shape ypo", ypo_lay.shape, "yto", yto_lay.shape)
                             
+                            biases_lev, biases_sfc = metrics.compute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc)
+                            epoch_bias_lev += np.mean(biases_lev)
+                            epoch_bias_heating += biases_lev[0]
+                            epoch_bias_clw += biases_lev[2]
+                            epoch_bias_cli += biases_lev[3]
+
+                            epoch_bias_sfc += np.mean(biases_sfc)
+
                             self.metric_R2.update(ypo_lay.reshape((-1,ny_pp)), yto_lay.reshape((-1,ny_pp)))
                                    
                             r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
@@ -1149,6 +1202,12 @@ class model_train_eval:
         self.metrics['loss'] =  epoch_loss / k
         self.metrics['mean_squared_error'] = epoch_mse / k
         self.metrics["h_conservation"] =  epoch_hcon / k
+        
+        self.metrics["bias_lev"] = epoch_bias_lev / k 
+        self.metrics["bias_sfc"] = epoch_bias_sfc / k 
+        self.metrics["bias_heating"] = epoch_bias_heating / k 
+        self.metrics["bias_cldliq"] = epoch_bias_clw / k 
+        self.metrics["bias_cldice"] = epoch_bias_cli / k 
 
         #self.metrics['energymetric'] = epoch_energy / k
         #self.metrics['mean_absolute_error'] = epoch_mae / k
@@ -1183,8 +1242,8 @@ class model_train_eval:
                                                             R2_moistening, # self.metrics['R2_moistening'],                                                              
                                                             self.metrics['R2_precc'] ))
 
-    if cuda: torch.cuda.empty_cache()
-    gc.collect()
+        if cuda: torch.cuda.empty_cache()
+        gc.collect()
 
 
 # 160 160
