@@ -54,20 +54,24 @@ val_data_path = val_data_dir + val_data_fname
 use_val = False 
 use_val = True
 shuffle_data = False 
-shuffle_data = True 
+# shuffle_data = True 
 
 output_norm_per_level = True
-output_norm_per_level = False
+# output_norm_per_level = False
 
 input_norm_per_level = True
-input_norm_per_level = False
+# input_norm_per_level = False
 
 rh_prune = True; qinput_prune=True
 output_prune = True
 
+predict_flux = False 
+# predict_flux = True 
+
 loss_fn = "mse"
-loss_fn = "huber"
+# loss_fn = "huber"
 use_energy_loss = False
+use_energy_loss = True
 
 mp_mode = 0   # regular 6 outputs
 mp_mode = 1   # 5 outputs, pred qn, liq_ratio diagnosed (mp_constraint)
@@ -80,7 +84,8 @@ if (not output_norm_per_level) and mp_mode==0:
     raise NotImplementedError()
 
 v4_to_v5_inputs = True
-# v4_to_v5_inputs = False
+v4_to_v5_inputs = False
+
 remove_past_sfc_inputs = True # remove pbuf_* 
 preprocess_on_the_fly = False
 # Predict total cloud water instead of liquid and ice, optimize for this during training,
@@ -125,8 +130,8 @@ concat = False
 add_refpres = False
 use_initial_mlp = False 
 use_intermediate_mlp = False
-# use_initial_mlp = True 
-# use_intermediate_mlp = True
+use_initial_mlp = True 
+use_intermediate_mlp = True
 
 if memory=="None":
     autoregressive=False
@@ -146,7 +151,9 @@ reverse_scaling = False
 nlay = 60 
 batch_first = True 
 
-nneur = (64,64)
+# nneur = (64,64)
+# nneur = (96,96)
+
 nneur = (128,128)
 # nneur = (192,96)
 
@@ -226,8 +233,8 @@ data.set_to_v4_rnn_vars()
 
 hyam = torch.from_numpy(data.grid_info['hyam'].values).to(device, torch.float32)
 hybm = torch.from_numpy(data.grid_info['hybm'].values).to(device, torch.float32)
-hybi = torch.from_numpy(data.grid_info['hybi'].values).to(device, torch.float32)
 hyai = torch.from_numpy(data.grid_info['hyai'].values).to(device, torch.float32)
+hybi = torch.from_numpy(data.grid_info['hybi'].values).to(device, torch.float32)
 sp_max = torch.from_numpy(data.input_max['state_ps'].values).to(device, torch.float32)
 sp_min = torch.from_numpy(data.input_min['state_ps'].values).to(device, torch.float32)
 sp_mean = torch.from_numpy(data.input_mean['state_ps'].values).to(device, torch.float32)
@@ -499,8 +506,10 @@ yscale_sca = output_scale[vars_1D_outp].to_dataarray(dim='features', name='outpu
 # array([2.3405453e+04, 2.3265182e+08, 1.4898973e+08, 6.4926711e+04,
 #        7.8328773e+04], dtype=float32)
 if not output_norm_per_level:
-    yscale_lev_mean = np.repeat(np.array([2.3405453e+04, 2.3265182e+08, 1.4898973e+08, 6.4926711e+04,
+    yscale_lev = np.repeat(np.array([2.3405453e+04, 2.3265182e+08, 1.4898973e+08, 6.4926711e+04,
             7.8328773e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+    # _lambda = torch.tensor(5.0e-7) 
+
     # weights = 1 / (yscale_lev / yscale_lev_mean)
     # weights = torch.from_numpy(weights).to(device).unsqueeze(dim=0)
 weights=None 
@@ -554,6 +563,16 @@ if not input_norm_per_level:
             1.95962779e-06,  8.22708859e-07,  3.88440249e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
     
 xdiv_lev = xmax_lev - xmin_lev
+if xdiv_lev[-1,-1] == 0.0:
+    xdiv1 = xdiv_lev[:,-1]
+    xdiv1_min = np.min(xdiv1[xdiv1>0.0])
+    xdiv1[xdiv1==0.0] = xdiv1_min
+    xdiv_lev[:,-1] = xdiv1 
+    
+    xdiv1 = xdiv_lev[:,-2]
+    xdiv1_min = np.min(xdiv1[xdiv1>0.0])
+    xdiv1[xdiv1==0.0] = xdiv1_min
+    xdiv_lev[:,-2] = xdiv1 
 
 if add_refpres:
     xmean_lev = np.concatenate((xmean_lev, np.zeros(nlev).reshape(nlev,1)), axis=1)
@@ -611,7 +630,7 @@ print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,
 
 if model_type=="LSTM":
     if autoregressive:
-        model = LSTM_autoreg_torchscript(hyam,hybm,
+        model = LSTM_autoreg_torchscript(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
                     out_sfc_scale = yscale_sca, 
                     nx = nx, nx_sfc=nx_sfc, 
@@ -621,7 +640,9 @@ if model_type=="LSTM":
                     use_intermediate_mlp=use_intermediate_mlp,
                     add_pres=add_pres,
                     output_prune=output_prune,
-                    use_memory=use_memory)
+                    use_memory=use_memory,
+                    separate_radiation=separate_radiation,
+                    predict_flux=predict_flux)
     else:
         model = LSTM_torchscript(hyam,hybm,
                     out_scale = yscale_lev,
@@ -668,7 +689,7 @@ model = model.to(device)
 if autoregressive:
     # model.rnn1_mem = torch.randn(nloc, nlay, model.nh_mem, device=device)
     # model.rnn1_mem = torch.zeros(nloc, nlay, model.nh_mem, device=device)
-    rnn1_mem = torch.zeros(nloc, nlay, model.nh_mem, device=device)
+    rnn1_mem = torch.zeros(nloc, model.nlay, model.nh_mem, device=device)
 
 infostr = summary(model)
 num_params = infostr.total_params
@@ -917,6 +938,7 @@ config = dict(((k, eval(k)) for k in ("num_files",
                                       "dtypestr",
                                       "use_scaler",
                                       "output_norm_per_level",
+                                      "input_norm_per_level",
                                       "cwd",
 )
 ))
@@ -979,7 +1001,7 @@ class model_train_eval:
         if self.autoregressive:
             # model.rnn1_mem = torch.randn(self.batch_size, nlay, model.nh_mem, device=device)
             # model.rnn1_mem = torch.zeros(self.batch_size, nlay, model.nh_mem, device=device)
-            rnn1_mem = torch.zeros(self.batch_size, nlay, model.nh_mem, device=device)
+            rnn1_mem = torch.zeros(self.batch_size, model.nlay, model.nh_mem, device=device)
 
             loss_update_start_index = 60
         else:
@@ -1317,7 +1339,9 @@ for epoch in range(num_epochs):
                 best_val_loss = val_loss 
               
     print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,num_epochs,time.time() - t0,timewindoww))
-    
+
+if use_wandb:
+    wandb.finish()
     
 loader = val_loader 
 runner = val_runner

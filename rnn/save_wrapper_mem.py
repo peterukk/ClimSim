@@ -87,6 +87,7 @@ fpath_xdiv_sca = "/media/peter/CrucialBX500/data/ClimSim/ClimSim/rnn/saved_model
 
 # np.savetxt(fpath_xmean_lev, xmean_lev, fmt='%.18e', delimiter=',')
 # np.savetxt(fpath_xmean_sca, xmean_sca, fmt='%.18e', delimiter=',')
+
 # np.savetxt(fpath_xdiv_lev, xdiv_lev, fmt='%.18e', delimiter=',')
 # np.savetxt(fpath_xdiv_sca, xdiv_sca, fmt='%.18e', delimiter=',')
 
