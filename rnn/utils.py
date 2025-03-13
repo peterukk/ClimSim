@@ -480,7 +480,7 @@ class generator_xy(torch.utils.data.Dataset):
             _, self.nlev, self.nx = dims
             self.separate_timedim=False 
             self.ntimesteps = hdf['input_lev'].shape[0]//self.nloc
-        print("Shape dim 0",hdf['input_lev'].shape[0] )
+        print("Data shape: {} for data in {}".format(dims, filepath))
         self.nx_sfc = hdf['input_sca'].shape[-1]
         self.ny = hdf['output_lev'].shape[-1]
         self.ny_sfc = hdf['output_sca'].shape[-1]
@@ -616,6 +616,9 @@ class generator_xy(torch.utils.data.Dataset):
 
             x_sfc_b = x_sfc_b * (self.xcoeff_sca_ref[1]) + self.xcoeff_sca_ref[0] 
             
+        if self.remove_past_sfc_inputs:
+            x_sfc_b = np.delete(x_sfc_b,(17, 18, 19, 20, 21),axis=1)
+          
         # elaps = time.time() - t0_it
         # print("Runtime load {:.2f}s".format(elaps))
         # t0_it = time.time()
@@ -781,8 +784,8 @@ class generator_xy(torch.utils.data.Dataset):
         # # for i in range(5):
         #     print("OOOO", i," minmax ysca ", y_sfc_b[:,i].min(), y_sfc_b[:,i].max())
   
-        if self.remove_past_sfc_inputs:
-            x_sfc_b = np.delete(x_sfc_b,(17, 18, 19, 20, 21),axis=1)
+        # if self.remove_past_sfc_inputs:
+        #     x_sfc_b = np.delete(x_sfc_b,(17, 18, 19, 20, 21),axis=1)
           
         x_lev_b = torch.from_numpy(x_lev_b)
         x_sfc_b = torch.from_numpy(x_sfc_b)

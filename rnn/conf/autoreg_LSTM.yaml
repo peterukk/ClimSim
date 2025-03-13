@@ -1,0 +1,54 @@
+tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1_3_5_7_nocompress_chunk3.h5
+val_data_fname: data_v4_rnn_nonorm_year8_nocompress_chunk3.h5
+tr_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
+val_data_dir: "/media/peter/CrucialBX500/data/ClimSim/low_res_expanded/"
+
+num_workers: 7
+chunksize_train: 144
+chunksize_val: 14
+
+autoregressive: true
+mp_mode: 1
+input_norm_per_level: false
+output_norm_per_level: false
+output_prune: true
+qinput_prune: true
+rh_prune: true
+remove_past_sfc_inputs: true
+v4_to_v5_inputs: false
+
+nneur:
+- 128
+- 128
+add_pres: true
+add_refpres: false
+add_stochastic_layer: false
+use_initial_mlp: true
+use_intermediate_mlp: true
+concat: false
+memory: Hidden
+model_type: LSTM
+separate_radiation: false
+
+use_wandb: true
+num_epochs: 20
+use_energy_loss: true
+loss_fn_type: mse
+_lambda: 1.0e-05
+lr: 0.001
+mp_autocast: true
+use_scaler: true
+shuffle_data: false
+timestep_scheduling: true
+rollout_schedule:
+- 1
+- 1
+- 1
+- 2
+- 3
+- 4
+- 5
+- 5
+- 5
+- 5
+

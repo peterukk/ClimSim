@@ -116,47 +116,51 @@ lbd_qc  =  np.loadtxt(fpath_lbd_qc, delimiter=",", dtype=np.float32)
 lbd_qi  =  np.loadtxt(fpath_lbd_qi, delimiter=",", dtype=np.float32)
 
 
-model = LSTM_autoreg_torchscript(hyam,hybm,
-            out_scale = yscale_lev,
-            out_sfc_scale = yscale_sca, 
-            nx = nx, nx_sfc=nx_sfc, 
-            ny = ny, ny_sfc=ny_sfc, 
-            nneur=nneur, 
-            use_initial_mlp = use_initial_mlp,
-            use_intermediate_mlp=use_intermediate_mlp,
-            add_pres=add_pres,
-            use_memory=use_memory)
+# model = LSTM_autoreg_torchscript(hyam,hybm,
+#             out_scale = yscale_lev,
+#             out_sfc_scale = yscale_sca, 
+#             nx = nx, nx_sfc=nx_sfc, 
+#             ny = ny, ny_sfc=ny_sfc, 
+#             nneur=nneur, 
+#             use_initial_mlp = use_initial_mlp,
+#             use_intermediate_mlp=use_intermediate_mlp,
+#             add_pres=add_pres,
+#             use_memory=use_memory)
 
-from torchinfo import summary
-infostr = summary(model)
-num_params = infostr.total_params
-print(infostr)
+# from torchinfo import summary
+# infostr = summary(model)
+# num_params = infostr.total_params
+# print(infostr)
 
-checkpoint = torch.load(model_path, weights_only=True)
-model.load_state_dict(checkpoint['model_state_dict'])
+# checkpoint = torch.load(model_path, weights_only=True)
+# model.load_state_dict(checkpoint['model_state_dict'])
+
+model_path_script = 'saved_models/LSTM-Hidden_lr0.001.neur128-128.num66745_script.pt'
+model = torch.jit.load(model_path_script)
+
 # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
 
 class NewModel(nn.Module):
     def __init__(self, original_model, 
-                 xmean_lev, xmean_sca, 
-                 xdiv_lev, xdiv_sca,
-                 yscale_lev, yscale_sca, 
+                 # xmean_lev, xmean_sca, 
+                 # xdiv_lev, xdiv_sca,
+                 # yscale_lev, yscale_sca, 
                  # lbd_qn, 
                  lbd_qc, lbd_qi):
         
         super(NewModel, self).__init__()
         self.original_model = original_model
-        self.xmean_lev  = torch.tensor(xmean_lev, dtype=torch.float32)
-        self.xmean_sca  = torch.tensor(xmean_sca, dtype=torch.float32)
-        self.xdiv_lev   = torch.tensor(xdiv_lev, dtype=torch.float32)
-        self.xdiv_sca   = torch.tensor(xdiv_sca, dtype=torch.float32)
-        self.yscale_lev = torch.tensor(yscale_lev, dtype=torch.float32)
-        self.yscale_sca   = torch.tensor(yscale_sca, dtype=torch.float32)
+        # self.xmean_lev  = torch.tensor(xmean_lev, dtype=torch.float32)
+        # self.xmean_sca  = torch.tensor(xmean_sca, dtype=torch.float32)
+        # self.xdiv_lev   = torch.tensor(xdiv_lev, dtype=torch.float32)
+        # self.xdiv_sca   = torch.tensor(xdiv_sca, dtype=torch.float32)
+        # self.yscale_lev = torch.tensor(yscale_lev, dtype=torch.float32)
+        # self.yscale_sca   = torch.tensor(yscale_sca, dtype=torch.float32)
         # self.lbd_qn     = torch.tensor(lbd_qn, dtype=torch.float32)
         self.lbd_qc     = torch.tensor(lbd_qc, dtype=torch.float32)
         self.lbd_qi     = torch.tensor(lbd_qi, dtype=torch.float32)
-
+        self.hardtanh = nn.Hardtanh(0.0, 1.0)
 
     def preprocessing(self, x_main0, x_sfc0):
         # v4 input array
@@ -167,20 +171,31 @@ class NewModel(nn.Module):
         x_main[:,:,3] = 1 - torch.exp(-x_main[:,:,3] * self.lbd_qi)   
 
         #                            mean     max - min
-        x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
-        x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+        # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+        # x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+        x_main = (x_main - self.original_model.xmean_lev)/(self.original_model.xdiv_lev)
+        x_sfc =  (x_sfc -  self.original_model.xmean_sca)/(self.original_model.xdiv_sca)
         
         x_main = torch.where(torch.isnan(x_main), torch.tensor(0.0, device=x_main.device), x_main)
         return x_main, x_sfc 
     
-    def postprocessing(self, out_lev, out_sfc):
-        out_lev[:,0:12,1:] = 0
-        out_lev      = out_lev / self.yscale_lev
-        out_sfc     = out_sfc / self.yscale_sca
+    # def postprocessing(self, out_lev, out_sfc):
+    #     out_lev[:,0:12,1:] = 0
+    #     out_lev      = out_lev / self.yscale_lev
+    #     out_sfc     = out_sfc / self.yscale_sca
 
-        return out_lev, out_sfc
+    #     return out_lev, out_sfc
     
+    def temperature_scaling(self, T_raw):
+        # T_denorm = T = T*(self.xmax_lev[:,0] - self.xmin_lev[:,0]) + self.xmean_lev[:,0]
+        # T_denorm = T*(self.xcoeff_lev[2,:,0] - self.xcoeff_lev[1,:,0]) + self.xcoeff_lev[0,:,0]
+        # liquid_ratio = (T_raw - 253.16) / 20.0 
+        liquid_ratio = (T_raw - 253.16) * 0.05 
+        # liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
+        liquid_ratio = self.hardtanh(liquid_ratio)
 
+        return liquid_ratio
+        
     def forward(self, x_main, x_sfc, rnn1_mem):
         # x_denorm = x_main.clone()
         
@@ -203,8 +218,8 @@ class NewModel(nn.Module):
         T_new           = T_before  + out_lev[:,:,0:1]*1200
         # print("T_new min", T_new.min(), "max", T_new.max())
         
-        # # liq_frac_constrained    = self.temperature_scaling(T_new)
-        liq_frac_constrained    = self.original_model.temperature_scaling(T_new)
+        liq_frac_constrained    = self.temperature_scaling(T_new)
+        # liq_frac_constrained    = self.original_model.temperature_scaling(T_new)
 
 
         # #                            dqn
@@ -234,16 +249,19 @@ class NewModel(nn.Module):
         # yout = torch.zeros((368+60*16, batch_size))
 
         # return yout, rnn1_mem
-        return yout
+        # return yout
 
 
-new_model = NewModel(model, xmean_lev, xmean_sca, 
-                    xdiv_lev, xdiv_sca,
-                    yscale_lev, yscale_sca, 
-                    lbd_qc, lbd_qi)
+# new_model = NewModel(model, xmean_lev, xmean_sca, 
+#                     xdiv_lev, xdiv_sca,
+#                     yscale_lev, yscale_sca, 
+#                     lbd_qc, lbd_qi)
+
+new_model = NewModel(model, lbd_qc, lbd_qi)
 
 NewModel.device = "cpu"
 device = torch.device("cpu")
+new_model = new_model.to(device)
 
 scripted_model = torch.jit.script(new_model)
 scripted_model = scripted_model.eval()
@@ -346,19 +364,19 @@ labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
 
 x = np.arange(60)
 ncols, nrows = 6,1
-fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
-                        gridspec_kw = {'wspace':0}) #layout="constrained")
-for i in range(6):
-    axs[i].plot(x, R2[:,i]); 
-    axs[i].set_title(labels[i])
-    axs[i].set_ylim(0,1)
-    axs[i].set_xlim(0,60)
-    axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
-    if i>0:
-        axs[i].set_yticklabels([])
-    axs[i].set_xticklabels([])
+# fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
+#                         gridspec_kw = {'wspace':0}) #layout="constrained")
+# for i in range(6):
+#     axs[i].plot(x, R2[:,i]); 
+#     axs[i].set_title(labels[i])
+#     axs[i].set_ylim(0,1)
+#     axs[i].set_xlim(0,60)
+#     axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
+#     if i>0:
+#         axs[i].set_yticklabels([])
+#     axs[i].set_xticklabels([])
 
-fig.subplots_adjust(hspace=0)
+# fig.subplots_adjust(hspace=0)
 
 
 fig, axs = plt.subplots(ncols=nrows, nrows=ncols, figsize=(5.5, 3.5)) #layout="constrained")

@@ -73,8 +73,13 @@ class LayerPressure(nn.Module):
         
         # hyam = torch.from_numpy(hyam)
         # hybm = torch.from_numpy(hybm)
-        self.hyam = torch.reshape(hyam,(1,self.nlev,1))
-        self.hybm = torch.reshape(hybm,(1,self.nlev,1))
+        # self.hyam = torch.reshape(hyam,(1,self.nlev,1))
+        # self.hybm = torch.reshape(hybm,(1,self.nlev,1))
+        hyam = torch.reshape(hyam,(1,self.nlev,1))
+        hybm = torch.reshape(hybm,(1,self.nlev,1))
+        self.register_buffer('hyam', hyam)
+        self.register_buffer('hybm', hybm)
+
         self.norm = norm
         
         # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -829,6 +834,7 @@ class LSTM_autoreg_torchscript(nn.Module):
 
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
+                xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
                 nlay=60, nx = 4, nx_sfc=3, ny = 4, ny_sfc=3, nneur=(64,64), 
                 use_initial_mlp=False, 
                 use_intermediate_mlp=True,
@@ -883,7 +889,11 @@ class LSTM_autoreg_torchscript(nn.Module):
 
         self.yscale_lev = torch.from_numpy(out_scale)
         self.yscale_sca = torch.from_numpy(out_sfc_scale)
-            
+        self.xmean_lev  = torch.from_numpy(xmean_lev)
+        self.xmean_sca  = torch.from_numpy(xmean_sca)
+        self.xdiv_lev   = torch.from_numpy(xdiv_lev)
+        self.xdiv_sca   = torch.from_numpy(xdiv_sca)
+        
         # in ClimSim config of E3SM, the CRM physics first computes 
         # moist physics on 50 levels, and then computes radiation on 60 levels!
         self.use_intermediate_mlp=use_intermediate_mlp
