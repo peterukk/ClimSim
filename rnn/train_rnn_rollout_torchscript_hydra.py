@@ -458,7 +458,9 @@ def main(cfg: DictConfig):
             self.model = model 
             # self.autoregressive = autoregressive
             # self.loss_fn = loss_fn
-            self.metric_R2 =  R2Score(num_outputs=ny_pp).to(device) 
+            # self.metric_R2 =  R2Score(num_outputs=ny_pp).to(device) 
+            self.metric_R2 =  R2Score().to(device) 
+
             self.metrics = {}
             
         def eval_one_epoch(self, epoch, timewindow=1):

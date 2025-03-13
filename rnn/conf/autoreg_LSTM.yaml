@@ -30,6 +30,7 @@ memory: Hidden
 model_type: LSTM
 separate_radiation: false
 
+save_model: true
 use_wandb: true
 num_epochs: 20
 use_energy_loss: true

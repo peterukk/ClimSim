@@ -2,6 +2,7 @@ rnn/tmp
 rnn/wandb
 rnn/predfrac
 rnn/*.pt 
+rnn/outputs
 
 *.out
 website/_build/
