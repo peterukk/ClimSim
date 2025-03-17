@@ -3,6 +3,9 @@
 """
 PyTorch data loader based on indexing HDF5 file, and other utils
 """
+import ctypes
+import multiprocessing as mp
+import psutil
 import h5py
 import torch
 import torch.nn as nn
@@ -394,7 +397,7 @@ def apply_output_norm_numba(y, ycoeff):
                 y[ii,jj,kk] = y[ii,jj,kk] * ycoeff[jj,kk]
     
 class generator_xy(torch.utils.data.Dataset):
-    def __init__(self, filepath, nloc=384, add_refpres=True, cuda=False,
+    def __init__(self, filepath, nloc=384, cache=False, add_refpres=True,
                  ycoeffs=None, xcoeffs=None, 
                  xcoeffs_ref=None,
                  ycoeffs_ref=None,
@@ -410,6 +413,7 @@ class generator_xy(torch.utils.data.Dataset):
         # where the length of each item is the chunk size; i.e. how many files 
         # are loaded at once (in this example 3 files)
         # self.chunk_size = chunk_size # how many batches are loaded at once in getitem
+        self.cache = cache
         self.use_numba = True
         self.nloc = nloc
         self.cloud_exp_norm = True
@@ -489,6 +493,42 @@ class generator_xy(torch.utils.data.Dataset):
             self.ncol = self.num_files * nloc
         else:
             self.ncol = nloc
+
+        self.cache_loaded = False
+        if self.cache:
+
+            print("Using Shared memory between workers, loading all data to RAM", flush=True)
+            if not self.separate_timedim:
+                raise NotImplementedError()
+            ns, nloc, nlev, nx = dims
+            input_lev_base = mp.Array(ctypes.c_float, ns*nloc*nlev*nx)
+            input_lev = np.ctypeslib.as_array(input_lev_base.get_obj())
+            self.input_lev = input_lev.reshape(ns,nloc,nlev,nx)
+            # self.input_lev[:,:,:,:] = hdf['input_lev'][:]
+            print("input_lev initialized", flush=True)
+            print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
+
+            input_sca_base = mp.Array(ctypes.c_float, ns*nloc*self.nx_sfc)
+            input_sca = np.ctypeslib.as_array(input_sca_base.get_obj())
+            self.input_sca = input_sca.reshape(ns,nloc,self.nx_sfc)
+            # self.input_sca[:,:,:] = hdf['input_sca'][:]
+
+            # self.shared_array = torch.from_numpy(shared_array)
+            output_lev_base = mp.Array(ctypes.c_float, ns*nloc*nlev*self.ny)
+            output_lev = np.ctypeslib.as_array(output_lev_base.get_obj())
+            self.output_lev = output_lev.reshape(ns,nloc,nlev,self.ny)
+            # self.output_lev[:,:,:,:] = hdf['output_lev'][:]
+            print("output_lev initialized", flush=True)
+
+            output_sca_base = mp.Array(ctypes.c_float, ns*nloc*self.ny_sfc)
+            output_sca = np.ctypeslib.as_array(output_sca_base.get_obj())
+            self.output_sca = output_sca.reshape(ns,nloc,self.ny_sfc)
+            # self.output_sca[:,:,:] = hdf['output_sca'][:]
+            print("output_sca initialized", flush=True)
+            
+            # Getting usage of virtual_memory in GB ( 4th field)
+            print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
+
         hdf.close()
         # self.nloc = int(os.path.basename(self.filepath).split('_')[-1])
         # self.stateful = stateful
@@ -522,16 +562,20 @@ class generator_xy(torch.utils.data.Dataset):
         #else:
         #    self.is_validation = True
         #    print("Validation dataset, path is: {}".format(self.filepath))
-        self.cuda = cuda
 
         self.add_refpres = add_refpres
         # batch_idx_expanded =  [0,1,2,3...ntime*1024]
 
-        print("Number of locations {}; colums {}, time steps {}".format(self.nloc,self.ncol, self.ntimesteps))
+        print("Number of locations {}; colums {}, time steps {}".format(self.nloc,self.ncol, self.ntimesteps), flush=True)
         # indices_all = list(np.arange(self.ntimesteps*self.nloc))
         # chunksize_tot = self.nloc*self.chunk_size
         # indices_chunked = self.chunkize(indices_all,chunksize_tot,False) 
         # self.hdf = h5py.File(self.filepath, 'r')
+
+    # def set_cache_status(self, cache_loaded):
+    #     self.cache_loaded = cache_loaded
+        
+
 
     def compute_liq_ratio(self, T):
         liquid_ratio = (T - 253.16) * 0.05 
@@ -541,6 +585,8 @@ class generator_xy(torch.utils.data.Dataset):
     def __len__(self):
         # return self.ntimesteps*self.nloc
         return self.ntimesteps*self.ncol
+
+        
                 
     def __getitem__(self, indices):
         # t0_it = time.time()
@@ -582,18 +628,32 @@ class generator_xy(torch.utils.data.Dataset):
             y_sfc_b = y_sfc_b.reshape(-1,self.ny_sfc)
 
         else:       
-            hdf = h5py.File(self.filepath, 'r')
-            # hdf = self.hdf
+            if self.cache and self.cache_loaded: 
+                x_lev_b = self.input_lev[indices,:]
+                x_sfc_b = self.input_sca[indices,:] 
+                y_lev_b = self.output_lev[indices,:]  
+                y_sfc_b = self.output_sca[indices,:] 
+            else:
+                hdf = h5py.File(self.filepath, 'r')
+                # hdf = self.hdf
 
-            x_lev_b = hdf['input_lev'][indices,:]
-            x_sfc_b = hdf['input_sca'][indices,:]
-            y_lev_b = hdf['output_lev'][indices,:]
-            y_sfc_b = hdf['output_sca'][indices,:]
-            # x_lev_b = hdf['input_lev'][indices[0]:indices[-1]+1,:]
-            # x_sfc_b = hdf['input_sca'][indices[0]:indices[-1]+1,:]
-            # y_lev_b = hdf['output_lev'][indices[0]:indices[-1]+1,:]
-            # y_sfc_b = hdf['output_sca'][indices[0]:indices[-1]+1,:]
-            
+                x_lev_b = hdf['input_lev'][indices,:]
+                x_sfc_b = hdf['input_sca'][indices,:]
+                y_lev_b = hdf['output_lev'][indices,:]
+                y_sfc_b = hdf['output_sca'][indices,:]
+                # x_lev_b = hdf['input_lev'][indices[0]:indices[-1]+1,:]
+                # x_sfc_b = hdf['input_sca'][indices[0]:indices[-1]+1,:]
+                # y_lev_b = hdf['output_lev'][indices[0]:indices[-1]+1,:]
+                # y_sfc_b = hdf['output_sca'][indices[0]:indices[-1]+1,:]
+
+                if self.cache and (not self.cache_loaded):
+                    self.input_lev[indices,:] = x_lev_b
+                    self.input_sca[indices,:] = x_sfc_b
+                    self.output_lev[indices,:] = y_lev_b
+                    self.output_sca[indices,:] = y_sfc_b
+
+                hdf.close() 
+
             if self.separate_timedim:
                 # print("inds", indices)
                 # x_lev_b = x_lev_b.reshape(-1,self.nlev, self.nx)
@@ -605,7 +665,7 @@ class generator_xy(torch.utils.data.Dataset):
                 y_lev_b.shape = (-1,self.nlev, self.ny)
                 y_sfc_b.shape = (-1,self.ny_sfc)
                 
-        hdf.close()
+        #hdf.close()
   
         if self.reverse_input_norm:
             if self.use_numba:

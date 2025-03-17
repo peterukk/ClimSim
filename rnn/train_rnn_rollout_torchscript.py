@@ -166,6 +166,7 @@ if separate_radiation:
     
     
 if cuda:
+    print(torch.cuda.get_device_name(0))
     mp_autocast = True 
     print(torch.cuda.is_bf16_supported())
     # if torch.cuda.is_bf16_supported(): 

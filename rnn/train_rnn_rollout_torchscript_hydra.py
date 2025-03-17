@@ -7,10 +7,12 @@ Created on Thu Mar 13 10:15:11 2025
 """
 
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import sys
 import inspect
 import gc
 import time 
+import psutil
 from omegaconf import OmegaConf
 currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
 parentdir = os.path.dirname(currentdir)
@@ -46,7 +48,13 @@ def main(cfg: DictConfig):
     tr_data_path = cfg.tr_data_dir + cfg.tr_data_fname
     val_data_path = cfg.val_data_dir + cfg.val_data_fname
 
-    
+    #torch.set_float32_matmul_precision("medium")
+    #torch.backends.cuda.matmul.allow_tf32 = True    
+
+    print('RAM memory % used:', psutil.virtual_memory()[2], flush=True)
+    # Getting usage of virtual_memory in GB ( 4th field)
+    print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
+
     # cfg = OmegaConf.load("conf/autoreg_LSTM.yaml")
     
     # mp_mode = 0   # regular 6 outputs
@@ -68,6 +76,7 @@ def main(cfg: DictConfig):
         
         
     if cuda:
+        print(torch.cuda.get_device_name(0))
         cfg.mp_autocast = True 
         print(torch.cuda.is_bf16_supported())
         # if torch.cuda.is_bf16_supported(): 
@@ -115,7 +124,7 @@ def main(cfg: DictConfig):
                       save_npy=False,
                       )
     
-    print("data utils initialized")
+    print("data utils initialized", flush=True)
     data.set_to_v4_rnn_vars()
     
     hyam = torch.from_numpy(data.grid_info['hyam'].values).to(device, torch.float32)
@@ -166,7 +175,7 @@ def main(cfg: DictConfig):
     #'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
     
     hf.close()
-    print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny)
+    print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
     
     if cfg.v4_to_v5_inputs:
         vars_2D_inp.remove('state_q0002') # liq
@@ -352,7 +361,7 @@ def main(cfg: DictConfig):
     # chunk_size_tr = cfg.chunksize_train
     
     
-    train_data = generator_xy(tr_data_path, nloc = nloc, add_refpres = cfg.add_refpres, 
+    train_data = generator_xy(tr_data_path, cache = cfg.cache, nloc = nloc, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune,
@@ -370,7 +379,7 @@ def main(cfg: DictConfig):
     
         
     
-    val_data = generator_xy(val_data_path, add_refpres = cfg.add_refpres, 
+    val_data = generator_xy(val_data_path, cache=cfg.cache, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune,
@@ -687,12 +696,15 @@ def main(cfg: DictConfig):
                         #r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
     
                         print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  runR2: {:.2f},  elapsed {:.1f}s (compute {:.1f})" .format(epoch + 1, 
-                                                        j+1, running_loss,running_energy, r2raw, elaps, t_comp))
+                                                        j+1, running_loss,running_energy, r2raw, elaps, t_comp), flush=True)
                         running_loss = 0.0
                         running_energy = 0.0
                         t0_it = time.time()
                         t_comp = 0
                     j += 1
+
+            #if self.loader.dataset.cache and epoch==0:
+            #    self.loader.dataset.cache_loaded = True
     
             self.metrics['loss'] =  epoch_loss / k
             self.metrics['mean_squared_error'] = epoch_mse / k
@@ -770,6 +782,8 @@ def main(cfg: DictConfig):
             
         print("Epoch {} Training rollout timesteps: {} ".format(epoch+1, timewindoww))
         train_runner.eval_one_epoch(epoch, timewindoww)
+        if train_runner.loader.dataset.cache:
+            train_runner.loader.dataset.cache_loaded = True
         
         if cfg.use_wandb: 
             logged_metrics = train_runner.metrics.copy()
@@ -789,7 +803,9 @@ def main(cfg: DictConfig):
         if epoch%2:
             print("VALIDATION..")
             val_runner.eval_one_epoch(epoch, timewindoww)
-    
+            if val_runner.loader.dataset.cache:
+                val_runner.loader.dataset.cache_loaded = True
+
             if cfg.use_wandb: 
                 logged_metrics = val_runner.metrics.copy()
                 nan_inds = np.isnan(logged_metrics['R2_lev']); num_nans = np.sum(nan_inds)
@@ -822,6 +838,7 @@ def main(cfg: DictConfig):
                 best_val_loss = val_loss 
                   
         print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timewindoww))
+        print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
     
     if cfg.use_wandb:
         wandb.finish()
