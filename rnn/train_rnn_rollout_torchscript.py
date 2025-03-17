@@ -1276,7 +1276,8 @@ train_runner = model_train_eval(train_loader, model, batch_size_tr, autoregressi
 if use_val: val_runner = model_train_eval(val_loader, model, batch_size_val, autoregressive, train=False)
 
 SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}.num{}.pt'.format(model_type,memory,lr, nneur[0],nneur[1], model_num)
-best_val_loss = np.inf
+# best_val_loss = np.inf
+best_val_loss = 0
 
 # w
 
@@ -1326,11 +1327,14 @@ for epoch in range(num_epochs):
                 logged_metrics['epoch'] = epoch
                 wandb.log(logged_metrics)
 
-            val_loss = val_runner.metrics["loss"]
+            # val_loss = val_runner.metrics["loss"]
+            val_loss = val_runner.metrics["R2˝"]
 
             # MODEL CHECKPOINT IF VALIDATION LOSS IMPROVED
-            if save_model and val_loss < best_val_loss:
+            # if save_model and val_loss < best_val_loss:
+            if save_model and val_loss > best_val_loss:
 
+                print("New best validation result, saving model to ", SAVE_PATH)
                 torch.save({
                             'epoch': epoch,
                             'model_state_dict': model.state_dict(),
