@@ -135,7 +135,10 @@ lbd_qi  =  np.loadtxt(fpath_lbd_qi, delimiter=",", dtype=np.float32)
 # checkpoint = torch.load(model_path, weights_only=True)
 # model.load_state_dict(checkpoint['model_state_dict'])
 
-model_path_script = 'saved_models/LSTM-Hidden_lr0.001.neur128-128.num66745_script.pt'
+# model_path_script = 'saved_models/LSTM-Hidden_lr0.001.neur128-128.num66745_script.pt'
+# model = torch.jit.load(model_path_script)
+
+model_path_script = 'saved_models/LSTM-Hidden_lr0.001.neur128-128.num68516_script.pt'
 model = torch.jit.load(model_path_script)
 
 # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -162,11 +165,13 @@ class NewModel(nn.Module):
         self.lbd_qi     = torch.tensor(lbd_qi, dtype=torch.float32)
         self.hardtanh = nn.Hardtanh(0.0, 1.0)
 
-    def preprocessing(self, x_main0, x_sfc0):
+    def preprocessing_v4(self, x_main0, x_sfc0):
         # v4 input array
         x_main = x_main0.clone()
         x_sfc = x_sfc0.clone()
+        
 
+        # v4 inputs
         x_main[:,:,2] = 1 - torch.exp(-x_main[:,:,2] * self.lbd_qc)
         x_main[:,:,3] = 1 - torch.exp(-x_main[:,:,3] * self.lbd_qi)   
 
@@ -176,7 +181,13 @@ class NewModel(nn.Module):
         x_main = (x_main - self.original_model.xmean_lev)/(self.original_model.xdiv_lev)
         x_sfc =  (x_sfc -  self.original_model.xmean_sca)/(self.original_model.xdiv_sca)
         
+        if self.qinput_prune:
+            x_main[:,0:15,2:3] = 0.0
+        # clip RH 
+        x_main[:,:,1] = torch.clamp(x_main[:,:,1], 0, 1.2)
+
         x_main = torch.where(torch.isnan(x_main), torch.tensor(0.0, device=x_main.device), x_main)
+        x_main = torch.where(torch.isinf(x_main), torch.tensor(0.0, device=x_main.device), x_main)
         return x_main, x_sfc 
     
     # def postprocessing(self, out_lev, out_sfc):
@@ -207,7 +218,7 @@ class NewModel(nn.Module):
 
         # print("xmain 0", torch.sum(x_main[200,:,:]))
 
-        x_main, x_sfc = self.preprocessing(x_main, x_sfc)
+        x_main, x_sfc = self.preprocessing_v4(x_main, x_sfc)
 
         out_lev, out_sfc, rnn1_mem = self.original_model(x_main, x_sfc, rnn1_mem)
 
@@ -234,13 +245,15 @@ class NewModel(nn.Module):
         # (nb, nlev, ny) --> (nb, ny, nlev)
         out_lev = torch.transpose(out_lev, 1, 2).reshape(batch_size,300)
 
-        yout = torch.zeros((batch_size,368+60*16))
+        yout = torch.zeros((batch_size,368+60*16), device=x_main.device)
         yout[:,0:120] = out_lev[:,0:120]
         yout[:,120:180] = torch.reshape(dqliq, (batch_size, 60))
         yout[:,180:240] = torch.reshape(dqice, (batch_size, 60))
         yout[:,240:360] = out_lev[:,180:360]
         yout[:,360:368] = out_sfc
         yout[:,368:] = torch.reshape(rnn1_mem,(-1,60*16))
+        yout = torch.where(torch.isnan(yout), torch.tensor(0.0, device=x_main.device), yout)
+
         # return yout, rnn1_mem
         return yout
 
@@ -364,19 +377,19 @@ labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
 
 x = np.arange(60)
 ncols, nrows = 6,1
-# fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
-#                         gridspec_kw = {'wspace':0}) #layout="constrained")
-# for i in range(6):
-#     axs[i].plot(x, R2[:,i]); 
-#     axs[i].set_title(labels[i])
-#     axs[i].set_ylim(0,1)
-#     axs[i].set_xlim(0,60)
-#     axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
-#     if i>0:
-#         axs[i].set_yticklabels([])
-#     axs[i].set_xticklabels([])
+fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
+                        gridspec_kw = {'wspace':0}) #layout="constrained")
+for i in range(6):
+    axs[i].plot(x, R2[:,i]); 
+    axs[i].set_title(labels[i])
+    axs[i].set_ylim(0,1)
+    axs[i].set_xlim(0,60)
+    axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
+    if i>0:
+        axs[i].set_yticklabels([])
+    axs[i].set_xticklabels([])
 
-# fig.subplots_adjust(hspace=0)
+fig.subplots_adjust(hspace=0)
 
 
 fig, axs = plt.subplots(ncols=nrows, nrows=ncols, figsize=(5.5, 3.5)) #layout="constrained")
@@ -390,7 +403,11 @@ for i in range(6):
     # axs[i].set_xticklabels([])
 
 fig.subplots_adjust(hspace=0.6)
+
+f
 # fig.suptitle("Bias for val first 2160 batches")
 
 # save_file_torch = "v4_rnn-memory_wrapper_constrained_huber_160.pt"
+# save_file_torch = "v4_rnn-memory_wrapper_constrained_huber_160.pt"
+save_file_torch = "wrappers/v4_rnn-memory_wrapper_constrained_hybrid_128_68516.pt"  
 # scripted_model.save(save_file_torch)

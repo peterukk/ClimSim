@@ -406,7 +406,8 @@ class generator_xy(torch.utils.data.Dataset):
                  qinput_prune=False,
                  rh_prune=False,
                  output_prune=False,
-                 mp_mode=0): # 0 = regular outputs, 1 = mp constraint, 2 = pred liq ratio
+                 mp_mode=0,
+                 no_multiprocessing=False): # 0 = regular outputs, 1 = mp constraint, 2 = pred liq ratio
                  # use_mp_constraint=False):
         self.filepath = filepath
         # The file list will be divided into chunks (a list of lists)eg [[12,4,32],[1,9,3]..]
@@ -419,6 +420,7 @@ class generator_xy(torch.utils.data.Dataset):
         self.cloud_exp_norm = True
         self.remove_past_sfc_inputs = remove_past_sfc_inputs
         self.mp_mode = mp_mode
+        self.no_multiprocessing=no_multiprocessing
         self.qinput_prune = qinput_prune
         self.rh_prune = rh_prune 
         self.output_prune=output_prune
@@ -501,30 +503,47 @@ class generator_xy(torch.utils.data.Dataset):
             if not self.separate_timedim:
                 raise NotImplementedError()
             ns, nloc, nlev, nx = dims
-            input_lev_base = mp.Array(ctypes.c_float, ns*nloc*nlev*nx)
-            input_lev = np.ctypeslib.as_array(input_lev_base.get_obj())
-            self.input_lev = input_lev.reshape(ns,nloc,nlev,nx)
-            # self.input_lev[:,:,:,:] = hdf['input_lev'][:]
-            print("input_lev initialized", flush=True)
-            print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
+            
+            if self.no_multiprocessing:
+                print("Using only one worker, loading all data to RAM", flush=True)
 
-            input_sca_base = mp.Array(ctypes.c_float, ns*nloc*self.nx_sfc)
-            input_sca = np.ctypeslib.as_array(input_sca_base.get_obj())
-            self.input_sca = input_sca.reshape(ns,nloc,self.nx_sfc)
-            # self.input_sca[:,:,:] = hdf['input_sca'][:]
-
-            # self.shared_array = torch.from_numpy(shared_array)
-            output_lev_base = mp.Array(ctypes.c_float, ns*nloc*nlev*self.ny)
-            output_lev = np.ctypeslib.as_array(output_lev_base.get_obj())
-            self.output_lev = output_lev.reshape(ns,nloc,nlev,self.ny)
-            # self.output_lev[:,:,:,:] = hdf['output_lev'][:]
-            print("output_lev initialized", flush=True)
-
-            output_sca_base = mp.Array(ctypes.c_float, ns*nloc*self.ny_sfc)
-            output_sca = np.ctypeslib.as_array(output_sca_base.get_obj())
-            self.output_sca = output_sca.reshape(ns,nloc,self.ny_sfc)
-            # self.output_sca[:,:,:] = hdf['output_sca'][:]
-            print("output_sca initialized", flush=True)
+                self.input_lev = np.empty((ns,nloc,nlev,nx),dtype=np.float32)
+                print("input_lev initialized", flush=True)
+                print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
+    
+                self.input_sca = np.empty((ns,nloc,self.nx_sfc),dtype=np.float32)
+                self.output_lev = np.empty((ns,nloc,nlev,self.ny),dtype=np.float32)
+                print("output_lev initialized", flush=True)
+    
+                self.output_sca = np.empty((ns,nloc,self.ny_sfc),dtype=np.float32)
+                print("output_sca initialized", flush=True)
+            else:
+                print("Using Shared memory between workers, loading all data to RAM", flush=True)
+    
+                input_lev_base = mp.Array(ctypes.c_float, ns*nloc*nlev*nx)
+                input_lev = np.ctypeslib.as_array(input_lev_base.get_obj())
+                self.input_lev = input_lev.reshape(ns,nloc,nlev,nx)
+                # self.input_lev[:,:,:,:] = hdf['input_lev'][:]
+                print("input_lev initialized", flush=True)
+                print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
+    
+                input_sca_base = mp.Array(ctypes.c_float, ns*nloc*self.nx_sfc)
+                input_sca = np.ctypeslib.as_array(input_sca_base.get_obj())
+                self.input_sca = input_sca.reshape(ns,nloc,self.nx_sfc)
+                # self.input_sca[:,:,:] = hdf['input_sca'][:]
+    
+                # self.shared_array = torch.from_numpy(shared_array)
+                output_lev_base = mp.Array(ctypes.c_float, ns*nloc*nlev*self.ny)
+                output_lev = np.ctypeslib.as_array(output_lev_base.get_obj())
+                self.output_lev = output_lev.reshape(ns,nloc,nlev,self.ny)
+                # self.output_lev[:,:,:,:] = hdf['output_lev'][:]
+                print("output_lev initialized", flush=True)
+    
+                output_sca_base = mp.Array(ctypes.c_float, ns*nloc*self.ny_sfc)
+                output_sca = np.ctypeslib.as_array(output_sca_base.get_obj())
+                self.output_sca = output_sca.reshape(ns,nloc,self.ny_sfc)
+                # self.output_sca[:,:,:] = hdf['output_sca'][:]
+                print("output_sca initialized", flush=True)
             
             # Getting usage of virtual_memory in GB ( 4th field)
             print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
@@ -729,7 +748,9 @@ class generator_xy(torch.utils.data.Dataset):
                     x_lev_b[:,:,3] = 1 - np.exp(-x_lev_b[:,:,3] * lbd_qi)
                     # print("min max liq", x_lev_b[:,:,2].min(), x_lev_b[:,:,2].max() )
                     # print("min max ice", x_lev_b[:,:,3].min(), x_lev_b[:,:,3].max() )
-                     
+            if self.qinput_prune:
+                x_lev_b[:,0:15,2:3] = 0.0
+                
         if self.rh_prune:
             x_lev_b[:,:,1] = np.clip(x_lev_b[:,:,1], 0.0, 1.2)
 

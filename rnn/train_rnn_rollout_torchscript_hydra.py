@@ -158,8 +158,8 @@ def main(cfg: DictConfig):
     #   'ps' 'pbuf_SOLIN' 'pbuf_LHFLX' 'pbuf_SHFLX' 'pbuf_TAUX' 'pbuf_TAUY'
     #  'pbuf_COSZRS' 'cam_in_ALDIF' 'cam_in_ALDIR' 'cam_in_ASDIF' 'cam_in_ASDIR'
     #  'cam_in_LWUP' 'cam_in_ICEFRAC' 'cam_in_LANDFRAC' 'cam_in_OCNFRAC'
-    #  'cam_in_SNOWHICE' 'cam_in_SNOWHLAND' 'tm_state_ps' 'tm_pbuf_SOLIN'
-    #  'tm_pbuf_LHFLX' 'tm_pbuf_SHFLX' 'tm_pbuf_COSZRS' 'clat' 'slat']
+    #  'cam_in_SNOWHICE' 'cam_in_SNOWHLAND'  (removed:)'tm_state_ps'  'tm_pbuf_SOLIN'
+    #  'tm_pbuf_LHFLX' 'tm_pbuf_SHFLX' 'tm_pbuf_COSZRS'(<-removed)  'clat' 'slat']
     
     dims = hf['output_lev'].shape; ny = dims[-1]
     vars_2D_outp = hf['output_lev'].attrs.get('varnames').tolist()
@@ -346,7 +346,6 @@ def main(cfg: DictConfig):
     # load this many batches at once. These chk then need to be manually split into batches 
     # within the data iteration loop   
     
-    prefetch_factor = 1
     pin = False
     persistent=False
     
@@ -360,12 +359,19 @@ def main(cfg: DictConfig):
     # 720 = 10 days (3 time steps in an hour, 72 in a day)
     # chunk_size_tr = cfg.chunksize_train
     
+    if cfg.num_workers==0:
+        no_multiprocessing=False 
+        prefetch_factor = 0
+    else:
+        no_multiprocessing=True
+        prefetch_factor = 1
+
     
     train_data = generator_xy(tr_data_path, cache = cfg.cache, nloc = nloc, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune,
-                    ycoeffs=ycoeffs, xcoeffs=xcoeffs)
+                    ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
     
     train_batch_sampler = BatchSampler(cfg.chunksize_train, # samples per chunk 
                                        # num_samples=train_data.ntimesteps*nloc, shuffle=shuffle_data)
@@ -383,7 +389,7 @@ def main(cfg: DictConfig):
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune,
-                    ycoeffs=ycoeffs, xcoeffs=xcoeffs)
+                    ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
     
     val_batch_sampler = BatchSampler(cfg.chunksize_val, 
                                        # num_samples=val_data.ntimesteps*nloc_val, shuffle=shuffle_data)
@@ -445,7 +451,8 @@ def main(cfg: DictConfig):
     conf["dtypestr"] = dtypestr
     conf["cwd"] = cwd
     conf["model_num"] = model_num
-
+    conf["num_params"] = num_params 
+    
     # OmegaConf.save(sorted(config), "conf/autoreg_LSTM.yaml")
     if cfg.use_wandb:
         os.environ["WANDB__SERVICE_WAIT"]="400"
@@ -538,14 +545,7 @@ def main(cfg: DictConfig):
                     
                     tcomp0= time.time()
                         
-                    if cfg.mp_autocast:
-                        with torch.autocast(device_type=device.type, dtype=self.dtype):
-                            if cfg.autoregressive:
-                                preds_lay0, preds_sfc0, rnn1_mem = self.model(x_lay0, x_sfc0, rnn1_mem)
-                            else:
-                                preds_lay0, preds_sfc0 = self.model(x_lay0, x_sfc0)
-    
-                    else:
+                    with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=cfg.mp_autocast):
                         if cfg.autoregressive:
                             preds_lay0, preds_sfc0, rnn1_mem = self.model(x_lay0, x_sfc0, rnn1_mem)
                         else:
@@ -583,49 +583,29 @@ def main(cfg: DictConfig):
                             # yto_lay     = torch.cat(yto_lay)
                             # yto_sfc     = torch.cat(yto_sfc)   
                             
-                        if cfg.mp_autocast:
-                            with torch.autocast(device_type=device.type, dtype=self.dtype):
-                                
-                                main_loss = loss_fn(targets_lay, targets_sfc, preds_lay, preds_sfc)
-                                
-                                if use_mp_constraint:
-                                    ypo_lay, ypo_sfc = model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
-                                    with torch.no_grad(): 
-                                        yto_lay, yto_sfc = model.pp_mp(targets_lay, targets_sfc, x_lay_raw )
-                                    # ypo_lay, ypo_sfc, yto_lay, yto_sfc = model.pp_mp(preds_lay, preds_sfc, targets_lay, targets_sfc, x_lay_raw )
-                                    # if i>10: print ("yto lay true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
-                                    # if i>10: print ("yto lay pp-true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
-    
-                                else:
-                                    ypo_lay, ypo_sfc = model.postprocessing(preds_lay, preds_sfc)
-                                    yto_lay, yto_sfc = model.postprocessing(targets_lay, targets_sfc)
-                                surf_pres_denorm = surf_pres*(sp_max - sp_min) + sp_mean
-                                h_con = metric_h_con(yto_lay, ypo_lay, surf_pres_denorm)
-                                
-                                if cfg.use_energy_loss: 
-                                    loss = hybrid_loss(main_loss, h_con)
-                                else:
-                                    loss = main_loss
-                        else:
+                        with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=cfg.mp_autocast):
                             
                             main_loss = loss_fn(targets_lay, targets_sfc, preds_lay, preds_sfc)
                             
                             if use_mp_constraint:
-                                ypo_lay, ypo_sfc = model.pp_mp(preds_lay, preds_sfc, x_lay_raw )
+                                ypo_lay, ypo_sfc = model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
                                 with torch.no_grad(): 
                                     yto_lay, yto_sfc = model.pp_mp(targets_lay, targets_sfc, x_lay_raw )
                                 # ypo_lay, ypo_sfc, yto_lay, yto_sfc = model.pp_mp(preds_lay, preds_sfc, targets_lay, targets_sfc, x_lay_raw )
-    
+                                # if i>10: print ("yto lay true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
+                                # if i>10: print ("yto lay pp-true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
+
                             else:
                                 ypo_lay, ypo_sfc = model.postprocessing(preds_lay, preds_sfc)
                                 yto_lay, yto_sfc = model.postprocessing(targets_lay, targets_sfc)
                             surf_pres_denorm = surf_pres*(sp_max - sp_min) + sp_mean
                             h_con = metric_h_con(yto_lay, ypo_lay, surf_pres_denorm)
+                            
                             if cfg.use_energy_loss: 
-                                loss = loss_fn(main_loss, h_con)
+                                loss = hybrid_loss(main_loss, h_con)
                             else:
                                 loss = main_loss
-                        
+                                                
                         if self.train:
                             if cfg.use_scaler:
                                 scaler.scale(loss).backward()
@@ -649,7 +629,7 @@ def main(cfg: DictConfig):
                         if j>loss_update_start_index:
                             with torch.no_grad():
                                 epoch_loss      += loss.item()
-                                if cfg.loss_fn_type =="huber":
+                                if cfg.loss_fn_type =="mse":
                                     epoch_mse       += main_loss.item()
                                 else:
                                     epoch_mse       += mse(targets_lay, targets_sfc, preds_lay, preds_sfc)
