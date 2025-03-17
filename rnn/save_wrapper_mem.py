@@ -139,6 +139,7 @@ lbd_qi  =  np.loadtxt(fpath_lbd_qi, delimiter=",", dtype=np.float32)
 # model = torch.jit.load(model_path_script)
 
 model_path_script = 'saved_models/LSTM-Hidden_lr0.001.neur128-128.num68516_script.pt'
+model_path_script = "saved_models/LSTM-Hidden_lr0.001.neur96-96.num67132_script.pt"
 model = torch.jit.load(model_path_script)
 
 # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -181,8 +182,8 @@ class NewModel(nn.Module):
         x_main = (x_main - self.original_model.xmean_lev)/(self.original_model.xdiv_lev)
         x_sfc =  (x_sfc -  self.original_model.xmean_sca)/(self.original_model.xdiv_sca)
         
-        if self.qinput_prune:
-            x_main[:,0:15,2:3] = 0.0
+        # if self.qinput_prune:
+        x_main[:,0:15,2:3] = 0.0
         # clip RH 
         x_main[:,:,1] = torch.clamp(x_main[:,:,1], 0, 1.2)
 
@@ -377,6 +378,21 @@ labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
 
 x = np.arange(60)
 ncols, nrows = 6,1
+
+
+fig, axs = plt.subplots(ncols=nrows, nrows=ncols, figsize=(5.5, 3.5)) #layout="constrained")
+for i in range(6):
+    axs[i].plot(x, bias[:,i]); 
+    axs[i].set_title(labels[i])
+    # axs[i].set_ylim(0,1)
+    axs[i].set_xlim(0,60)
+    axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
+    # axs[i].set_yticklabels([])
+    # axs[i].set_xticklabels([])
+
+fig.subplots_adjust(hspace=0.6)
+
+
 fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
                         gridspec_kw = {'wspace':0}) #layout="constrained")
 for i in range(6):
@@ -392,22 +408,10 @@ for i in range(6):
 fig.subplots_adjust(hspace=0)
 
 
-fig, axs = plt.subplots(ncols=nrows, nrows=ncols, figsize=(5.5, 3.5)) #layout="constrained")
-for i in range(6):
-    axs[i].plot(x, bias[:,i]); 
-    axs[i].set_title(labels[i])
-    # axs[i].set_ylim(0,1)
-    axs[i].set_xlim(0,60)
-    axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
-    # axs[i].set_yticklabels([])
-    # axs[i].set_xticklabels([])
-
-fig.subplots_adjust(hspace=0.6)
-
 f
 # fig.suptitle("Bias for val first 2160 batches")
 
 # save_file_torch = "v4_rnn-memory_wrapper_constrained_huber_160.pt"
 # save_file_torch = "v4_rnn-memory_wrapper_constrained_huber_160.pt"
-save_file_torch = "wrappers/v4_rnn-memory_wrapper_constrained_hybrid_128_68516.pt"  
+save_file_torch = "wrappers/v4_rnn-memory_wrapper_constrained_hybrid_3x96_67132_ep10.pt"  
 # scripted_model.save(save_file_torch)
