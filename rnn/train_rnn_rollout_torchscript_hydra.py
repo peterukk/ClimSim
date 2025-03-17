@@ -444,7 +444,8 @@ def main(cfg: DictConfig):
     cwd = os.getcwd()
     conf["dtypestr"] = dtypestr
     conf["cwd"] = cwd
-    
+    conf["model_num"] = model_num
+
     # OmegaConf.save(sorted(config), "conf/autoreg_LSTM.yaml")
     if cfg.use_wandb:
         os.environ["WANDB__SERVICE_WAIT"]="400"
@@ -635,7 +636,13 @@ def main(cfg: DictConfig):
                                 optimizer.step()
                 
                             optimizer.zero_grad()
-                                
+                            loss = loss.detach()
+                            h_con = h_con.detach() 
+                            
+                        ypo_lay = ypo_lay.detach(); ypo_sfc = ypo_sfc.detach()
+                        yto_lay = yto_lay.detach(); yto_sfc = yto_sfc.detach()
+                        
+                            
                         running_loss    += loss.item()
                         running_energy  += h_con.item()
                         #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
@@ -661,12 +668,12 @@ def main(cfg: DictConfig):
     
                                 self.metric_R2.update(ypo_lay.reshape((-1,ny_pp)), yto_lay.reshape((-1,ny_pp)))
                                        
-                                r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
+                                r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
                                 epoch_R2precc += r2_np
                                 #print("R2 numpy", r2_np, "R2 torch", self.metric_R2_precc(ypo_sfc[:,3:4], yto_sfc[:,3:4]) )
     
-                                ypo_lay = ypo_lay.reshape(-1,nlev,ny_pp).detach().cpu().numpy()
-                                yto_lay = yto_lay.reshape(-1,nlev,ny_pp).detach().cpu().numpy()
+                                ypo_lay = ypo_lay.reshape(-1,nlev,ny_pp).cpu().numpy()
+                                yto_lay = yto_lay.reshape(-1,nlev,ny_pp).cpu().numpy()
     
                                 epoch_r2_lev += metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay) 
                                # if track_ks:
@@ -702,7 +709,9 @@ def main(cfg: DictConfig):
                         t0_it = time.time()
                         t_comp = 0
                     j += 1
-
+                    
+                del x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk
+                
             #if self.loader.dataset.cache and epoch==0:
             #    self.loader.dataset.cache_loaded = True
     
@@ -748,10 +757,13 @@ def main(cfg: DictConfig):
                                                                 self.metrics['R2_heating'],
                                                                 R2_moistening, # self.metrics['R2_moistening'],                                                              
                                                                 self.metrics['R2_precc'] ))
-    
-            if cuda: torch.cuda.empty_cache()
+            
+            del loss, main_loss, h_con
+            if cfg.autoregressive:
+                del rnn1_mem
+            if cuda: 
+                torch.cuda.empty_cache()
             gc.collect()
-
     
     # 160 160
     # autoreg, hybrid-loss, 2 years concat
