@@ -4,6 +4,7 @@
 PyTorch data loader based on indexing HDF5 file, and other utils
 """
 import ctypes
+import os
 import multiprocessing as mp
 import psutil
 import h5py
@@ -506,11 +507,13 @@ class generator_xy(torch.utils.data.Dataset):
             
             if self.no_multiprocessing:
                 print("Using only one worker, loading all data to RAM", flush=True)
+                os.system("df -h /dev/shm/")
 
                 self.input_lev = np.empty((ns,nloc,nlev,nx),dtype=np.float32)
                 print("input_lev initialized", flush=True)
                 print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
-    
+                os.system("df -h /dev/shm/")
+                
                 self.input_sca = np.empty((ns,nloc,self.nx_sfc),dtype=np.float32)
                 self.output_lev = np.empty((ns,nloc,nlev,self.ny),dtype=np.float32)
                 print("output_lev initialized", flush=True)
