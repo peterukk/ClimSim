@@ -1264,7 +1264,8 @@ class LSTM_torchscript(nn.Module):
         self.add_stochastic_layer = add_stochastic_layer
         self.coeff_stochastic = coeff_stochastic
         self.nonlin = nn.Tanh()
-
+        self.relu = nn.ReLU()
+        
         self.yscale_lev = torch.from_numpy(out_scale)
         self.yscale_sca = torch.from_numpy(out_sfc_scale)
             
@@ -1449,7 +1450,8 @@ class LSTM_torchscript(nn.Module):
             out[:,0:12,1:] = out[:,0:12,1:].clone().zero_()
         
         out_sfc = self.mlp_surface_output(last_h.squeeze())
-       
+        out_sfc = self.nonlin(out_sfc)
+
         return out, out_sfc
 
 
