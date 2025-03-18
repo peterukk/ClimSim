@@ -789,8 +789,9 @@ def main(cfg: DictConfig):
 
 
     save_file_torch = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script.pt"
-    best_val_loss = np.inf
-    
+    # best_val_loss = np.inf
+    best_val_loss = 0.0
+
     # w
     
     for epoch in range(cfg.num_epochs):
@@ -842,11 +843,13 @@ def main(cfg: DictConfig):
                 logged_metrics['epoch'] = epoch
                 wandb.log(logged_metrics)
     
-            val_loss = val_runner.metrics["loss"]
-    
+            # val_loss = val_runner.metrics["loss"]
+            val_loss = val_runner.metrics["R2"]
+
             # MODEL CHECKPOINT IF VALIDATION LOSS IMPROVED
-            if cfg.save_model and val_loss < best_val_loss:
-    
+            # if cfg.save_model and val_loss < best_val_loss:
+            if cfg.save_model and val_loss > best_val_loss:
+                print("New best validation result obtained, saving model to", SAVE_PATH)
                 torch.save({
                             'epoch': epoch,
                             'model_state_dict': model.state_dict(),
