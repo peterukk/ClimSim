@@ -139,6 +139,7 @@ lbd_qi  =  np.loadtxt(fpath_lbd_qi, delimiter=",", dtype=np.float32)
 # model = torch.jit.load(model_path_script)
 
 model_path_script = 'saved_models/LSTM-Hidden_lr0.001.neur128-128.num68516_script.pt'
+model_path_script = "saved_models/LSTM-Hidden_lr0.001.neur96-96.num67132_script.pt"
 model = torch.jit.load(model_path_script)
 
 # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -164,16 +165,25 @@ class NewModel(nn.Module):
         self.lbd_qc     = torch.tensor(lbd_qc, dtype=torch.float32)
         self.lbd_qi     = torch.tensor(lbd_qi, dtype=torch.float32)
         self.hardtanh = nn.Hardtanh(0.0, 1.0)
+        self.snowhice_fix = True
 
     def preprocessing_v4(self, x_main0, x_sfc0):
         # v4 input array
         x_main = x_main0.clone()
         x_sfc = x_sfc0.clone()
         
+        # for i in range(x_main.shape[-1]):
+        #     print("i", i, "min max", np.min(x_main[:,:,i]), np.max(x_main[:,:,i]))
+        # for i in range(x_sfc.shape[-1]):
+        #     print("i", i, "min max sfc", np.min(x_sfc[:,i]), np.max(x_sfc[:,i]))
 
         # v4 inputs
         x_main[:,:,2] = 1 - torch.exp(-x_main[:,:,2] * self.lbd_qc)
         x_main[:,:,3] = 1 - torch.exp(-x_main[:,:,3] * self.lbd_qi)   
+        
+        if self.snowhice_fix:
+            x_sfc = torch.where(torch.ge(x_sfc,1e10), torch.tensor(-1.0), x_sfc)
+
 
         #                            mean     max - min
         # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
@@ -181,8 +191,8 @@ class NewModel(nn.Module):
         x_main = (x_main - self.original_model.xmean_lev)/(self.original_model.xdiv_lev)
         x_sfc =  (x_sfc -  self.original_model.xmean_sca)/(self.original_model.xdiv_sca)
         
-        if self.qinput_prune:
-            x_main[:,0:15,2:3] = 0.0
+        # if self.qinput_prune:
+        x_main[:,0:15,2:3] = 0.0
         # clip RH 
         x_main[:,:,1] = torch.clamp(x_main[:,:,1], 0, 1.2)
 
@@ -377,6 +387,21 @@ labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
 
 x = np.arange(60)
 ncols, nrows = 6,1
+
+
+fig, axs = plt.subplots(ncols=nrows, nrows=ncols, figsize=(5.5, 3.5)) #layout="constrained")
+for i in range(6):
+    axs[i].plot(x, bias[:,i]); 
+    axs[i].set_title(labels[i])
+    # axs[i].set_ylim(0,1)
+    axs[i].set_xlim(0,60)
+    axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
+    # axs[i].set_yticklabels([])
+    # axs[i].set_xticklabels([])
+
+fig.subplots_adjust(hspace=0.6)
+
+
 fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
                         gridspec_kw = {'wspace':0}) #layout="constrained")
 for i in range(6):
@@ -392,22 +417,10 @@ for i in range(6):
 fig.subplots_adjust(hspace=0)
 
 
-fig, axs = plt.subplots(ncols=nrows, nrows=ncols, figsize=(5.5, 3.5)) #layout="constrained")
-for i in range(6):
-    axs[i].plot(x, bias[:,i]); 
-    axs[i].set_title(labels[i])
-    # axs[i].set_ylim(0,1)
-    axs[i].set_xlim(0,60)
-    axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
-    # axs[i].set_yticklabels([])
-    # axs[i].set_xticklabels([])
-
-fig.subplots_adjust(hspace=0.6)
-
 f
 # fig.suptitle("Bias for val first 2160 batches")
 
 # save_file_torch = "v4_rnn-memory_wrapper_constrained_huber_160.pt"
 # save_file_torch = "v4_rnn-memory_wrapper_constrained_huber_160.pt"
-save_file_torch = "wrappers/v4_rnn-memory_wrapper_constrained_hybrid_128_68516.pt"  
+save_file_torch = "wrappers/v4_rnn-memory_wrapper_constrained_hybrid_3x96_67132_ep10.pt"  
 # scripted_model.save(save_file_torch)

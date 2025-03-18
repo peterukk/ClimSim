@@ -270,6 +270,10 @@ def main(cfg: DictConfig):
         sfc_vars_remove = (17, 18, 19, 20, 21)
         xdiv_sca =  np.delete(xdiv_sca,sfc_vars_remove)
         xmean_sca =  np.delete(xmean_sca,sfc_vars_remove) 
+    
+    if cfg.snowhice_fix:
+        xmean_sca[15] = 0.0 
+        xdiv_sca[15] = 1.0 
         
     xcoeff_sca = np.stack((xmean_sca, xdiv_sca))
     xcoeff_lev = np.stack((xmean_lev, xdiv_lev))
@@ -421,8 +425,16 @@ def main(cfg: DictConfig):
     
     hybrid_loss = metrics.get_hybrid_loss(torch.tensor(cfg._lambda))
     
-    optimizer = torch.optim.Adam(model.parameters(), lr = cfg.lr)
-    
+    if cfg.optimizer == "adam":
+        optimizer = torch.optim.Adam(model.parameters(), lr = cfg.lr)
+    elif cfg.optimizer == "adamw":
+        optimizer = torch.optim.AdamW(model.parameters(), lr = cfg.lr)
+    elif cfg.optimizer == "adamwschedulefree":
+        import schedulefree
+        optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=cfg.lr)
+    else:
+        raise NotImplementedError()
+
     # if not cfg.autoregressive:
     #     timewindow = 1
     #     timestep_scheduling=False
@@ -500,6 +512,12 @@ def main(cfg: DictConfig):
             t_comp =0 
             t0_it = time.time()
             j = 0; k = 0; k2=2    
+            
+            if cfg.optimizer == "adamwschedulefree":
+                if self.train:
+                    optimizer.train()
+                else:
+                    optimizer.eval()
             
             if cfg.autoregressive:
                 preds_lay = []; preds_sfc = []

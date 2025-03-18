@@ -1,25 +1,37 @@
-tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1_3_5_7_nocompress_chunk3.h5
+tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_nocompress_chunk3.h5
 val_data_fname: data_v4_rnn_nonorm_year8_nocompress_chunk3.h5
 tr_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
 val_data_dir: "/media/peter/CrucialBX500/data/ClimSim/low_res_expanded/"
 
-num_workers: 7
-chunksize_train: 144
+cache: false
+num_workers: 4
+chunksize_train: 42
 chunksize_val: 14
 
 autoregressive: true
 mp_mode: 1
+#input_norm_per_level: true
+#output_norm_per_level: true
+#loss_fn_type: mse
+#_lambda: 1.0e-05
+#loss_fn_type: huber
+#_lambda: 5.0e-06
 input_norm_per_level: false
 output_norm_per_level: false
+loss_fn_type: huber
+_lambda: 5.0e-05
 output_prune: true
 qinput_prune: true
 rh_prune: true
 remove_past_sfc_inputs: true
 v4_to_v5_inputs: false
+snowhice_fix: true
 
 nneur:
-- 128
-- 128
+- 96
+- 96
+- 96
+
 add_pres: true
 add_refpres: false
 add_stochastic_layer: false
@@ -34,13 +46,13 @@ save_model: true
 use_wandb: true
 num_epochs: 20
 use_energy_loss: true
-loss_fn_type: mse
-_lambda: 1.0e-05
 lr: 0.001
-mp_autocast: true
+mp_autocast: false
 use_scaler: true
 shuffle_data: false
 timestep_scheduling: true
+optimizer: adam
+#optimizer: adamwschedulefree
 rollout_schedule:
 - 1
 - 1
@@ -48,8 +60,8 @@ rollout_schedule:
 - 2
 - 3
 - 4
-- 5
-- 5
-- 5
-- 5
+- 4
+- 4
+- 4
+- 4
 
