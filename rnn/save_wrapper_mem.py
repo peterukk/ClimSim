@@ -165,16 +165,25 @@ class NewModel(nn.Module):
         self.lbd_qc     = torch.tensor(lbd_qc, dtype=torch.float32)
         self.lbd_qi     = torch.tensor(lbd_qi, dtype=torch.float32)
         self.hardtanh = nn.Hardtanh(0.0, 1.0)
+        self.snowhice_fix = True
 
     def preprocessing_v4(self, x_main0, x_sfc0):
         # v4 input array
         x_main = x_main0.clone()
         x_sfc = x_sfc0.clone()
         
+        # for i in range(x_main.shape[-1]):
+        #     print("i", i, "min max", np.min(x_main[:,:,i]), np.max(x_main[:,:,i]))
+        # for i in range(x_sfc.shape[-1]):
+        #     print("i", i, "min max sfc", np.min(x_sfc[:,i]), np.max(x_sfc[:,i]))
 
         # v4 inputs
         x_main[:,:,2] = 1 - torch.exp(-x_main[:,:,2] * self.lbd_qc)
         x_main[:,:,3] = 1 - torch.exp(-x_main[:,:,3] * self.lbd_qi)   
+        
+        if self.snowhice_fix:
+            x_sfc = torch.where(torch.ge(x_sfc,1e10), torch.tensor(-1.0), x_sfc)
+
 
         #                            mean     max - min
         # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)

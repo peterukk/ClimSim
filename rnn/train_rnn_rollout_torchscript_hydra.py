@@ -270,6 +270,10 @@ def main(cfg: DictConfig):
         sfc_vars_remove = (17, 18, 19, 20, 21)
         xdiv_sca =  np.delete(xdiv_sca,sfc_vars_remove)
         xmean_sca =  np.delete(xmean_sca,sfc_vars_remove) 
+    
+    if cfg.snowhice_fix:
+        xmean_sca[15] = 0.0 
+        xdiv_sca[15] = 1.0 
         
     xcoeff_sca = np.stack((xmean_sca, xdiv_sca))
     xcoeff_lev = np.stack((xmean_lev, xdiv_lev))

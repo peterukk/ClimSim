@@ -103,250 +103,6 @@ lbd_qn = np.array([10000000.        , 10000000.        , 10000000.        ,
 # liquid_ratio = (T_denorm - 253.16) / 20.0 
 # liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
         
-class model_train_eval:
-    def __init__(self, dataloader, model, conf, train):
-                 #batch_size = 384, autoregressive=True, train=True):
-        super().__init__()
-        self.loader = dataloader
-        self.train = train
-        self.model = model 
-        self.report_freq = 800
-        self.batch_size = conf['batch_size']
-        self.nlay = conf['nlay']
-        self.autoregressive = conf['autoregressive']
-        self.cuda = conf['cuda']
-        self.device =  torch.device("cuda" if self.cuda else "cpu")
-        self.metric_R2 =  R2Score(num_outputs= conf['ny_pp']).to(self.device) 
-        self.metrics = {}
-
-    def eval_one_epoch(self, epoch, timewindow=1):
-        report_freq = self.report_freq
-        device = self.device
-        running_loss = 0.0; running_energy = 0.0
-        epoch_loss = 0.0; epoch_mse = 0.0; epoch_mae = 0.0
-        epoch_R2precc = 0.0; epoch_r2_lev = 0.0
-        epoch_hcon = 0.0
-        epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
-        epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
-        ny_pp = self.conf['ny_pp']; ny_sfc = self.conf['ny_sfc']
-        nlay = self.conf['nlay']
-        t_comp =0 
-        if self.autoregressive:
-            preds_lay = []; preds_sfc = []
-            targets_lay = []; targets_sfc = [] 
-            surf_pres = [];  x_lay_raw = []
-            yto_lay = []; yto_sfc = []
-        t0_it = time.time()
-        j = 0; k = 0 
-        if self.autoregressive:
-            rnn1_mem = torch.zeros(self.batch_size, self.nlay, self.model.nh_mem, device=self.device)
-            loss_update_start_index = 60
-        else:
-            loss_update_start_index = 0
-            
-        for i,data in enumerate(self.loader):
-
-            # x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, ytos_lay_chk, ytos_sfc_chk, x_lay_raw_chk  = data
-            # x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk, ytos_lay_chk, ytos_sfc_chk  = data
-            x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk  = data
-
-            # print(" x lay raw 0,50::", x_lay_raw_chk[0,50:,0])
-            x_lay_chk       = x_lay_chk.to(device)
-            x_lay_raw_chk   = x_lay_raw_chk.to(device)
-            x_sfc_chk       = x_sfc_chk.to(device)
-            targets_sfc_chk = targets_sfc_chk.to(device)
-            targets_lay_chk = targets_lay_chk.to(device)
-            
-            x_lay_chk       = torch.split(x_lay_chk, self.batch_size)
-            x_lay_raw_chk   = torch.split(x_lay_raw_chk, self.batch_size)
-            x_sfc_chk       = torch.split(x_sfc_chk, self.batch_size)
-            targets_sfc_chk = torch.split(targets_sfc_chk, self.batch_size)
-            targets_lay_chk = torch.split(targets_lay_chk, self.batch_size)
-
-            # to speed-up IO, we loaded chk=many batches, which now need to be divided into batches
-            # each batch is one time step
-            for ichunk in range(len(x_lay_chk)):
-                x_lay0 = x_lay_chk[ichunk]
-                x_lay_raw0 = x_lay_raw_chk[ichunk]
-                x_sfc0 = x_sfc_chk[ichunk]; sp0 = x_sfc0[:,0:1] 
-                target_lay0 = targets_lay_chk[ichunk]
-                target_sfc0 = targets_sfc_chk[ichunk]
-
-                tcomp0= time.time()
-                
-                with torch.autocast(device_type=device.type, dtype=self.conf['dtype']):
-                    if self.autoregressive:
-                        preds_lay0, preds_sfc0, rnn1_mem = self.model(x_lay0, x_sfc0, rnn1_mem)
-                    else:
-                        preds_lay0, preds_sfc0 = self.model(x_lay0, x_sfc0)
-
-         
-
-                if self.autoregressive:
-                    # In the autoregressive training case are gathering many time steps before computing loss
-                    preds_lay.append(preds_lay0)
-                    preds_sfc.append(preds_sfc0)
-                    targets_lay.append(target_lay0)
-                    targets_sfc.append(target_sfc0)
-                    surf_pres.append(sp0) 
-                    x_lay_raw.append(x_lay_raw0)                  
-                else:
-                    preds_lay = preds_lay0
-                    preds_sfc = preds_sfc0
-                    targets_lay = target_lay0
-                    targets_sfc = target_sfc0
-                    surf_pres = sp0
-                    x_lay_raw = x_lay_raw0
-                    # yto_lay = yto_lay0
-                    # yto_sfc = yto_sfc0
-                    
-                if (not self.autoregressive) or (self.autoregressive and (j+1) % timewindow==0):
-            
-                    if self.autoregressive:
-                        preds_lay   = torch.cat(preds_lay)
-                        preds_sfc   = torch.cat(preds_sfc)
-                        targets_lay = torch.cat(targets_lay)
-                        targets_sfc = torch.cat(targets_sfc)
-                        surf_pres   = torch.cat(surf_pres)
-                        x_lay_raw   = torch.cat(x_lay_raw)
-                        # yto_lay     = torch.cat(yto_lay)
-                        # yto_sfc     = torch.cat(yto_sfc)   
-                        
-                    with torch.autocast(device_type=device.type, dtype=self.conf['dtype']):
-                        #loss = loss_fn(targets_lay, targets_sfc, preds_lay, preds_sfc)
-                        
-                        main_loss = self.regular_loss(targets_lay, targets_sfc, preds_lay, preds_sfc)
-                        
-                        if self.conf['use_mp_constraint']:
-                            ypo_lay, ypo_sfc = self.model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
-                            with torch.no_grad(): 
-                                yto_lay, yto_sfc = self.model.pp_mp(targets_lay, targets_sfc, x_lay_raw )
-                            # ypo_lay, ypo_sfc, yto_lay, yto_sfc = model.pp_mp(preds_lay, preds_sfc, targets_lay, targets_sfc, x_lay_raw )
-                            # if i>10: print ("yto lay true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
-                            # if i>10: print ("yto lay pp-true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
-
-                        else:
-                            ypo_lay, ypo_sfc = self.model.postprocessing(preds_lay, preds_sfc)
-                            yto_lay, yto_sfc = self.model.postprocessing(targets_lay, targets_sfc)
-                        surf_pres_denorm = surf_pres*(self.sp_max - self.sp_min) + self.sp_mean
-                        h_con = self.metric_h_con(yto_lay, ypo_lay, surf_pres_denorm)
-                        
-                        if self.conf['use_energy_loss']: 
-                            loss = self.loss_fn(main_loss, h_con)
-                        else:
-                            loss = main_loss
-
-                    if self.train:
-                        if self.conf['use_scaler']:
-                            self.scaler.scale(loss).backward()
-                            self.scaler.step(self.optimizer)
-                            self.scaler.update()
-                        else:
-                            loss.backward()       
-                            self.optimizer.step()
-            
-                        self.optimizer.zero_grad()
-                            
-                    running_loss    += loss.item()
-                    running_energy  += h_con.item()
-                    #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
-                    if j>loss_update_start_index:
-                        with torch.no_grad():
-                            epoch_loss      += loss.item()
-                            if self.conf['loss_fn'] =="huber":
-                                epoch_mse       += main_loss.item()
-                            else:
-                                epoch_mse       += self.mse(targets_lay, targets_sfc, preds_lay, preds_sfc)
-                            #epoch_mae       += mae.item()
-                        
-                            epoch_hcon  += h_con.item()
-                            
-                            biases_lev, biases_sfc = metrics.compute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc)
-                            epoch_bias_lev += np.mean(biases_lev)
-                            epoch_bias_heating += biases_lev[0]
-                            epoch_bias_clw += biases_lev[2]
-                            epoch_bias_cli += biases_lev[3]
-
-                            epoch_bias_sfc += np.mean(biases_sfc)
-
-                            self.metric_R2.update(ypo_lay.reshape((-1,ny_pp)), yto_lay.reshape((-1,ny_pp)))
-                                   
-                            r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
-                            epoch_R2precc += r2_np
-                            #print("R2 numpy", r2_np, "R2 torch", self.metric_R2_precc(ypo_sfc[:,3:4], yto_sfc[:,3:4]) )
-
-                            ypo_lay = ypo_lay.reshape(-1,nlay,ny_pp).detach().cpu().numpy()
-                            yto_lay = yto_lay.reshape(-1,nlay,ny_pp).detach().cpu().numpy()
-
-                            epoch_r2_lev += metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay) 
-                           # if track_ks:
-                           #     if (j+1) % max(timewindow*4,12)==0:
-                           #         epoch_ks += kolmogorov_smirnov(yto,ypo).item()
-                           #         k2 += 1
-                            k += 1
-                    if self.autoregressive:
-                        preds_lay = []; preds_sfc = []
-                        targets_lay = []; targets_sfc = [] 
-                        surf_pres = []; x_lay_raw = []
-                        yto_lay = []; yto_sfc = []
-                        
-                    if self.autoregressive: 
-                        # model.detach_states()
-                        rnn1_mem = rnn1_mem.detach()
-                        
-                t_comp += time.time() - tcomp0
-                # # print statistics 
-                if j % report_freq == (report_freq-1): # print every 200 minibatches
-                    elaps = time.time() - t0_it
-                    running_loss = running_loss / (report_freq/timewindow)
-                    running_energy = running_energy / (report_freq/timewindow)
-                    
-                    r2raw = self.metric_R2.compute()
-                    #r2raw_prec = self.metric_R2_precc.compute()
-
-                    #ypo_lay, ypo_sfc = model.postprocessing(preds_lay, preds_sfc)
-                    #yto_lay, yto_sfc = model.postprocessing(targets_lay, targets_sfc) 
-                    #r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
-
-                    print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  runR2: {:.2f},  elapsed {:.1f}s (compute {:.1f})" .format(epoch + 1, 
-                                                    j+1, running_loss,running_energy, r2raw, elaps, t_comp))
-                    running_loss = 0.0
-                    running_energy = 0.0
-                    t0_it = time.time()
-                    t_comp = 0
-                j += 1
-
-        self.metrics['loss'] =  epoch_loss / k
-        self.metrics['mean_squared_error'] = epoch_mse / k
-        self.metrics["h_conservation"] =  epoch_hcon / k
-        
-        self.metrics["bias_lev"] = epoch_bias_lev / k 
-        self.metrics["bias_sfc"] = epoch_bias_sfc / k 
-        self.metrics["bias_heating"] = epoch_bias_heating / k 
-        self.metrics["bias_cldliq"] = epoch_bias_clw / k 
-        self.metrics["bias_cldice"] = epoch_bias_cli / k 
-
-        self.metrics['R2'] = self.metric_R2.compute()
-        
-        self.metrics['R2_heating'] = epoch_r2_lev[:,0].mean() / k
-        R2_moistening = epoch_r2_lev[:,1].mean() / k
-        self.metrics['R2_precc'] = epoch_R2precc / k
-        self.metrics['R2_lev'] = epoch_r2_lev / k
-        
-        self.metric_R2.reset() 
-
-        datatype = "TRAIN" if self.train else "VAL"
-        print('Epoch {} {} loss: {:.2e}  MSE: {:.2e}  h-con:  {:.2e}   R2: {:.2f}  R2-dT/dt: {:.2f}   R2-dq/dt: {:.2f}   R2-precc: {:.3f}'.format(epoch+1, datatype, 
-                                                            self.metrics['loss'], 
-                                                            self.metrics['mean_squared_error'], 
-                                                            self.metrics['h_conservation'],
-                                                            self.metrics['R2'],
-                                                            self.metrics['R2_heating'],
-                                                            R2_moistening, # self.metrics['R2_moistening'],                                                              
-                                                            self.metrics['R2_precc'] ))
-
-        if self.cuda: torch.cuda.empty_cache()
-        gc.collect()
     
 @njit(fastmath=True)    
 def v4_to_v5_inputs_numba(x_lev_b, liq_ratio):
@@ -408,7 +164,8 @@ class generator_xy(torch.utils.data.Dataset):
                  rh_prune=False,
                  output_prune=False,
                  mp_mode=0,
-                 no_multiprocessing=False): # 0 = regular outputs, 1 = mp constraint, 2 = pred liq ratio
+                 no_multiprocessing=False,
+                 snowhice_fix=True): # 0 = regular outputs, 1 = mp constraint, 2 = pred liq ratio
                  # use_mp_constraint=False):
         self.filepath = filepath
         # The file list will be divided into chunks (a list of lists)eg [[12,4,32],[1,9,3]..]
@@ -422,6 +179,7 @@ class generator_xy(torch.utils.data.Dataset):
         self.remove_past_sfc_inputs = remove_past_sfc_inputs
         self.mp_mode = mp_mode
         self.no_multiprocessing=no_multiprocessing
+        self.snowhice_fix = snowhice_fix
         self.qinput_prune = qinput_prune
         self.rh_prune = rh_prune 
         self.output_prune=output_prune
@@ -701,6 +459,8 @@ class generator_xy(torch.utils.data.Dataset):
         if self.remove_past_sfc_inputs:
             x_sfc_b = np.delete(x_sfc_b,(17, 18, 19, 20, 21),axis=1)
           
+        if self.snowhice_fix:
+            x_sfc_b[x_sfc_b>1.0e10] = -1.0
         # elaps = time.time() - t0_it
         # print("Runtime load {:.2f}s".format(elaps))
         # t0_it = time.time()
