@@ -831,7 +831,8 @@ class LSTM_autoreg_torchscript(nn.Module):
     use_memory: Final[bool]
     separate_radiation: Final[bool]
     # predict_flux: Final[bool]
-    
+    use_third_rnn: Final[bool]
+
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
@@ -843,7 +844,8 @@ class LSTM_autoreg_torchscript(nn.Module):
                 output_prune=False,
                 use_memory=False,
                 separate_radiation=False,
-                predict_flux=False,
+                use_third_rnn=False,
+                # predict_flux=False,
                 ensemble_size=1,
                 coeff_stochastic = 0.0,
                 nh_mem=16):
@@ -863,14 +865,16 @@ class LSTM_autoreg_torchscript(nn.Module):
         self.nh_rnn1 = self.nneur[0]
         self.nx_rnn2 = self.nneur[0]
         self.nh_rnn2 = self.nneur[1]
-        if len(nneur)==3:
-            self.use_third_rnn = True 
+        self.use_third_rnn = use_third_rnn
+        # if len(nneur)==3:
+            # self.use_third_rnn = True 
+        if self.use_third_rnn:
             self.nx_rnn3 = self.nneur[1]
             self.nh_rnn3 = self.nneur[2]
-        elif len(nneur)==2:
-            self.use_third_rnn = False 
-        else:
-            raise NotImplementedError()
+        # elif len(nneur)==2:
+        #     self.use_third_rnn = False 
+        # else:
+        #     raise NotImplementedError()
 
         self.use_memory= use_memory
         self.separate_radiation=separate_radiation
@@ -951,6 +955,10 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.rnn1   = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)  # (input_size, hidden_size)
             self.rnn2   = nn.LSTM(self.nx_rnn3, self.nh_rnn3,  batch_first=True)
         else:
+
+            self.mlp_toa1  = nn.Linear(1, self.nh_rnn2)
+            self.mlp_toa2  = nn.Linear(1, self.nh_rnn2)
+
             self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)  # (input_size, hidden_size)
             self.rnn2      = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
 
@@ -1118,11 +1126,13 @@ class LSTM_autoreg_torchscript(nn.Module):
 
         rnn1out = torch.flip(rnn1out, [1])
 
-        # hx2 = torch.randn((batch_size, self.nh_rnn2),dtype=self.dtype,device=device)  # (batch, hidden_size)
-        # cx2 = torch.randn((batch_size, self.nh_rnn2),dtype=self.dtype,device=device)
-        hx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)  # (batch, hidden_size)
-        cx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)
-        
+        if self.use_third_rnn:
+          hx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)  # (batch, hidden_size)
+          cx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)
+        else: 
+          inputs_toa = inputs_sfc[:,1:2] # only pbuf_SOLIN
+          hx2 = self.mlp_toa1(inputs_toa)
+          cx2 = self.mlp_toa2(inputs_toa)
         hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
 
         input_rnn2 = rnn1out

@@ -287,7 +287,13 @@ def main(cfg: DictConfig):
     # ny_pp = ny 
     
     print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
-    
+    if len(cfg.nneur)==3:
+      use_third_rnn = True 
+    elif len(cfg.nneur)==2:
+      use_third_rnn = False 
+    else: 
+      raise NotImplementedError()
+
     if cfg.model_type=="LSTM":
         if cfg.autoregressive:
             model = LSTM_autoreg_torchscript(hyam,hybm,hyai,hybi,
@@ -304,7 +310,7 @@ def main(cfg: DictConfig):
                         output_prune = cfg.output_prune,
                         use_memory = cfg.autoregressive,
                         separate_radiation = cfg.separate_radiation,
-                        predict_flux = False)
+                        use_third_rnn = use_third_rnn)
         else:
             model = LSTM_torchscript(hyam,hybm,
                         out_scale = yscale_lev,
@@ -360,10 +366,10 @@ def main(cfg: DictConfig):
     # chunk_size_tr = cfg.chunksize_train
     
     if cfg.num_workers==0:
-        no_multiprocessing=False 
-        prefetch_factor = 0
-    else:
         no_multiprocessing=True
+        prefetch_factor = None
+    else:
+        no_multiprocessing=False
         prefetch_factor = 1
 
     
@@ -490,7 +496,7 @@ def main(cfg: DictConfig):
             epoch_r2_lev = 0.0
             epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
             epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
-    
+            epoch_bias_lev_tot = 0.0 
             t_comp =0 
             t0_it = time.time()
             j = 0; k = 0; k2=2    
@@ -638,14 +644,17 @@ def main(cfg: DictConfig):
                                 epoch_hcon  += h_con.item()
                                 # print("shape ypo", ypo_lay.shape, "yto", yto_lay.shape)
                                 
-                                biases_lev, biases_sfc = metrics.compute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc)
+                                biases_lev, biases_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc)
                                 epoch_bias_lev += np.mean(biases_lev)
                                 epoch_bias_heating += biases_lev[0]
                                 epoch_bias_clw += biases_lev[2]
                                 epoch_bias_cli += biases_lev[3]
-    
+
                                 epoch_bias_sfc += np.mean(biases_sfc)
-    
+
+                                biases_lev = metrics.compute_biases(yto_lay, ypo_lay)
+                                epoch_bias_lev_tot += np.mean(biases_lev)
+
                                 self.metric_R2.update(ypo_lay.reshape((-1,ny_pp)), yto_lay.reshape((-1,ny_pp)))
                                        
                                 r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
@@ -700,6 +709,8 @@ def main(cfg: DictConfig):
             self.metrics["h_conservation"] =  epoch_hcon / k
             
             self.metrics["bias_lev"] = epoch_bias_lev / k 
+            self.metrics["bias_lev_noabs"] = epoch_bias_lev_tot / k 
+
             self.metrics["bias_sfc"] = epoch_bias_sfc / k 
             self.metrics["bias_heating"] = epoch_bias_heating / k 
             self.metrics["bias_cldliq"] = epoch_bias_clw / k 

@@ -42,31 +42,17 @@ def my_mse(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
     return (mse1+mse2)/2
 
 
-# def compute_biases(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
-#     # y_true_lay = torch.abs(y_true_lay); y_pred_lay = torch.abs(y_pred_lay)
-#     # y_true_sfc = torch.abs(y_true_sfc); y_pred_sfc = torch.abs(y_pred_sfc) 
-    
-#     # mean_t_lay = torch.nanmean(y_true_lay,dim=(0,1))
-#     # mean_p_lay = torch.nanmean(y_pred_lay,dim=(0,1))
-#     mean_t_lay = torch.nanmean(y_true_lay,dim=(0))
-#     mean_p_lay = torch.nanmean(y_pred_lay,dim=(0))
-    
-#     mean_t_sfc = torch.nanmean(y_true_sfc,dim=(0))
-#     mean_p_sfc = torch.nanmean(y_pred_sfc,dim=(0))
-    
-#     mean_t_lay = torch.abs(mean_t_lay); mean_p_lay = torch.abs(mean_p_lay) 
-#     mean_t_sfc = torch.abs(mean_t_sfc); mean_p_sfc = torch.abs(mean_p_sfc)
-#     # Mean across levels and variables only after taking torch.abs(),
-#     # so that compensating biases are not hidden (Zeyuan Hu)
-#     mean_t_lay = torch.nanmean(mean_t_lay,dim=(0)); mean_p_lay = torch.nanmean(mean_p_lay,dim=(0))
-    
-#     biases_lev = mean_t_lay - mean_p_lay
-#     biases_sfc = mean_t_sfc - mean_p_sfc
+def compute_biases(y_true_lay, y_pred_lay):
 
-#     return biases_lev.detach().cpu().numpy(), biases_sfc.detach().cpu().numpy()
+    mean_t_lay = torch.nanmean(y_true_lay,dim=(0,1))
+    mean_p_lay = torch.nanmean(y_pred_lay,dim=(0,1))
+  
+    biases_lev = mean_t_lay - mean_p_lay
+
+    return biases_lev.detach().cpu().numpy()
 
 
-def compute_biases(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
+def compute_absolute_biases(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
     # 1) Mean across batches
     mean_t_lay  = torch.nanmean(y_true_lay,dim=(0))
     mean_p_lay  = torch.nanmean(y_pred_lay,dim=(0))
@@ -82,6 +68,8 @@ def compute_biases(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
     biases_lev = torch.nanmean(biases_lev, dim=(0)) 
     
     return biases_lev.detach().cpu().numpy(), biases_sfc.detach().cpu().numpy()
+
+
 
 # def my_mse_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
 

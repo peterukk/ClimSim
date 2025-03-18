@@ -500,7 +500,6 @@ class generator_xy(torch.utils.data.Dataset):
         self.cache_loaded = False
         if self.cache:
 
-            print("Using Shared memory between workers, loading all data to RAM", flush=True)
             if not self.separate_timedim:
                 raise NotImplementedError()
             ns, nloc, nlev, nx = dims
