@@ -74,10 +74,10 @@ def main(cfg: DictConfig):
     else:
         cfg.shuffle_data = False 
         
-        
-    if cuda:
+    if cfg.mp_autocast:
+    # if cuda:
         print(torch.cuda.get_device_name(0))
-        cfg.mp_autocast = True 
+        # cfg.mp_autocast = True 
         print(torch.cuda.is_bf16_supported())
         # if torch.cuda.is_bf16_supported(): 
         #     dtype=torch.bfloat16 
@@ -89,7 +89,7 @@ def main(cfg: DictConfig):
         cfg.use_scaler = True 
     else:
         dtype=torch.float32
-        cfg.mp_autocast = False
+        # cfg.mp_autocast = False
         cfg.use_scaler = False
         
         
@@ -783,9 +783,13 @@ def main(cfg: DictConfig):
     train_runner = model_train_eval(train_loader, model, batch_size_tr,  train=True)
     val_runner = model_train_eval(val_loader, model, batch_size_val, train=False)
     
-    SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}.num{}.pt'.format(cfg.model_type,
+    inpstr = "v5" if cfg.v4_to_v5_inputs else "v4"
+    outpstr = "v5" if use_mp_constraint else "v4"
+    SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}.pt'.format(cfg.model_type,
                                                                      cfg.memory, cfg.lr, 
-                                                                     cfg.nneur[0], cfg.nneur[1], model_num)
+                                                                     cfg.nneur[0], cfg.nneur[1], 
+                                                                     inpstr, outpstr,
+                                                                     model_num)
 
 
     save_file_torch = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script.pt"
