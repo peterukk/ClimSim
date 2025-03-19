@@ -1009,6 +1009,11 @@ class LSTM_autoreg_torchscript(nn.Module):
         liquid_ratio = (T_raw - 253.16) * 0.05 
         liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
         return liquid_ratio
+    
+    def postprocessing(self, out, out_sfc):
+        out             = out / self.yscale_lev.to(device=out.device)
+        out_sfc         = out_sfc / self.yscale_sca.to(device=out.device)
+        return out, out_sfc
         
     def pp_mp(self, out, out_sfc, x_denorm):
 
