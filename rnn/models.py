@@ -190,16 +190,16 @@ class MyRNN(nn.Module):
         out_sfc_denorm  = out_sfc / self.yscale_sca
         return out_denorm, out_sfc_denorm
     
-    def forward(self, inputs_main, inputs_sfc):
+    def forward(self, inputs_main, inputs_aux):
             
         # batch_size = inputs_main.shape[0]
         # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
       
-        sfc1 = self.mlp_surface1(inputs_sfc)
+        sfc1 = self.mlp_surface1(inputs_aux)
         sfc1 = nn.Tanh()(sfc1)
 
         if self.RNN_type=="LSTM":
-            sfc2 = self.mlp_surface2(inputs_sfc)
+            sfc2 = self.mlp_surface2(inputs_aux)
             sfc2 = nn.Tanh()(sfc2)
             hidden = (sfc1.view(1,-1,self.nneur[0]), sfc2.view(1,-1,self.nneur[0])) # (h0, c0)
         else:
@@ -338,6 +338,7 @@ class RNN_autoreg(nn.Module):
             self.nlay_rad = 60
             self.nx_rad = self.nx - 2
             # self.nx_rad = nx - 2
+            self.nx_sfc_rad = 15
 
             self.nx_rnn1 = self.nx_rnn1 - 3
             self.ny_rad = 1
@@ -446,7 +447,8 @@ class RNN_autoreg(nn.Module):
             self.nh_rnn2_rad = 96
             self.rnn1_rad      = nn.GRU(self.nh_rnn2+self.nx_rad, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
             self.rnn2_rad      = nn.GRU(self.nh_rnn1_rad, self.nh_rnn2_rad,  batch_first=True) 
-            self.mlp_surface_rad = nn.Linear(self.nx_sfc, self.nh_rnn1_rad)
+            self.mlp_surface_rad = nn.Linear(self.nx_sfc_rad, self.nh_rnn1_rad)
+            self.mlp_toa_rad = nn.Linear(1, self.nh_rnn1_rad)
             self.mlp_surface_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_sfc_rad)
             self.mlp_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_rad)
 
@@ -617,19 +619,19 @@ class RNN_autoreg(nn.Module):
     def set_states(self, states):
         self.rnn1_mem = states 
         
-    def forward(self, inputs_main, inputs_sfc):
+    def forward(self, inputs_main, inputs_aux):
         if self.ensemble_size>0:
             inputs_main = inputs_main.unsqueeze(0)
-            inputs_sfc = inputs_sfc.unsqueeze(0)
+            inputs_aux = inputs_aux.unsqueeze(0)
             inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
-            inputs_sfc = torch.repeat_interleave(inputs_sfc,repeats=self.ensemble_size,dim=0)
+            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
             inputs_main = inputs_main.flatten(0,1)
-            inputs_sfc = inputs_sfc.flatten(0,1)
+            inputs_aux = inputs_aux.flatten(0,1)
                     
         batch_size = inputs_main.shape[0]
         # print("shape inputs main", inputs_main.shape)
         if self.add_pres:
-            sp = torch.unsqueeze(inputs_sfc[:,0:1],1)
+            sp = torch.unsqueeze(inputs_aux[:,0:1],1)
             # undo scaling
             sp = sp*35451.17 + 98623.664
             pres  = self.preslay(sp)
@@ -644,7 +646,7 @@ class RNN_autoreg(nn.Module):
             qice_before = inputs_main[:,:,3:4]
             qn_before   = qliq_before + qice_before
             # print("min max x1 before", inputs_main[:,:,0].min(), inputs_main[:,:,0].max())
-            inputs_main, inputs_sfc = self.preprocessing(inputs_main, inputs_sfc)
+            inputs_main, inputs_aux = self.preprocessing(inputs_main, inputs_aux)
             # print("min max x1 after", inputs_main[:,:,0].min(), inputs_main[:,:,0].max())
         
         # if self.add_liqfrac_inp:
@@ -656,7 +658,7 @@ class RNN_autoreg(nn.Module):
             self.rnn1_mem = torch.randn(batch_size, self.nlay, self.nh_mem,device=device)
             # self.rnn1_mem = torch.randn((batch_size, self.nlay, self.nh_mem),dtype=self.dtype,device=device)
 
-        hx = self.mlp_surface1(inputs_sfc)
+        hx = self.mlp_surface1(inputs_aux)
         hx = nn.Tanh()(hx)
 
         # TOA is first in memory, so to start at the surface we need to go backwards
@@ -675,7 +677,7 @@ class RNN_autoreg(nn.Module):
                 cx = torch.randn(batch_size, self.nh_rnn1,device=device)
                 # cx = torch.randn((batch_size, self.nh_rnn1),dtype=self.dtype,device=device)
             else:
-                cx = self.mlp_surface2(inputs_sfc)
+                cx = self.mlp_surface2(inputs_aux)
                 cx = nn.Tanh()(cx)
             hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
         else:
@@ -789,7 +791,7 @@ class RNN_autoreg(nn.Module):
             inputs_rad[:,:,self.nh_rnn2:] = inputs_main_rad
             # inputs_rad = torch.flip(inputs_rad, [1])
 
-            hx = self.mlp_surface_rad(inputs_sfc)
+            hx = self.mlp_surface_rad(inputs_aux)
             hidden = (torch.unsqueeze(hx,0))
             rnn_out, states = self.rnn1_rad(inputs_rad, hidden)
             rnn_out = torch.flip(rnn_out, [1])
@@ -891,8 +893,9 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.nlay_rad = 60
             self.nx_rad = self.nx - 2
             # self.nx_rad = nx - 2
-
             self.nx_rnn1 = self.nx_rnn1 - 3
+            self.nx_sfc_rad = 5
+            self.nx_sfc = self.nx_sfc  - self.nx_sfc_rad
             self.ny_rad = 1
             self.ny_sfc_rad = self.ny_sfc - 2
             self.ny_sfc = 2
@@ -900,6 +903,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         self.add_stochastic_layer = add_stochastic_layer
         self.coeff_stochastic = coeff_stochastic
         self.nonlin = nn.Tanh()
+        self.relu = nn.ReLU()
 
         self.yscale_lev = torch.from_numpy(out_scale)
         self.yscale_sca = torch.from_numpy(out_sfc_scale)
@@ -911,7 +915,6 @@ class LSTM_autoreg_torchscript(nn.Module):
         # in ClimSim config of E3SM, the CRM physics first computes 
         # moist physics on 50 levels, and then computes radiation on 60 levels!
         self.use_intermediate_mlp=use_intermediate_mlp
-        
             
         if self.use_memory:
             if self.use_intermediate_mlp:
@@ -984,7 +987,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.nh_rnn2_rad = 96
             self.rnn1_rad      = nn.GRU(self.nh_mem+self.nx_rad, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
             self.rnn2_rad      = nn.GRU(self.nh_rnn1_rad, self.nh_rnn2_rad,  batch_first=True) 
-            self.mlp_surface_rad = nn.Linear(self.nx_sfc, self.nh_rnn1_rad)
+            self.mlp_surface_rad = nn.Linear(self.nx_sfc_rad, self.nh_rnn1_rad)
             self.mlp_surface_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_sfc_rad)
             self.mlp_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_rad)
     # def reset_states(self):
@@ -1047,19 +1050,19 @@ class LSTM_autoreg_torchscript(nn.Module):
         
         return out_denorm, out_sfc_denorm
     
-    def forward(self, inputs_main, inputs_sfc, rnn1_mem):
+    def forward(self, inputs_main, inputs_aux, rnn1_mem):
         if self.ensemble_size>0:
             inputs_main = inputs_main.unsqueeze(0)
-            inputs_sfc = inputs_sfc.unsqueeze(0)
+            inputs_aux = inputs_aux.unsqueeze(0)
             inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
-            inputs_sfc = torch.repeat_interleave(inputs_sfc,repeats=self.ensemble_size,dim=0)
+            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
             inputs_main = inputs_main.flatten(0,1)
-            inputs_sfc = inputs_sfc.flatten(0,1)
+            inputs_aux = inputs_aux.flatten(0,1)
                     
         batch_size = inputs_main.shape[0]
         # print("shape inputs main", inputs_main.shape)
         if self.add_pres:
-            sp = torch.unsqueeze(inputs_sfc[:,0:1],1)
+            sp = torch.unsqueeze(inputs_aux[:,0:1],1)
             # undo scaling
             sp = sp*35451.17 + 98623.664
             pres  = self.preslay(sp)
@@ -1087,7 +1090,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             inputs_main_crm = torch.cat((inputs_main_crm,rnn1_mem), dim=2)
             
         if self.use_third_rnn: # use initial downward RNN
-            inputs_toa = inputs_sfc[:,1:2] # only pbuf_SOLIN
+            inputs_toa = inputs_aux[:,1:2] # only pbuf_SOLIN
             cx0 = self.mlp_toa1(inputs_toa)
             # cx0 = self.nonlin(cx0)
             hx0 = self.mlp_toa2(inputs_toa)
@@ -1102,7 +1105,11 @@ class LSTM_autoreg_torchscript(nn.Module):
         
         # The input (a vertical sequence) is concatenated with the
         # output of the RNN from the previous time step 
-        
+
+        if self.separate_radiation:
+            inputs_sfc = torch.cat((inputs_aux[:,0:5],inputs_aux[:,11:]),dim=1)
+        else:
+            inputs_sfc = inputs_aux
         hx = self.mlp_surface1(inputs_sfc)
         hx = self.nonlin(hx)
         cx = self.mlp_surface2(inputs_sfc)
@@ -1130,7 +1137,7 @@ class LSTM_autoreg_torchscript(nn.Module):
           hx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)  # (batch, hidden_size)
           cx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)
         else: 
-          inputs_toa = inputs_sfc[:,1:2] # only pbuf_SOLIN
+          inputs_toa = inputs_aux[:,1:2] # only pbuf_SOLIN
           hx2 = self.mlp_toa1(inputs_toa)
           cx2 = self.mlp_toa2(inputs_toa)
         hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
@@ -1201,10 +1208,15 @@ class LSTM_autoreg_torchscript(nn.Module):
             inputs_rad[:,:,self.nh_mem:] = inputs_main_rad
             # inputs_rad = torch.flip(inputs_rad, [1])
 
-            hx = self.mlp_surface_rad(inputs_sfc)
+            inputs_sfc_rad = inputs_aux[:,6:11]
+            hx = self.mlp_surface_rad(inputs_sfc_rad)
             hidden = (torch.unsqueeze(hx,0))
             rnn_out, states = self.rnn1_rad(inputs_rad, hidden)
             rnn_out = torch.flip(rnn_out, [1])
+
+            inputs_toa = inputs_aux[:,1:2] # only pbuf_SOLIN
+            hx2 = self.mlp_toa_rad(inputs_toa)
+
             rnn_out, last_h = self.rnn2_rad(rnn_out, hidden)
             out_rad = self.mlp_output_rad(rnn_out)
 
@@ -1215,8 +1227,10 @@ class LSTM_autoreg_torchscript(nn.Module):
             #1D (scalar) Output variables: ['cam_out_NETSW', 'cam_out_FLWDS', 'cam_out_PRECSC', 
             #'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
             # print("shape 1", out_sfc[:,0:1].shape, "2", out_sfc_rad.shape)
-            out_sfc =  torch.cat((out_sfc[:,0:1], out_sfc_rad.squeeze(), out_sfc[:,1:]),dim=1)
+            # rad predicts everything except PRECSC, PRECC
+            out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
             
+        out_sfc = self.relu(out_sfc)
         # if self.predict_flux:
         #     gcp = 9.80665 / 1004
         #     preslev  = self.preslev(sp)
@@ -1363,19 +1377,19 @@ class LSTM_torchscript(nn.Module):
         
         return out_denorm, out_sfc_denorm
     
-    def forward(self, inputs_main, inputs_sfc):
+    def forward(self, inputs_main, inputs_aux):
         if self.ensemble_size>0:
             inputs_main = inputs_main.unsqueeze(0)
-            inputs_sfc = inputs_sfc.unsqueeze(0)
+            inputs_aux = inputs_aux.unsqueeze(0)
             inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
-            inputs_sfc = torch.repeat_interleave(inputs_sfc,repeats=self.ensemble_size,dim=0)
+            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
             inputs_main = inputs_main.flatten(0,1)
-            inputs_sfc = inputs_sfc.flatten(0,1)
+            inputs_aux = inputs_aux.flatten(0,1)
                     
         batch_size = inputs_main.shape[0]
         # print("shape inputs main", inputs_main.shape)
         if self.add_pres:
-            sp = torch.unsqueeze(inputs_sfc[:,0:1],1)
+            sp = torch.unsqueeze(inputs_aux[:,0:1],1)
             # undo scaling
             sp = sp*35451.17 + 98623.664
             pres  = self.preslay(sp)
@@ -1383,7 +1397,7 @@ class LSTM_torchscript(nn.Module):
             
         # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        hx = self.mlp_surface1(inputs_sfc)
+        hx = self.mlp_surface1(inputs_aux)
         hx = self.nonlin(hx)
 
         # TOA is first in memory, so to start at the surface we need to go backwards
@@ -1391,7 +1405,7 @@ class LSTM_torchscript(nn.Module):
         
         # The input (a vertical sequence) is concatenated with the
         # output of the RNN from the previous time step 
-        cx = self.mlp_surface2(inputs_sfc)
+        cx = self.mlp_surface2(inputs_aux)
         cx = self.nonlin(cx)
         hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
 
@@ -1450,7 +1464,7 @@ class LSTM_torchscript(nn.Module):
             out[:,0:12,1:] = out[:,0:12,1:].clone().zero_()
         
         out_sfc = self.mlp_surface_output(last_h.squeeze())
-        out_sfc = self.nonlin(out_sfc)
+        out_sfc = self.relu(out_sfc)
 
         return out, out_sfc
 
@@ -1718,7 +1732,7 @@ class SpaceStateModel(nn.Module):
         
         return out_denorm, out_sfc_denorm
     
-    def forward(self, inputs_main, inputs_sfc):
+    def forward(self, inputs_main, inputs_aux):
 
         # print("Shape inputs main", inputs_main.shape)
         batch_size = inputs_main.shape[0]
@@ -1726,7 +1740,7 @@ class SpaceStateModel(nn.Module):
         device=self.device
 
         if self.add_pres:
-            sp = torch.unsqueeze(inputs_sfc[:,0:1],1)
+            sp = torch.unsqueeze(inputs_aux[:,0:1],1)
             # undo scaling
             sp = sp*35451.17 + 98623.664
             pres  = self.preslay(sp)
@@ -1743,10 +1757,10 @@ class SpaceStateModel(nn.Module):
         if self.model_type in ["Mamba","GSS"]:#,,"QRNN"]:
             #Mamba doesnt support providing the state, so as a hack we instead
             # concatenate the vertical (sequence) inputs with tiled scalars
-            inputs_sfc_tiled = torch.tile(torch.unsqueeze(inputs_sfc,1),(1,self.nlay,1))
-            inputs_main = torch.cat((inputs_main,inputs_sfc_tiled), dim=2)
+            inputs_aux_tiled = torch.tile(torch.unsqueeze(inputs_aux,1),(1,self.nlay,1))
+            inputs_main = torch.cat((inputs_main,inputs_aux_tiled), dim=2)
         else:
-            init_inputs = inputs_sfc
+            init_inputs = inputs_aux
                 
             init_states = self.mlp_surface1(init_inputs)
             # init_states = nn.Softsign()(init_states)
