@@ -443,8 +443,8 @@ class RNN_autoreg(nn.Module):
         if self.separate_radiation:
             # self.nh_rnn1_rad = self.nh_rnn1 
             # self.nh_rnn2_rad = self.nh_rnn2 
-            self.nh_rnn1_rad = 96 
-            self.nh_rnn2_rad = 96
+            self.nh_rnn1_rad = 64 
+            self.nh_rnn2_rad = 64
             self.rnn1_rad      = nn.GRU(self.nh_rnn2+self.nx_rad, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
             self.rnn2_rad      = nn.GRU(self.nh_rnn1_rad, self.nh_rnn2_rad,  batch_first=True) 
             self.mlp_surface_rad = nn.Linear(self.nx_sfc_rad, self.nh_rnn1_rad)
@@ -945,8 +945,8 @@ class LSTM_autoreg_torchscript(nn.Module):
         if self.use_initial_mlp:
             self.mlp_initial = nn.Linear(nx, self.nneur[0])
 
-        self.mlp_surface1  = nn.Linear(nx_sfc, self.nh_rnn1)
-        self.mlp_surface2  = nn.Linear(nx_sfc, self.nh_rnn1)
+        self.mlp_surface1  = nn.Linear(self.nx_sfc, self.nh_rnn1)
+        self.mlp_surface2  = nn.Linear(self.nx_sfc, self.nh_rnn1)
 
         # self.rnn1      = nn.LSTMCell(self.nx_rnn1, self.nh_rnn1)  # (input_size, hidden_size)
         # self.rnn2      = nn.LSTMCell(self.nx_rnn2, self.nh_rnn2)
@@ -983,12 +983,13 @@ class LSTM_autoreg_torchscript(nn.Module):
         if self.separate_radiation:
             # self.nh_rnn1_rad = self.nh_rnn1 
             # self.nh_rnn2_rad = self.nh_rnn2 
-            self.nh_rnn1_rad = 96 
-            self.nh_rnn2_rad = 96
+            self.nh_rnn1_rad = 64 
+            self.nh_rnn2_rad = 64
             self.rnn1_rad      = nn.GRU(self.nh_mem+self.nx_rad, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
             self.rnn2_rad      = nn.GRU(self.nh_rnn1_rad, self.nh_rnn2_rad,  batch_first=True) 
             self.mlp_surface_rad = nn.Linear(self.nx_sfc_rad, self.nh_rnn1_rad)
             self.mlp_surface_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_sfc_rad)
+            self.mlp_toa_rad  = nn.Linear(1, self.nh_rnn2_rad)
             self.mlp_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_rad)
     # def reset_states(self):
     #     self.rnn1_mem = None
@@ -1112,7 +1113,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         # output of the RNN from the previous time step 
 
         if self.separate_radiation:
-            inputs_sfc = torch.cat((inputs_aux[:,0:5],inputs_aux[:,11:]),dim=1)
+            inputs_sfc = torch.cat((inputs_aux[:,0:6],inputs_aux[:,11:]),dim=1)
         else:
             inputs_sfc = inputs_aux
         hx = self.mlp_surface1(inputs_sfc)
@@ -1231,7 +1232,8 @@ class LSTM_autoreg_torchscript(nn.Module):
             out = out_new
             #1D (scalar) Output variables: ['cam_out_NETSW', 'cam_out_FLWDS', 'cam_out_PRECSC', 
             #'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
-            # print("shape 1", out_sfc[:,0:1].shape, "2", out_sfc_rad.shape)
+            # print("shape 1", out_sfc_rad.shape, "2", out_sfc.shape)
+            out_sfc_rad = torch.squeeze(out_sfc_rad)
             # rad predicts everything except PRECSC, PRECC
             out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
             

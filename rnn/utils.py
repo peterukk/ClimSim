@@ -264,7 +264,6 @@ class generator_xy(torch.utils.data.Dataset):
             
             if self.no_multiprocessing:
                 print("Using only one worker, loading all data to RAM", flush=True)
-                os.system("df -h /dev/shm/")
 
                 self.input_lev = np.empty((ns,nloc,nlev,nx),dtype=np.float32)
                 print("input_lev initialized", flush=True)
@@ -279,14 +278,16 @@ class generator_xy(torch.utils.data.Dataset):
                 print("output_sca initialized", flush=True)
             else:
                 print("Using Shared memory between workers, loading all data to RAM", flush=True)
-    
+                os.system("df -h /dev/shm/")
+
                 input_lev_base = mp.Array(ctypes.c_float, ns*nloc*nlev*nx)
                 input_lev = np.ctypeslib.as_array(input_lev_base.get_obj())
                 self.input_lev = input_lev.reshape(ns,nloc,nlev,nx)
                 # self.input_lev[:,:,:,:] = hdf['input_lev'][:]
                 print("input_lev initialized", flush=True)
                 print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
-    
+                os.system("df -h /dev/shm/")
+
                 input_sca_base = mp.Array(ctypes.c_float, ns*nloc*self.nx_sfc)
                 input_sca = np.ctypeslib.as_array(input_sca_base.get_obj())
                 self.input_sca = input_sca.reshape(ns,nloc,self.nx_sfc)
@@ -307,6 +308,7 @@ class generator_xy(torch.utils.data.Dataset):
             
             # Getting usage of virtual_memory in GB ( 4th field)
             print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
+            os.system("df -h /dev/shm/")
 
         hdf.close()
         # self.nloc = int(os.path.basename(self.filepath).split('_')[-1])

@@ -182,3 +182,65 @@ def get_hybrid_loss(_lambda):
     def hybrid_loss(mse, energy):
         return my_hybrid_loss(mse, energy, _lambda)
     return hybrid_loss
+
+def CRPS(y, y_pred, alpha=1, return_low_var_inds=False):
+    """
+    Calculate Continuous Ranked Probability Score.
+
+    Parameters:
+    - y_pred (torch.Tensor): Prediction tensor.   (nens*batch,30,4)
+      Needs to be transposed to (batch, nens, 30*4)
+    - y (torch.Tensor): Ground truth tensor.  (batch,30,4)
+      needs to be reshaped to (batch,1,30*4) 
+
+    Returns:
+    - Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: CRPS and its components.
+    """ 
+    # print("shape ypred", y_pred.shape, "y true", y.shape)
+
+    if len(y.shape)==4:
+        #autoreg training with time windows,
+        # y shape: (ntime, nb, nlev, ny)
+        # ypred:  (ntime, nens*nb, nlev, ny)    
+        time_steps,batch_size,seq_size,feature_size = y.shape
+        ens_size = y_pred.shape[1] // batch_size
+        y_pred = torch.reshape(y_pred, (time_steps, ens_size, batch_size, seq_size*feature_size))
+        y_pred = torch.transpose(y_pred, 1, 2) # time, batch, ens, seq_size*feature_size))
+        y_pred = torch.reshape(y_pred, (time_steps*batch_size, ens_size, seq_size*feature_size))
+        batch_size_new = y_pred.shape[0]
+        y = torch.reshape(y, (batch_size_new, 1, seq_size*feature_size))
+        # print("shape ypred", y_pred.shape, "y true", y.shape)
+    else:
+        batch_size,seq_size,feature_size = y.shape
+        ens_size = y_pred.shape[0] // batch_size
+        y_pred = torch.reshape(y_pred, (ens_size, batch_size, seq_size*feature_size))
+        y_pred = torch.transpose(y_pred, 0, 1) # batch_size, ens_size, nlev*ny
+        y = torch.reshape(y, (batch_size, 1, seq_size*feature_size))
+    # cdist
+    # x1 (Tensor) – input tensor of shape B×P×M
+    # x2 (Tensor) – input tensor of shape B×R×M
+    
+    # ypred (batch,nens,30*4)   y  (batch,1,30*4)   
+    # cdist out term1 (batch,1,nens)
+    # cdist out term2 (batch, nens, nens)   
+    # print("shape ytrue", y.shape, "y pred", y_pred.shape )
+    MSE     = torch.cdist(y, y_pred).mean() 
+    # ens_var = torch.cdist(y_pred, y_pred).mean(0).sum() / (self.ens_size * (self.ens_size - 1))
+    
+    cmean_out = torch.cdist(y_pred, y_pred) # B, nens, nens
+
+    ens_var = cmean_out.mean(0).sum() / (ens_size * (ens_size - 1))
+    
+    MSE     /= y_pred.size(-1) ** 0.5
+    ens_var /= y_pred.size(-1) ** 0.5
+    
+    if return_low_var_inds:
+        x = cmean_out[:,0,1]
+        q = torch.quantile(x, 0.05,  keepdim=False)
+        inds = x <= q
+
+        # print("shape cmean out", cmean_out.shape, "shape inds", inds.shape)
+        # print("cmean out 0, 01,   2048, 01", cmean_out[0,0,1], cmean_out[2048,0,1])
+        return alpha * 2 * MSE - ens_var, MSE, ens_var, inds
+    else:
+        return alpha * 2 * MSE - ens_var, MSE, ens_var

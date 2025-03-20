@@ -416,6 +416,8 @@ def main(cfg: DictConfig):
     metric_h_con = metrics.get_energy_metric(hyai, hybi)
     mse = metrics.get_mse_flatten(weights)
     
+    ensemble_predictions = False
+    
     if cfg.loss_fn_type == "mse":
         loss_fn = mse
     elif cfg.loss_fn_type == "huber":
@@ -490,6 +492,7 @@ def main(cfg: DictConfig):
             self.train = train
             self.report_freq = 800
             self.batch_size = batch_size
+            self.ensemble_size = 1
             self.model = model 
             # self.autoregressive = autoregressive
             # self.loss_fn = loss_fn
@@ -498,7 +501,7 @@ def main(cfg: DictConfig):
 
             self.metrics = {}
             
-        def eval_one_epoch(self, epoch, timewindow=1):
+        def eval_one_epoch(self, epoch, timesteps=1):
             report_freq = self.report_freq
             running_loss = 0.0; running_energy = 0.0
             epoch_loss = 0.0
@@ -526,7 +529,7 @@ def main(cfg: DictConfig):
                 yto_lay = []; yto_sfc = []
                 # model.rnn1_mem = torch.randn(self.batch_size, nlay, model.nh_mem, device=device)
                 # model.rnn1_mem = torch.zeros(self.batch_size, nlay, model.nh_mem, device=device)
-                rnn1_mem = torch.zeros(self.batch_size, model.nlay, model.nh_mem, device=device)
+                rnn1_mem = torch.zeros(self.batch_size*self.ensemble_size, model.nlay, model.nh_mem, device=device)
                 loss_update_start_index = 60
             else:
                 loss_update_start_index = 0
@@ -595,7 +598,7 @@ def main(cfg: DictConfig):
                         # yto_lay = yto_lay0
                         # yto_sfc = yto_sfc0
                         
-                    if (not cfg.autoregressive) or (cfg.autoregressive and (j+1) % timewindow==0):
+                    if (not cfg.autoregressive) or (cfg.autoregressive and (j+1) % timesteps==0):
                 
                         if cfg.autoregressive:
                             preds_lay   = torch.cat(preds_lay)
@@ -611,6 +614,10 @@ def main(cfg: DictConfig):
                             
                             main_loss = loss_fn(targets_lay, targets_sfc, preds_lay, preds_sfc)
                             
+                            if ensemble_predictions:
+                                preds_lay = torch.reshape(preds_lay, (timesteps, 2, self.batch_size, nlev, nx))
+                                preds_lay = torch.reshape(preds_lay[:,0,:,:], shape=targets_lay.shape)
+                            
                             if use_mp_constraint:
                                 ypo_lay, ypo_sfc = model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
                                 with torch.no_grad(): 
@@ -622,11 +629,13 @@ def main(cfg: DictConfig):
                             else:
                                 ypo_lay, ypo_sfc = model.postprocessing(preds_lay, preds_sfc)
                                 yto_lay, yto_sfc = model.postprocessing(targets_lay, targets_sfc)
+                                
                             surf_pres_denorm = surf_pres*(sp_max - sp_min) + sp_mean
                             h_con = metric_h_con(yto_lay, ypo_lay, surf_pres_denorm)
                             
                             if cfg.use_energy_loss: 
-                                loss = hybrid_loss(main_loss, h_con)
+                                # loss = hybrid_loss(main_loss, h_con)
+                                loss = main_loss + cfg._lambda*h_con
                             else:
                                 loss = main_loss
                                                 
@@ -684,7 +693,7 @@ def main(cfg: DictConfig):
     
                                 epoch_r2_lev += metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay) 
                                # if track_ks:
-                               #     if (j+1) % max(timewindow*4,12)==0:
+                               #     if (j+1) % max(timesteps*4,12)==0:
                                #         epoch_ks += kolmogorov_smirnov(yto,ypo).item()
                                #         k2 += 1
                                 k += 1
@@ -699,8 +708,8 @@ def main(cfg: DictConfig):
                     # # print statistics 
                     if j % report_freq == (report_freq-1): # print every 200 minibatches
                         elaps = time.time() - t0_it
-                        running_loss = running_loss / (report_freq/timewindow)
-                        running_energy = running_energy / (report_freq/timewindow)
+                        running_loss = running_loss / (report_freq/timesteps)
+                        running_energy = running_energy / (report_freq/timesteps)
                         
                         r2raw = self.metric_R2.compute()
                         #r2raw_prec = self.metric_R2_precc.compute()
@@ -743,6 +752,10 @@ def main(cfg: DictConfig):
             self.metrics['R2_heating'] = epoch_r2_lev[:,0].mean() / k
             # self.metrics['R2_moistening'] =  epoch_r2_lev[:,1].mean() / k
             R2_moistening = epoch_r2_lev[:,1].mean() / k
+            self.metrics['R2_clw'] = epoch_r2_lev[:,2].mean() / k
+            self.metrics['R2_cli'] = epoch_r2_lev[:,3].mean() / k
+
+
             #self.metrics['R2_precc'] = self.metric_R2_precc.compute()
             self.metrics['R2_precc'] = epoch_R2precc / k
             
@@ -802,12 +815,12 @@ def main(cfg: DictConfig):
         t0 = time.time()
         
         if cfg.timestep_scheduling:
-            timewindoww=timestep_schedule[epoch]            
+            timesteps=timestep_schedule[epoch]            
         else:
-            timewindoww=timewindow_default
+            timesteps=timewindow_default
             
-        print("Epoch {} Training rollout timesteps: {} ".format(epoch+1, timewindoww))
-        train_runner.eval_one_epoch(epoch, timewindoww)
+        print("Epoch {} Training rollout timesteps: {} ".format(epoch+1, timesteps))
+        train_runner.eval_one_epoch(epoch, timesteps)
         if train_runner.loader.dataset.cache:
             train_runner.loader.dataset.cache_loaded = True
         
@@ -828,7 +841,7 @@ def main(cfg: DictConfig):
         
         if epoch%2:
             print("VALIDATION..")
-            val_runner.eval_one_epoch(epoch, timewindoww)
+            val_runner.eval_one_epoch(epoch, timesteps)
             if val_runner.loader.dataset.cache:
                 val_runner.loader.dataset.cache_loaded = True
 
@@ -865,7 +878,7 @@ def main(cfg: DictConfig):
                 scripted_model.save(save_file_torch)
                 best_val_loss = val_loss 
                   
-        print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timewindoww))
+        print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timesteps))
         print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
     
     if cfg.use_wandb:
