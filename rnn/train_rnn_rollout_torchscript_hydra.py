@@ -682,7 +682,7 @@ def main(cfg: DictConfig):
                                 ypo_lay = ypo_lay.reshape(-1,nlev,ny_pp).cpu().numpy()
                                 yto_lay = yto_lay.reshape(-1,nlev,ny_pp).cpu().numpy()
     
-                                epoch_r2_lev += metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay) 
+                                epoch_r2_lev += metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay)**2
 
                                 epoch_mae_lev_clw +=  np.nanmean(np.abs(ypo_lay[:,:,2] - yto_lay[:,:,2]),axis=0)
                                 epoch_mae_lev_cli +=  np.nanmean(np.abs(ypo_lay[:,:,3] - yto_lay[:,:,3]),axis=0)
@@ -745,23 +745,28 @@ def main(cfg: DictConfig):
             self.metrics['R2'] = self.metric_R2.compute()
             
             
+            self.metrics['R2_lev'] = epoch_r2_lev / k
             self.metrics['R2_heating'] = epoch_r2_lev[:,0].mean() / k
             # self.metrics['R2_moistening'] =  epoch_r2_lev[:,1].mean() / k
             R2_moistening = epoch_r2_lev[:,1].mean() / k
-            self.metrics['R2_clw'] = epoch_r2_lev[:,2].nanmean() / k
-            self.metrics['R2_cli'] = epoch_r2_lev[:,3].nanmean() / k
-
+            R2 = epoch_r2_lev[:,2] / k
+            R2[np.isnan(R2)] = 0.0; R2[np.isinf(R2)] = 0.0
+            # self.metrics['R2_lev_clw'] = R2
+            self.metrics['R2_clw'] = np.mean(R2)
+            R2 = epoch_r2_lev[:,3] / k
+            R2[np.isnan(R2)] = 0.0; R2[np.isinf(R2)] = 0.0
+            # self.metrics['R2_lev_cli'] = R2
+            self.metrics['R2_cli'] = np.mean(R2)
 
             #self.metrics['R2_precc'] = self.metric_R2_precc.compute()
             self.metrics['R2_precc'] = epoch_R2precc / k
+        
+
+            # self.metrics['mae_lev_clw'] = epoch_mae_lev_clw / k
+            # self.metrics['mae_lev_cli'] = epoch_mae_lev_cli / k
+            self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
+            self.metrics['mae_cli'] = np.nanmean(epoch_mae_lev_cli / k)
             
-            self.metrics['R2_lev'] = epoch_r2_lev / k
-            self.metrics['R2_lev_clw'] = epoch_r2_lev[:,2] / k
-            self.metrics['R2_lev_clw'] = epoch_r2_lev[:,2] / k
-
-            self.metrics['mae_lev_clw'] = epoch_mae_lev_clw / k
-            self.metrics['mae_lev_cli'] = epoch_mae_lev_cli / k
-
             self.metric_R2.reset() 
             #self.metric_R2_heating.reset(); self.metric_R2_precc.reset()
             # if self.autoregressive:

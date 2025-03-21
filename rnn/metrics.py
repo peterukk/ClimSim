@@ -122,6 +122,7 @@ def energy_metric(yto, ypo, sp, hyai,hybi):
     
     cp = torch.tensor(1004.0)
     Lv = torch.tensor(2.5104e6)
+    Lf = torch.tensor(3.34e5)
     one_over_grav = torch.tensor(0.1020408163) # 1/9.8
     if len(yto.shape)==3:
         thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
@@ -133,8 +134,11 @@ def energy_metric(yto, ypo, sp, hyai,hybi):
         dT_true = yto[:,:,0]
         dq_true = yto[:,:,1]
         
-        energy=torch.mean(torch.square(torch.sum(dq_pred*thick*(Lv)+dT_pred*thick*cp,1)
-                                -      torch.sum(dq_true*thick*(Lv)+dT_true*thick*cp,1)))
+        dql_pred = ypo[:,:,2] 
+        dql_true = yto[:,:,2] 
+        
+        energy=torch.mean(torch.square(torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),1)
+                                -      torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),1)))
     else: 
         # time dimension included
                                        #      batch,time,1     (1,1,30)
@@ -146,8 +150,11 @@ def energy_metric(yto, ypo, sp, hyai,hybi):
         dT_true = yto[:,:,:,0]
         dq_true = yto[:,:,:,1] 
         
-        energy=torch.mean(torch.square(torch.sum(dq_pred*thick*Lv + dT_pred*thick*cp,2)
-                                -      torch.sum(dq_true*thick*Lv + dT_true*thick*cp,2)))
+        dql_pred = ypo[:,:,:,2] 
+        dql_true = yto[:,:,:,2] 
+        
+        energy=torch.mean(torch.square(torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),2)
+                                -      torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),2)))
     return energy
 
 def get_energy_metric(hyai, hybi):
