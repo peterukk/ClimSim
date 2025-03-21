@@ -250,7 +250,7 @@ class MyRNN(nn.Module):
 
 
 class RNN_autoreg(nn.Module):
-    def __init__(self, hyam, hybm, nlay=60, nx = 4, nx_sfc=3, ny = 4, ny_sfc=3, nneur=(64,64), 
+    def __init__(self, hyam, hybm, nlev=60, nx = 4, nx_sfc=3, ny = 4, ny_sfc=3, nneur=(64,64), 
                 cell_type="LSTM",
                 memory="None", # "None", "Hidden", or "Output",
                 concat=False,
@@ -292,7 +292,7 @@ class RNN_autoreg(nn.Module):
         # else:
         #     self.ny = ny 
         self.ny = ny 
-        self.nlay = nlay 
+        self.nlev = nlev 
         self.nx_sfc = nx_sfc 
         self.ny_sfc = ny_sfc
         self.nneur = nneur 
@@ -334,8 +334,8 @@ class RNN_autoreg(nn.Module):
             self.share_weights=False
             self.nx_rnn1 = nx
         if self.separate_radiation:
-            self.nlay = 50
-            self.nlay_rad = 60
+            self.nlev = 50
+            self.nlev_rad = 60
             self.nx_rad = self.nx - 2
             # self.nx_rad = nx - 2
             self.nx_sfc_rad = 15
@@ -655,8 +655,8 @@ class RNN_autoreg(nn.Module):
         #     inputs_main     = torch.cat((inputs_main, liq_frac),axis=2)
             
         if self.rnn1_mem is None: 
-            self.rnn1_mem = torch.randn(batch_size, self.nlay, self.nh_mem,device=device)
-            # self.rnn1_mem = torch.randn((batch_size, self.nlay, self.nh_mem),dtype=self.dtype,device=device)
+            self.rnn1_mem = torch.randn(batch_size, self.nlev, self.nh_mem,device=device)
+            # self.rnn1_mem = torch.randn((batch_size, self.nlev, self.nh_mem),dtype=self.dtype,device=device)
 
         hx = self.mlp_surface1(inputs_aux)
         hx = nn.Tanh()(hx)
@@ -778,7 +778,7 @@ class RNN_autoreg(nn.Module):
         
         if self.separate_radiation:
             # out_crm = out.clone()
-            out_new = torch.zeros(batch_size, self.nlay_rad, self.ny, device=device)
+            out_new = torch.zeros(batch_size, self.nlev_rad, self.ny, device=device)
             out_new[:,10:,:] = out
             # Start at surface again
             # Do not use inputs 4,5 (winds)
@@ -786,7 +786,7 @@ class RNN_autoreg(nn.Module):
             # # add dT from crm 
             # T_old =   inputs_main * (self.xcoeff_lev[2,:,0:1] - self.xcoeff_lev[1,:,0:1]) + self.xcoeff_lev[0,:,0:1] 
             # T_new = T_old + dT
-            inputs_rad =  torch.zeros(batch_size, self.nlay_rad, self.nh_rnn2+self.nx_rad, device=device)
+            inputs_rad =  torch.zeros(batch_size, self.nlev_rad, self.nh_rnn2+self.nx_rad, device=device)
             inputs_rad[:,10:,0:self.nh_rnn2] = torch.flip(rnn2out, [1])
             inputs_rad[:,:,self.nh_rnn2:] = inputs_main_rad
             # inputs_rad = torch.flip(inputs_rad, [1])
@@ -838,7 +838,8 @@ class LSTM_autoreg_torchscript(nn.Module):
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
-                nlay=60, nx = 4, nx_sfc=3, ny = 4, ny_sfc=3, nneur=(64,64), 
+                device,
+                nlev=60, nx = 4, nx_sfc=3, ny = 4, ny_sfc=3, nneur=(64,64), 
                 use_initial_mlp=False, 
                 use_intermediate_mlp=True,
                 add_pres=False,
@@ -853,7 +854,7 @@ class LSTM_autoreg_torchscript(nn.Module):
                 nh_mem=16):
         super(LSTM_autoreg_torchscript, self).__init__()
         self.ny = ny 
-        self.nlay = nlay 
+        self.nlev = nlev 
         self.nx_sfc = nx_sfc 
         self.ny_sfc = ny_sfc
         self.nneur = nneur 
@@ -889,8 +890,8 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.nx_rnn1 = nx
 
         if self.separate_radiation:
-            self.nlay = 50
-            self.nlay_rad = 60
+            self.nlev = 50
+            self.nlev_rad = 60
             self.nx_rad = self.nx - 2
             # self.nx_rad = nx - 2
             self.nx_rnn1 = self.nx_rnn1 - 3
@@ -905,12 +906,12 @@ class LSTM_autoreg_torchscript(nn.Module):
         self.nonlin = nn.Tanh()
         self.relu = nn.ReLU()
 
-        self.yscale_lev = torch.from_numpy(out_scale)
-        self.yscale_sca = torch.from_numpy(out_sfc_scale)
-        self.xmean_lev  = torch.from_numpy(xmean_lev)
-        self.xmean_sca  = torch.from_numpy(xmean_sca)
-        self.xdiv_lev   = torch.from_numpy(xdiv_lev)
-        self.xdiv_sca   = torch.from_numpy(xdiv_sca)
+        self.yscale_lev = torch.from_numpy(out_scale).to(device)
+        self.yscale_sca = torch.from_numpy(out_sfc_scale).to(device)
+        self.xmean_lev  = torch.from_numpy(xmean_lev).to(device)
+        self.xmean_sca  = torch.from_numpy(xmean_sca).to(device)
+        self.xdiv_lev   = torch.from_numpy(xdiv_lev).to(device)
+        self.xdiv_sca   = torch.from_numpy(xdiv_sca).to(device)
         
         # in ClimSim config of E3SM, the CRM physics first computes 
         # moist physics on 50 levels, and then computes radiation on 60 levels!
@@ -1012,14 +1013,19 @@ class LSTM_autoreg_torchscript(nn.Module):
         return liquid_ratio
     
     def postprocessing(self, out, out_sfc):
-        out             = out / self.yscale_lev.to(device=out.device)
-        out_sfc         = out_sfc / self.yscale_sca.to(device=out.device)
+        # out             = out / self.yscale_lev.to(device=out.device)
+        # out_sfc         = out_sfc / self.yscale_sca.to(device=out.device)
+        out             = out / self.yscale_lev
+        out_sfc         = out_sfc / self.yscale_sca
         return out, out_sfc
         
     def pp_mp(self, out, out_sfc, x_denorm):
 
-        out_denorm      = out / self.yscale_lev.to(device=out.device)
-        
+        # out_denorm      = out / self.yscale_lev.to(device=out.device)
+        # out_sfc_denorm  = out_sfc / self.yscale_sca.to(device=out.device)
+        out_denorm      = out / self.yscale_lev
+        out_sfc_denorm  = out_sfc / self.yscale_sca
+
         T_before        = x_denorm[:,:,0:1]
         qliq_before     = x_denorm[:,:,2:3]
         qice_before     = x_denorm[:,:,3:4]   
@@ -1052,7 +1058,6 @@ class LSTM_autoreg_torchscript(nn.Module):
         #                                                 dqice[200,35].item()))
 
         
-        out_sfc_denorm  = out_sfc / self.yscale_sca.to(device=out.device)
         
         return out_denorm, out_sfc_denorm
     
@@ -1077,8 +1082,8 @@ class LSTM_autoreg_torchscript(nn.Module):
         # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # if self.use_memory and self.rnn1_mem is None: 
-        #     self.rnn1_mem = torch.randn(batch_size, self.nlay, self.nh_mem,device=inputs_main.device)
-        #     # self.rnn1_mem = torch.randn((batch_size, self.nlay, self.nh_mem),dtype=self.dtype,device=device)
+        #     self.rnn1_mem = torch.randn(batch_size, self.nlev, self.nh_mem,device=inputs_main.device)
+        #     # self.rnn1_mem = torch.randn((batch_size, self.nlev, self.nh_mem),dtype=self.dtype,device=device)
 
         
         if self.separate_radiation:
@@ -1201,7 +1206,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         
         if self.separate_radiation:
             # out_crm = out.clone()
-            out_new = torch.zeros(batch_size, self.nlay_rad, self.ny, device=inputs_main.device)
+            out_new = torch.zeros(batch_size, self.nlev_rad, self.ny, device=inputs_main.device)
             out_new[:,10:,:] = out
             # Start at surface again
             # Do not use inputs 4,5 (winds)
@@ -1209,7 +1214,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             # # add dT from crm 
             # T_old =   inputs_main * (self.xcoeff_lev[2,:,0:1] - self.xcoeff_lev[1,:,0:1]) + self.xcoeff_lev[0,:,0:1] 
             # T_new = T_old + dT
-            inputs_rad =  torch.zeros(batch_size, self.nlay_rad, self.nh_mem+self.nx_rad,device=inputs_main.device)
+            inputs_rad =  torch.zeros(batch_size, self.nlev_rad, self.nh_mem+self.nx_rad,device=inputs_main.device)
             inputs_rad[:,10:,0:self.nh_mem] = torch.flip(rnn2out, [1])
             inputs_rad[:,:,self.nh_mem:] = inputs_main_rad
             # inputs_rad = torch.flip(inputs_rad, [1])
@@ -1256,7 +1261,7 @@ class LSTM_torchscript(nn.Module):
     ensemble_size: Final[int]
     def __init__(self, hyam, hybm, 
                 out_scale, out_sfc_scale, 
-                nlay=60, nx = 4, nx_sfc=3, ny = 4, ny_sfc=3, nneur=(64,64), 
+                nlev=60, nx = 4, nx_sfc=3, ny = 4, ny_sfc=3, nneur=(64,64), 
                 use_initial_mlp=False, 
                 use_intermediate_mlp=True,
                 add_pres=False,
@@ -1267,7 +1272,7 @@ class LSTM_torchscript(nn.Module):
                 nh_mem=16):
         super(LSTM_torchscript, self).__init__()
         self.ny = ny 
-        self.nlay = nlay 
+        self.nlev = nlev 
         self.nx_sfc = nx_sfc 
         self.ny_sfc = ny_sfc
         self.nneur = nneur 
@@ -1479,14 +1484,14 @@ class LSTM_torchscript(nn.Module):
 class SpaceStateModel(nn.Module):
     def __init__(self, hyam, hybm, 
                 out_scale, out_sfc_scale,  
-                nlay=30, nx = 4, nx_sfc=3, ny = 4,  ny_sfc=1,
+                nlev=30, nx = 4, nx_sfc=3, ny = 4,  ny_sfc=1,
                 nneur=(64,64),model_type='LRU', 
                 use_initial_mlp=True, add_pres=False,  concat=False,
                 device=None):
         super(SpaceStateModel, self).__init__()
         self.nx = nx
         self.ny = ny 
-        self.nlay = nlay 
+        self.nlev = nlev 
         self.nx_sfc = nx_sfc 
         self.ny_sfc = ny_sfc
         self.nneur = nneur 
@@ -1625,10 +1630,10 @@ class SpaceStateModel(nn.Module):
             self.rnn1= GSS(dim=self.nx_rnn1,dss_kernel_N=self.nh_rnn1,dss_kernel_H=self.nh_rnn1)
             self.rnn2= GSS(dim=self.nx_rnn2,dss_kernel_N=self.nh_rnn2,dss_kernel_H=self.nh_rnn2)
         elif model_type == 'QRNN':
-            from models_torch_kernels import QRNNLayer, QRNNLayer_noncausal
+            from models_torch_kernels import QRNnlever, QRNnlever_noncausal
             kernelsize = 3
-            self.rnn1= QRNNLayer_noncausal(self.nx_rnn1,self.nh_rnn1, kernel_size=3, pad =(0,1))
-            self.rnn2= QRNNLayer_noncausal(self.nx_rnn2,self.nh_rnn2, kernel_size=3) 
+            self.rnn1= QRNnlever_noncausal(self.nx_rnn1,self.nh_rnn1, kernel_size=3, pad =(0,1))
+            self.rnn2= QRNnlever_noncausal(self.nx_rnn2,self.nh_rnn2, kernel_size=3) 
             
             self.mlp_surface2  = nn.Linear(nx_sfc, self.nh_rnn1)  
         elif model_type == 'SRU':
@@ -1668,15 +1673,15 @@ class SpaceStateModel(nn.Module):
 
             # self.rnn1= LRU(in_features=nx_rnn1,out_features=self.nneur[0],state_features=self.nneur[0])
             # self.mlp  = nn.Linear(self.nneur[0], self.nneur[0])
-            # self.SeqLayer1 = SequenceLayer(nlay=self.nlay,nneur=self.nneur[0],layernorm=True)
-            self.SeqLayer1 = GLU(nlay=self.nlay,nneur=self.nh_rnn1,layernorm=glu_layernorm, expand_factor=glu_expand_factor)
+            # self.SeqLayer1 = SequenceLayer(nlev=self.nlev,nneur=self.nneur[0],layernorm=True)
+            self.SeqLayer1 = GLU(nlev=self.nlev,nneur=self.nh_rnn1,layernorm=glu_layernorm, expand_factor=glu_expand_factor)
     
             # self.rnn2= LRU(in_features=nx_rnn2,out_features=self.nneur[1],state_features=self.nneur[0])
             # self.mlp2  = nn.Linear(self.nneur[1], self.nneur[1])
-            # self.SeqLayer2 = SequenceLayer(nlay=self.nlay,nneur=self.nneur[1],layernorm=True)
-            self.SeqLayer2 = GLU(nlay=self.nlay,nneur=self.nh_rnn2,layernorm=glu_layernorm)
+            # self.SeqLayer2 = SequenceLayer(nlev=self.nlev,nneur=self.nneur[1],layernorm=True)
+            self.SeqLayer2 = GLU(nlev=self.nlev,nneur=self.nh_rnn2,layernorm=glu_layernorm)
 
-            # self.SeqLayer15 = GLU(nlay=self.nlay,nneur=self.nneur[0],layernorm=glu_layernorm)
+            # self.SeqLayer15 = GLU(nlev=self.nlev,nneur=self.nneur[0],layernorm=glu_layernorm)
         else:
             if self.autoregressive and model_type in ['S5','GSS','QRNN','Mamba','GateLoop','SRU','SRU_2D''LRU']:
                    self.reduce_dim_with_mlp=True
@@ -1764,7 +1769,7 @@ class SpaceStateModel(nn.Module):
         if self.model_type in ["Mamba","GSS"]:#,,"QRNN"]:
             #Mamba doesnt support providing the state, so as a hack we instead
             # concatenate the vertical (sequence) inputs with tiled scalars
-            inputs_aux_tiled = torch.tile(torch.unsqueeze(inputs_aux,1),(1,self.nlay,1))
+            inputs_aux_tiled = torch.tile(torch.unsqueeze(inputs_aux,1),(1,self.nlev,1))
             inputs_main = torch.cat((inputs_main,inputs_aux_tiled), dim=2)
         else:
             init_inputs = inputs_aux

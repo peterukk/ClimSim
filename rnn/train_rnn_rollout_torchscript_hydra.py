@@ -220,22 +220,6 @@ def main(cfg: DictConfig):
     if cfg.mp_mode==2:
         liq_frac_scale = np.ones(nlev,dtype=np.float32).reshape(nlev,1)
         liq_frac_scale[:] = 2.4
-        # liq_frac_scale = np.array([1.0000000e+04, 1.0000000e+04, 1.0000000e+04, 1.0000000e+04,
-        #        1.0000000e+04, 1.0000000e+04, 1.0000000e+04, 1.0000000e+04,
-        #        1.0000000e+04, 1.0000000e+04, 1.0000000e+04, 1.0000000e+04,
-        #        1.0000000e+04, 5.7569299e+02, 1.0000000e+04, 1.0000000e+04,
-        #        3.7180832e+02, 3.7180832e+02, 1.6628116e+02, 1.2394203e+02,
-        #        4.6134792e+01, 2.2092237e+01, 7.7577863e+00, 5.6359839e+00,
-        #        5.4808850e+00, 6.4823780e+00, 6.6720495e+00, 6.2344809e+00,
-        #        6.8770485e+00, 8.4653273e+00, 1.1100765e+01, 1.2499543e+01,
-        #        9.9253035e+00, 7.3044314e+00, 5.6595097e+00, 4.5972705e+00,
-        #        3.8331578e+00, 3.2858577e+00, 2.9477441e+00, 2.7470703e+00,
-        #        2.6018870e+00, 2.4938695e+00, 2.3889098e+00, 2.3040833e+00,
-        #        2.2352726e+00, 2.2033858e+00, 2.1932576e+00, 2.1929729e+00,
-        #        2.1951184e+00, 2.1974444e+00, 2.1985419e+00, 2.1974182e+00,
-        #        2.1818981e+00, 2.1499007e+00, 2.1246915e+00, 2.1189482e+00,
-        #        2.1840427e+00, 2.3258853e+00, 2.5237758e+00, 3.0374336e+00],
-        #       dtype=np.float32).reshape(nlev,1)
         yscale_lev = np.concatenate((yscale_lev[:,0:3], liq_frac_scale, yscale_lev[:,3:]), axis=1)
     
             
@@ -305,6 +289,7 @@ def main(cfg: DictConfig):
                         out_sfc_scale = yscale_sca, 
                         xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
                         xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                        device=device,
                         nx = nx, nx_sfc=nx_sfc, 
                         ny = ny, ny_sfc=ny_sfc, 
                         nneur=cfg.nneur, 
@@ -329,7 +314,7 @@ def main(cfg: DictConfig):
         model = SpaceStateModel(hyam, hybm, 
                     out_scale = yscale_lev,
                     out_sfc_scale = yscale_sca,  
-                    nlay=60, nx = nx, nx_sfc=nx_sfc, 
+                    nlev=60, nx = nx, nx_sfc=nx_sfc, 
                     ny = ny, ny_sfc=ny_sfc, 
                     nneur = cfg.nneur, model_type = cfg.model_type, 
                     use_initial_mlp = cfg.use_initial_mlp, add_pres=cfg.add_pres,  concat=cfg.concat)
@@ -337,8 +322,8 @@ def main(cfg: DictConfig):
     model = model.to(device)
     
     if cfg.autoregressive:
-        # model.rnn1_mem = torch.randn(nloc, nlay, model.nh_mem, device=device)
-        rnn1_mem = torch.zeros(nloc, model.nlay, model.nh_mem, device=device)
+        # model.rnn1_mem = torch.randn(nloc, nlev, model.nh_mem, device=device)
+        rnn1_mem = torch.zeros(nloc, model.nlev, model.nh_mem, device=device)
     
     infostr = summary(model)
     num_params = infostr.total_params
@@ -414,6 +399,7 @@ def main(cfg: DictConfig):
     nloc_val = batch_size_val = val_data.nloc
     
     metric_h_con = metrics.get_energy_metric(hyai, hybi)
+    metric_water_con = metrics.get_water_conservation(hyai, hybi)
     mse = metrics.get_mse_flatten(weights)
     
     ensemble_predictions = False
@@ -436,25 +422,7 @@ def main(cfg: DictConfig):
         optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=cfg.lr)
     else:
         raise NotImplementedError()
-
-    # if not cfg.autoregressive:
-    #     timewindow = 1
-    #     timestep_scheduling=False
-    #     timestep_schedule = np.arange(1000)
-    #     timestep_schedule[:] = timewindow
-    # else:
-    #     timewindow = 3
-    #     timestep_scheduling=True
-    #     timestep_schedule = np.arange(1000)
-    #     timestep_schedule[:] = timewindow
-    
-    #     if timestep_scheduling:
-    #         timestep_schedule[0:3] = 1
-    #         timestep_schedule[3:4] = timewindow-1
-    #         timestep_schedule[4:] = timewindow
-    #         timestep_schedule[5:] = timewindow+1
-    #         timestep_schedule[6:] = timewindow+2
-            
+  
     timewindow_default = 1
     rollout_schedule = cfg.rollout_schedule #timestep_schedule[0:10].tolist()
     timestep_schedule = np.arange(1000)
@@ -503,15 +471,16 @@ def main(cfg: DictConfig):
             
         def eval_one_epoch(self, epoch, timesteps=1):
             report_freq = self.report_freq
-            running_loss = 0.0; running_energy = 0.0
+            running_loss = 0.0; running_energy = 0.0; running_water = 0.0
             epoch_loss = 0.0
             epoch_mse = 0.0; epoch_mae = 0.0
             epoch_R2precc = 0.0
-            epoch_hcon = 0.0
+            epoch_hcon = 0.0; epoch_wcon = 0.0
             epoch_r2_lev = 0.0
             epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
             epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
             epoch_bias_lev_tot = 0.0 
+            epoch_mae_lev_clw = 0.0; epoch_mae_lev_cli = 0.0
             t_comp =0 
             t0_it = time.time()
             j = 0; k = 0; k2=2    
@@ -525,11 +494,11 @@ def main(cfg: DictConfig):
             if cfg.autoregressive:
                 preds_lay = []; preds_sfc = []
                 targets_lay = []; targets_sfc = [] 
-                surf_pres = [];  x_lay_raw = []
+                x_sfc = [];  x_lay_raw = []
                 yto_lay = []; yto_sfc = []
-                # model.rnn1_mem = torch.randn(self.batch_size, nlay, model.nh_mem, device=device)
-                # model.rnn1_mem = torch.zeros(self.batch_size, nlay, model.nh_mem, device=device)
-                rnn1_mem = torch.zeros(self.batch_size*self.ensemble_size, model.nlay, model.nh_mem, device=device)
+                # model.rnn1_mem = torch.randn(self.batch_size, nlev, model.nh_mem, device=device)
+                # model.rnn1_mem = torch.zeros(self.batch_size, nlev, model.nh_mem, device=device)
+                rnn1_mem = torch.zeros(self.batch_size*self.ensemble_size, model.nlev, model.nh_mem, device=device)
                 loss_update_start_index = 60
             else:
                 loss_update_start_index = 0
@@ -563,7 +532,8 @@ def main(cfg: DictConfig):
                 for ichunk in range(len(x_lay_chk)):
                     x_lay0 = x_lay_chk[ichunk]
                     x_lay_raw0 = x_lay_raw_chk[ichunk]
-                    x_sfc0 = x_sfc_chk[ichunk]; sp0 = x_sfc0[:,0:1] 
+                    x_sfc0 = x_sfc_chk[ichunk]
+                    # sp0 = x_sfc0[:,0:1]; lhf0 = x_sfc[0,2:3] 
                     target_lay0 = targets_lay_chk[ichunk]
                     target_sfc0 = targets_sfc_chk[ichunk]
     
@@ -580,21 +550,19 @@ def main(cfg: DictConfig):
     
                     if cfg.autoregressive:
                         # In the autoregressive training case are gathering many time steps before computing loss
-                        preds_lay.append(preds_lay0)
-                        preds_sfc.append(preds_sfc0)
-                        targets_lay.append(target_lay0)
-                        targets_sfc.append(target_sfc0)
-                        surf_pres.append(sp0) 
+                        preds_lay.append(preds_lay0); preds_sfc.append(preds_sfc0)
+                        targets_lay.append(target_lay0); targets_sfc.append(target_sfc0)
+                        # surf_pres.append(sp0)
+                        x_sfc.append(x_sfc0)
                         x_lay_raw.append(x_lay_raw0)
                         # yto_lay.append(yto_lay0)
                         # yto_sfc.append(yto_sfc0)                    
                     else:
-                        preds_lay = preds_lay0
-                        preds_sfc = preds_sfc0
-                        targets_lay = target_lay0
-                        targets_sfc = target_sfc0
-                        surf_pres = sp0
+                        preds_lay = preds_lay0; preds_sfc = preds_sfc0
+                        targets_lay = target_lay0; targets_sfc = target_sfc0
+                        # surf_pres = sp0
                         x_lay_raw = x_lay_raw0
+                        x_sfc = x_sfc0
                         # yto_lay = yto_lay0
                         # yto_sfc = yto_sfc0
                         
@@ -605,7 +573,8 @@ def main(cfg: DictConfig):
                             preds_sfc   = torch.cat(preds_sfc)
                             targets_lay = torch.cat(targets_lay)
                             targets_sfc = torch.cat(targets_sfc)
-                            surf_pres   = torch.cat(surf_pres)
+                            # surf_pres   = torch.cat(surf_pres)
+                            x_sfc       = torch.cat(x_sfc)
                             x_lay_raw   = torch.cat(x_lay_raw)
                             # yto_lay     = torch.cat(yto_lay)
                             # yto_sfc     = torch.cat(yto_sfc)   
@@ -630,14 +599,27 @@ def main(cfg: DictConfig):
                                 ypo_lay, ypo_sfc = model.postprocessing(preds_lay, preds_sfc)
                                 yto_lay, yto_sfc = model.postprocessing(targets_lay, targets_sfc)
                                 
-                            surf_pres_denorm = surf_pres*(sp_max - sp_min) + sp_mean
+                            with torch.no_grad():
+                                x_sfc = x_sfc*model.xdiv_sca + model.xmean_sca 
+                                surf_pres_denorm = x_sfc[:,0:1]
+                                lhf = x_sfc[:,2] 
+                            # surf_pres_denorm = surf_pres*(sp_max - sp_min) + sp_mean
                             h_con = metric_h_con(yto_lay, ypo_lay, surf_pres_denorm)
+
+                            water_con_p     = metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf)
+                            # print("true:")
+                            water_con_t     = metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf)
+                            water_con       = torch.mean(torch.square(water_con_p - water_con_t))
                             
                             if cfg.use_energy_loss: 
                                 # loss = hybrid_loss(main_loss, h_con)
                                 loss = main_loss + cfg._lambda*h_con
                             else:
                                 loss = main_loss
+
+                            if cfg.use_water_loss:
+                                loss = loss + cfg._alpha * water_con
+                                
                                                 
                         if self.train:
                             if cfg.use_scaler:
@@ -658,6 +640,8 @@ def main(cfg: DictConfig):
                             
                         running_loss    += loss.item()
                         running_energy  += h_con.item()
+                        running_water   += water_con.item()
+
                         #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
                         if j>loss_update_start_index:
                             with torch.no_grad():
@@ -669,14 +653,21 @@ def main(cfg: DictConfig):
                                 #epoch_mae       += mae.item()
                             
                                 epoch_hcon  += h_con.item()
+                                epoch_wcon  += water_con.item()
                                 # print("shape ypo", ypo_lay.shape, "yto", yto_lay.shape)
+                                # water_con       = metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf)
+                                # # print("true:")
+                                # water_con_true  = metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf)
+                                # water_con_loss = torch.mean(torch.square(water_con - water_con_true))
+                                # print("water con loss", water_con_loss)
+                                # print("pred con", water_con, "true con", water_con_true)
+
                                 
                                 biases_lev, biases_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc)
                                 epoch_bias_lev += np.mean(biases_lev)
                                 epoch_bias_heating += biases_lev[0]
                                 epoch_bias_clw += biases_lev[2]
                                 epoch_bias_cli += biases_lev[3]
-
                                 epoch_bias_sfc += np.mean(biases_sfc)
 
                                 biases_lev = metrics.compute_biases(yto_lay, ypo_lay)
@@ -692,6 +683,9 @@ def main(cfg: DictConfig):
                                 yto_lay = yto_lay.reshape(-1,nlev,ny_pp).cpu().numpy()
     
                                 epoch_r2_lev += metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay) 
+
+                                epoch_mae_lev_clw +=  np.nanmean(np.abs(ypo_lay[:,:,2] - yto_lay[:,:,2]),axis=0)
+                                epoch_mae_lev_cli +=  np.nanmean(np.abs(ypo_lay[:,:,3] - yto_lay[:,:,3]),axis=0)
                                # if track_ks:
                                #     if (j+1) % max(timesteps*4,12)==0:
                                #         epoch_ks += kolmogorov_smirnov(yto,ypo).item()
@@ -702,6 +696,7 @@ def main(cfg: DictConfig):
                             targets_lay = []; targets_sfc = [] 
                             surf_pres = []; x_lay_raw = []
                             yto_lay = []; yto_sfc = []
+                            x_sfc = []
                             rnn1_mem = rnn1_mem.detach()
                             
                     t_comp += time.time() - tcomp0
@@ -718,10 +713,10 @@ def main(cfg: DictConfig):
                         #yto_lay, yto_sfc = model.postprocessing(targets_lay, targets_sfc) 
                         #r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
     
-                        print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  runR2: {:.2f},  elapsed {:.1f}s (compute {:.1f})" .format(epoch + 1, 
-                                                        j+1, running_loss,running_energy, r2raw, elaps, t_comp), flush=True)
+                        print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  runR2: {:.2f},  elapsed {:.1f}s (compute {:.1f})" .format(epoch + 1, 
+                                                        j+1, running_loss,running_energy,running_water, r2raw, elaps, t_comp), flush=True)
                         running_loss = 0.0
-                        running_energy = 0.0
+                        running_energy = 0.0; running_water=0.0
                         t0_it = time.time()
                         t_comp = 0
                     j += 1
@@ -734,7 +729,8 @@ def main(cfg: DictConfig):
             self.metrics['loss'] =  epoch_loss / k
             self.metrics['mean_squared_error'] = epoch_mse / k
             self.metrics["h_conservation"] =  epoch_hcon / k
-            
+            self.metrics["water_conservation"] =  epoch_wcon / k
+
             self.metrics["bias_lev"] = epoch_bias_lev / k 
             self.metrics["bias_lev_noabs"] = epoch_bias_lev_tot / k 
 
@@ -752,23 +748,27 @@ def main(cfg: DictConfig):
             self.metrics['R2_heating'] = epoch_r2_lev[:,0].mean() / k
             # self.metrics['R2_moistening'] =  epoch_r2_lev[:,1].mean() / k
             R2_moistening = epoch_r2_lev[:,1].mean() / k
-            self.metrics['R2_clw'] = epoch_r2_lev[:,2].mean() / k
-            self.metrics['R2_cli'] = epoch_r2_lev[:,3].mean() / k
+            self.metrics['R2_clw'] = epoch_r2_lev[:,2].nanmean() / k
+            self.metrics['R2_cli'] = epoch_r2_lev[:,3].nanmean() / k
 
 
             #self.metrics['R2_precc'] = self.metric_R2_precc.compute()
             self.metrics['R2_precc'] = epoch_R2precc / k
             
             self.metrics['R2_lev'] = epoch_r2_lev / k
-            
-    
+            self.metrics['R2_lev_clw'] = epoch_r2_lev[:,2] / k
+            self.metrics['R2_lev_clw'] = epoch_r2_lev[:,2] / k
+
+            self.metrics['mae_lev_clw'] = epoch_mae_lev_clw / k
+            self.metrics['mae_lev_cli'] = epoch_mae_lev_cli / k
+
             self.metric_R2.reset() 
             #self.metric_R2_heating.reset(); self.metric_R2_precc.reset()
             # if self.autoregressive:
             #     # self.model.reset_states()
             #     # model.rnn1_mem = torch.randn_like(model.rnn1_mem)
-            #     # model.rnn1_mem = torch.randn(self.batch_size, nlay, model.nh_mem, device=device)
-            #     model.rnn1_mem = torch.zeros(self.batch_size, nlay, model.nh_mem, device=device)
+            #     # model.rnn1_mem = torch.randn(self.batch_size, nlev, model.nh_mem, device=device)
+            #     model.rnn1_mem = torch.zeros(self.batch_size, nlev, model.nh_mem, device=device)
     
             datatype = "TRAIN" if self.train else "VAL"
             print('Epoch {} {} loss: {:.2e}  MSE: {:.2e}  h-con:  {:.2e}   R2: {:.2f}  R2-dT/dt: {:.2f}   R2-dq/dt: {:.2f}   R2-precc: {:.3f}'.format(epoch+1, datatype, 
@@ -828,13 +828,13 @@ def main(cfg: DictConfig):
             logged_metrics = train_runner.metrics.copy()
             nan_inds = np.isnan(logged_metrics['R2_lev']); num_nans = np.sum(nan_inds)
             nan_inds_moistening = np.isnan(logged_metrics['R2_lev'][:,1])
-            num_nans_moist = np.sum(nan_inds_moistening)
+            # num_nans_moist = np.sum(nan_inds_moistening)
             logged_metrics['R2_lev'][nan_inds] = 0.0
             inf_inds = np.isinf(logged_metrics['R2_lev'])
             logged_metrics['R2_lev'][inf_inds] = 0.0
             # logged_metrics['R2_lev'][:,1][nan_inds_moistening] = 0.0
             logged_metrics['num_nans'] = num_nans
-            logged_metrics['num_nans_moist'] = num_nans_moist
+            # logged_metrics['num_nans_moist'] = num_nans_moist
             logged_metrics = {"train_"+k:v for k, v in logged_metrics.items()}
             logged_metrics['epoch'] = epoch
             wandb.log(logged_metrics)
@@ -849,13 +849,13 @@ def main(cfg: DictConfig):
                 logged_metrics = val_runner.metrics.copy()
                 nan_inds = np.isnan(logged_metrics['R2_lev']); num_nans = np.sum(nan_inds)
                 nan_inds_moistening = np.isnan(logged_metrics['R2_lev'][:,1])
-                num_nans_moist = np.sum(nan_inds_moistening)
+                # num_nans_moist = np.sum(nan_inds_moistening)
                 logged_metrics['R2_lev'][nan_inds] = 0.0
                 # logged_metrics['R2_lev'][:,1][nan_inds_moistening] = 0.0
                 inf_inds = np.isinf(logged_metrics['R2_lev'])
                 logged_metrics['R2_lev'][inf_inds] = 0.0
                 logged_metrics['num_nans'] = num_nans
-                logged_metrics['num_nans_moist'] = num_nans_moist
+                # logged_metrics['num_nans_moist'] = num_nans_moist
                 logged_metrics = {"val_"+k:v for k, v in logged_metrics.items()}
                 logged_metrics['epoch'] = epoch
                 wandb.log(logged_metrics)

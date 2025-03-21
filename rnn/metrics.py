@@ -36,33 +36,33 @@ def corrcoeff_pairs_batchfirst(A, B):
     return corrcoef.reshape(nlev, nx)
 
 
-def my_mse(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
-    mse1 = torch.mean(torch.square(y_pred_lay - y_true_lay))
+def my_mse(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
+    mse1 = torch.mean(torch.square(y_pred_lev - y_true_lev))
     mse2 = torch.mean(torch.square(y_pred_sfc - y_true_sfc))
     return (mse1+mse2)/2
 
 
-def compute_biases(y_true_lay, y_pred_lay):
+def compute_biases(y_true_lev, y_pred_lev):
 
-    mean_t_lay = torch.nanmean(y_true_lay,dim=(0,1))
-    mean_p_lay = torch.nanmean(y_pred_lay,dim=(0,1))
+    mean_t_lev = torch.nanmean(y_true_lev,dim=(0,1))
+    mean_p_lev = torch.nanmean(y_pred_lev,dim=(0,1))
   
-    biases_lev = mean_t_lay - mean_p_lay
+    biases_lev = mean_t_lev - mean_p_lev
 
     return biases_lev.detach().cpu().numpy()
 
 
-def compute_absolute_biases(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
+def compute_absolute_biases(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
     # 1) Mean across batches
-    mean_t_lay  = torch.nanmean(y_true_lay,dim=(0))
-    mean_p_lay  = torch.nanmean(y_pred_lay,dim=(0))
+    mean_t_lev  = torch.nanmean(y_true_lev,dim=(0))
+    mean_p_lev  = torch.nanmean(y_pred_lev,dim=(0))
     mean_t_sfc  = torch.nanmean(y_true_sfc,dim=(0))
     mean_p_sfc  = torch.nanmean(y_pred_sfc,dim=(0))
     # 2) Diff
-    diff_lay    = mean_t_lay - mean_p_lay
+    diff_lev    = mean_t_lev - mean_p_lev
     diff_sfc    = mean_t_sfc - mean_p_sfc
     # 3) Abs, so that compensating biases are not hidden 
-    biases_lev = torch.abs(diff_lay) # (levels, features)
+    biases_lev = torch.abs(diff_lev) # (levels, features)
     biases_sfc = torch.abs(diff_sfc) # (features)
     # 4) Mean again across levels / features as needed to distill into scalar metric
     biases_lev = torch.nanmean(biases_lev, dim=(0)) 
@@ -71,51 +71,51 @@ def compute_absolute_biases(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
 
 
 
-# def my_mse_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
+# def my_mse_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
 
-#     if len(y_true_lay.shape)==4: # autoregressive, time dimension included 
-#         y_pred_flat =  torch.cat(( y_pred_lay.flatten(start_dim=0,end_dim=1).flatten(start_dim=1) , y_pred_sfc.flatten(start_dim=0,end_dim=1) ),dim=1)
-#         y_true_flat =  torch.cat(( y_true_lay.flatten(start_dim=0,end_dim=1).flatten(start_dim=1) , y_true_sfc.flatten(start_dim=0,end_dim=1) ),dim=1)
+#     if len(y_true_lev.shape)==4: # autoregressive, time dimension included 
+#         y_pred_flat =  torch.cat(( y_pred_lev.flatten(start_dim=0,end_dim=1).flatten(start_dim=1) , y_pred_sfc.flatten(start_dim=0,end_dim=1) ),dim=1)
+#         y_true_flat =  torch.cat(( y_true_lev.flatten(start_dim=0,end_dim=1).flatten(start_dim=1) , y_true_sfc.flatten(start_dim=0,end_dim=1) ),dim=1)
 #     else:
-#         y_pred_flat =  torch.cat((y_pred_lay.flatten(start_dim=1),y_pred_sfc),dim=1)
-#         y_true_flat =  torch.cat((y_true_lay.flatten(start_dim=1),y_true_sfc),dim=1)
+#         y_pred_flat =  torch.cat((y_pred_lev.flatten(start_dim=1),y_pred_sfc),dim=1)
+#         y_true_flat =  torch.cat((y_true_lev.flatten(start_dim=1),y_true_sfc),dim=1)
 
 #     mse = torch.mean(torch.square(y_pred_flat - y_true_flat))
 #     return mse
 
-def mse_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc, weights=None):
+def mse_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=None):
 
     if weights is not None:
-        y_pred_lay = weights*y_pred_lay
-        y_true_lay = weights*y_true_lay
+        y_pred_lev = weights*y_pred_lev
+        y_true_lev = weights*y_true_lev
         
-    y_pred_flat =  torch.cat((y_pred_lay.flatten(start_dim=1),y_pred_sfc),dim=1)
-    y_true_flat =  torch.cat((y_true_lay.flatten(start_dim=1),y_true_sfc),dim=1)
+    y_pred_flat =  torch.cat((y_pred_lev.flatten(start_dim=1),y_pred_sfc),dim=1)
+    y_true_flat =  torch.cat((y_true_lev.flatten(start_dim=1),y_true_sfc),dim=1)
 
     mse = torch.mean(torch.square(y_pred_flat - y_true_flat))
     return mse
 
-def huber_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc, weights=None):
+def huber_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=None):
     
     if weights is not None:
-        y_pred_lay = weights*y_pred_lay
-        y_true_lay = weights*y_true_lay
+        y_pred_lev = weights*y_pred_lev
+        y_true_lev = weights*y_true_lev
 
-    y_pred_flat =  torch.cat((y_pred_lay.flatten(start_dim=1),y_pred_sfc),dim=1)
-    y_true_flat =  torch.cat((y_true_lay.flatten(start_dim=1),y_true_sfc),dim=1)
+    y_pred_flat =  torch.cat((y_pred_lev.flatten(start_dim=1),y_pred_sfc),dim=1)
+    y_true_flat =  torch.cat((y_true_lev.flatten(start_dim=1),y_true_sfc),dim=1)
     
     criterion = nn.SmoothL1Loss()
     err =  criterion(y_pred_flat, y_true_flat)
     return err
 
 def get_mse_flatten(weights):
-    def my_mse_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
-        return mse_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc, weights=weights)
+    def my_mse_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
+        return mse_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=weights)
     return my_mse_flatten
 
 def get_huber_flatten(weights):
-    def my_huber_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc):
-        return huber_flatten(y_true_lay, y_true_sfc, y_pred_lay, y_pred_sfc, weights=weights)
+    def my_huber_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
+        return huber_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=weights)
     return my_huber_flatten
 
 def energy_metric(yto, ypo, sp, hyai,hybi):
@@ -158,6 +158,36 @@ def get_energy_metric(hyai, hybi):
 def mse(y_true, y_pred):
     mse = torch.mean(torch.square(y_pred- y_true))
     return mse
+
+def get_water_conservation(hyai, hybi):
+    def wc(pred_lev, pred_sfc, sp, LHF):
+        Lv = torch.tensor(2.5104e6)
+        precip = (pred_sfc[:,2] + pred_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
+        one_over_grav = torch.tensor(0.1020408163) # 1/9.8
+        thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
+                        + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
+
+        # pressure_grid_p1 = 1e5 * hyai.reshape(1,-1) # (1, 61)
+        # pressure_grid_p2 = hybi.reshape(1,-1) * sp # (batch_size, 61)
+        # pressure_grid = pressure_grid_p1 + pressure_grid_p2 # (batch_size, 61)
+        # dp = pressure_grid[:,1:] - pressure_grid[:,:-1] # (batch_size, 60)
+        # thick2 = one_over_grav * dp 
+
+        qv = pred_lev[:,:,1]
+        ql = pred_lev[:,:,2]
+        qi = pred_lev[:,:,3]
+
+        lhs = torch.sum(thick*(qv + ql + qi),1)
+        rhs = LHF / Lv - precip
+        # print("lhs", lhs[100].item(), "rhs", rhs[100].item(), "precip", precip[100].item())
+        # print( "sp", sp[100].item(), "thick[30]", thick[100,30], "thick2", thick2[100,30])
+        # diff = torch.mean(lhs - rhs)
+        diff = lhs - rhs
+        return diff 
+    return wc
+
+# def water_conservation(pred_lev, pred_sfc):
+
 
 
 
