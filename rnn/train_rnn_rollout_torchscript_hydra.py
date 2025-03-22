@@ -503,6 +503,7 @@ def main(cfg: DictConfig):
         def eval_one_epoch(self, epoch, timesteps=1):
             report_freq = self.report_freq
             running_loss = 0.0; running_energy = 0.0; running_water = 0.0
+            running_var=0.0
             epoch_loss = 0.0; epoch_mse = 0.0;
             epoch_R2precc = 0.0
             epoch_hcon = 0.0; epoch_wcon = 0.0
@@ -684,7 +685,7 @@ def main(cfg: DictConfig):
                         running_loss    += loss.item()
                         running_energy  += h_con.item()
                         running_water   += water_con.item()
-
+                        if cfg.loss_fn_type == "CRPS": running_var += ens_var.item() 
                         #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
                         if j>loss_update_start_index:
                             with torch.no_grad():
@@ -760,9 +761,15 @@ def main(cfg: DictConfig):
                         #ypo_lay, ypo_sfc = model.postprocessing(preds_lay, preds_sfc)
                         #yto_lay, yto_sfc = model.postprocessing(targets_lay, targets_sfc) 
                         #r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
-    
-                        print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  runR2: {:.2f},  elapsed {:.1f}s (compute {:.1f})" .format(epoch + 1, 
-                                                        j+1, running_loss,running_energy,running_water, r2raw, elaps, t_comp), flush=True)
+                        if cfg.loss_fn_type == "CRPS": 
+                            running_var = running_var / (report_freq/timesteps)
+
+                            print("[{:d}, {:d}] Loss: {:.2e} var {:.2e} h-con: {:.2e}  w-con: {:.2e}  runR2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
+                                                            j+1, running_loss,running_var, running_energy,running_water, r2raw, elaps, t_comp), flush=True)
+                            running_var = 0.0
+                        else:
+                            print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  runR2: {:.2f},  elapsed {:.1f}s (compute {:.1f})" .format(epoch + 1, 
+                                                            j+1, running_loss,running_energy,running_water, r2raw, elaps, t_comp), flush=True)
                         running_loss = 0.0
                         running_energy = 0.0; running_water=0.0
                         t0_it = time.time()
