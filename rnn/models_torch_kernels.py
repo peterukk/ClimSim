@@ -21,6 +21,235 @@ import torch.jit as jit
 from torch import Tensor
 
 
+class MyStochasticGRU(nn.Module):
+
+    """
+    stochastic GRU
+
+    """
+
+    def __init__(self, input_size, hidden_size, go_backwards=False, bias=True):
+        super(MyStochasticGRU, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.go_backwards = go_backwards
+        self.bias = bias
+        print("input size", input_size, "hidden size", hidden_size)
+        self.x2h = nn.Linear(input_size, 3 * hidden_size, bias=bias)
+        self.h2h = nn.Linear(hidden_size, 3 * hidden_size, bias=bias)
+        self.z2h = nn.Linear(hidden_size, 3 * hidden_size, bias=bias)
+
+        self.encoder_mlp_mean =  nn.Linear(input_size+hidden_size, hidden_size)
+        self.encoder_mlp_sigma =  nn.Linear(input_size+hidden_size, hidden_size)
+        # self.encoder_mlp_dist =  nn.Linear(input_size+hidden_size, 2*hidden_size)
+        
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        std = 1.0 / math.sqrt(self.hidden_size)
+        for w in self.parameters():
+            w.data.uniform_(-std, std)
+            
+    @torch.compile
+    def forward(self, x_seq): #, hidden=None):
+        
+        nseq = x_seq.shape[0]
+        batch_size = x_seq.shape[1]
+        
+        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        if self.go_backwards:
+            istart = nseq-1 
+            istop = -1
+            istep = -1 
+        else:
+            istart = 0
+            istop = nseq
+            istep = 1
+            
+        hidden_seq = []
+        
+        # if hidden==None:
+        hidden = torch.randn((batch_size, self.hidden_size), device=x_seq.device)  # (batch, hidden_size)
+        
+        for i in range(istart,istop,istep):    
+            # print(i)
+            x = x_seq[i]
+            # print("x shape", x.shape, "hidden shape", hidden.shape)
+            inp = torch.cat((x,hidden), axis=1)
+            mean_ = self.encoder_mlp_mean(inp)
+            logvar_ = self.encoder_mlp_sigma(inp)
+            
+            # gates = (
+            #     torch.mm(x, weight_ih)
+            #     + self.bias_ih
+            #     + torch.mm(hx, weight_hh)
+            #     + self.bias_hh
+            # )
+            # ingate, forgetgate, cellgate, outgate = gates.chunk(4, 1)
+
+            eps = torch.randn_like(mean_)
+            sigma = torch.exp(0.5*logvar_)
+            z = mean_ + eps * sigma
+
+            gate_x = self.x2h(x) 
+            gate_h = self.h2h(hidden)
+            gate_z = self.z2h(z)
+    
+            gate_x = gate_x.squeeze()
+            gate_h = gate_h.squeeze()
+            gate_z = gate_z.squeeze()
+    
+            i_r, i_i, i_n = gate_x.chunk(3, 1)
+            h_r, h_i, h_n = gate_h.chunk(3, 1)
+            z_r, z_i, z_n = gate_z.chunk(3, 1)
+    
+            resetgate = torch.sigmoid((i_r + h_r + z_r))
+            inputgate = torch.sigmoid((i_i + h_i + z_i))
+            newgate = torch.tanh((i_n + z_n + (resetgate * h_n)))
+            
+            hidden = newgate + inputgate * (hidden - newgate)
+            
+            hidden_seq.append(hidden)
+        
+        return torch.stack(hidden_seq, dim=0) 
+    
+
+    
+class MyStochasticGRULayer(jit.ScriptModule):
+    def __init__(self, input_size, hidden_size, dtype=torch.float32):
+        super().__init__()
+        # self.cell = cell(*cell_args)
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.weight_ih = Parameter(torch.randn((input_size, 3 * hidden_size),dtype=dtype))
+        self.weight_hh = Parameter(torch.randn((hidden_size, 3 * hidden_size),dtype=dtype))
+        self.weight_zh = Parameter(torch.randn((hidden_size, 3 * hidden_size),dtype=dtype))
+
+        # self.bias_ih = Parameter(torch.randn((3 * hidden_size),dtype=dtype))
+        # self.bias_hh = Parameter(torch.randn((3 * hidden_size),dtype=dtype))
+        # self.bias_zh = Parameter(torch.randn((3 * hidden_size),dtype=dtype))
+
+        self.weight_encoder =  Parameter(torch.randn((2*hidden_size, input_size + hidden_size),dtype=dtype))
+        # self.weight_encoder_sigma =  Parameter(torch.randn((input_size + hidden_size, hidden_size),dtype=dtype))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        std = 1.0 / math.sqrt(self.hidden_size)
+        for w in self.parameters():
+            w.data.uniform_(-std, std)
+            
+    # @torch.jit.script          
+    @jit.script_method
+    # @torch.compile
+    def forward(
+        self, input_seq: Tensor, hidden: Tensor) -> Tensor: #Tuple[Tensor, Tensor]:
+        epss = torch.randn_like(input_seq)
+        inputs = input_seq.unbind(0)
+        epss = epss.unbind(0)
+
+        outputs = torch.jit.annotate(List[Tensor], [])
+        
+        epss = torch.randn_like(input_seq)
+
+        
+        for i in range(len(input_seq)):
+            x = inputs[i]
+            eps = epss[i]
+            
+            # print("shape x", x.shape, "shape hid", hidden.shape)
+            inp = torch.cat((x,hidden), dim=1)
+            predicted_distribution = torch.mm(inp, self.weight_encoder) 
+            mean_, logvar_ = predicted_distribution.chunk(2,1)
+            
+            # eps = torch.randn_like(mean_)
+            z = mean_ + eps * torch.exp(0.5*logvar_)
+            
+            x_results = torch.mm(x, self.weight_ih) #+ self.bias_ih
+            h_results = torch.mm(hidden, self.weight_hh) # + self.bias_hh
+            z_results = torch.mm(z, self.weight_hh) 
+
+            i_r, i_z, i_n = x_results.chunk(3, 1)
+            h_r, h_z, h_n = h_results.chunk(3, 1)
+            z_r, z_z, z_n = z_results.chunk(3, 1)
+
+            r = torch.sigmoid(i_r + h_r + z_r)
+            z = torch.sigmoid(i_z + h_z + z_z)
+            n = torch.tanh(i_n + z_n + r * h_n)
+                
+            # hidden =  n - torch.mul(n, z) + torch.mul(z, hidden)
+            hidden = n + torch.mul(z, (hidden - n))
+            # hidden = newgate + inputgate * (hidden - newgate)
+
+            outputs += [hidden]
+
+        return torch.stack(outputs)
+    
+class MyStochasticGRULayer2(jit.ScriptModule):
+    def __init__(self, input_size, hidden_size, dtype=torch.float32):
+        super().__init__()
+        # self.cell = cell(*cell_args)
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.weight_ih = Parameter(torch.randn((input_size, 3 * hidden_size),dtype=dtype))
+        self.weight_hh = Parameter(torch.randn((hidden_size, 3 * hidden_size),dtype=dtype))
+        # self.weight_zh = Parameter(torch.randn((hidden_size, 3 * hidden_size),dtype=dtype))
+
+        self.bias_ih = Parameter(torch.randn((3 * hidden_size),dtype=dtype))
+        self.bias_hh = Parameter(torch.randn((3 * hidden_size),dtype=dtype))
+        # self.bias_zh = Parameter(torch.randn((3 * hidden_size),dtype=dtype))
+
+        self.weight_encoder =  Parameter(torch.randn((2*hidden_size, input_size + hidden_size),dtype=dtype))
+        # self.weight_encoder_sigma =  Parameter(torch.randn((input_size + hidden_size, hidden_size),dtype=dtype))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        std = 1.0 / math.sqrt(self.hidden_size)
+        for w in self.parameters():
+            w.data.uniform_(-std, std)
+            
+    # @torch.jit.script          
+    @jit.script_method
+    # @torch.compile
+    def forward(
+        self, input: Tensor, hidden: Tensor) -> Tensor: #Tuple[Tensor, Tensor]:
+        inputs = input.unbind(0)
+        outputs = torch.jit.annotate(List[Tensor], [])
+        
+        for i in range(len(inputs)):
+            x = inputs[i]
+            
+            inp = torch.cat((x,hidden), dim=1)
+            predicted_distribution = torch.mm(inp, self.weight_encoder) 
+            mean_, logvar_ = predicted_distribution.chunk(2,1)
+            
+            eps = torch.randn_like(mean_)
+            z = mean_ + eps * 0.5 * torch.exp(logvar_)
+            
+            x_results = torch.mm(x, self.weight_ih) + self.bias_ih
+            h_results = torch.mm(hidden, self.weight_hh) + self.bias_hh
+            # z_results = torch.mm(z, self.weight_hh) 
+
+            i_r, i_z, i_n = x_results.chunk(3, 1)
+            h_r, h_z, h_n = h_results.chunk(3, 1)
+            # z_r, z_z, z_n = z_results.chunk(3, 1)
+
+            r = torch.sigmoid(i_r + h_r)
+            z = torch.sigmoid(i_z + h_z)
+            n = torch.tanh(i_n + z + r * h_n)
+                
+            # hidden =  n - torch.mul(n, z) + torch.mul(z, hidden)
+            hidden = n + torch.mul(z, (hidden - n))
+            # hidden = newgate + inputgate * (hidden - newgate)
+
+            outputs += [hidden]
+
+        return torch.stack(outputs)
+     
+    
+    
 class GLU(nn.Module):
     """ The static nonlinearity used in the S4 paper"""
     def __init__(self,  nlay, nneur, layernorm=True, dropout=0, expand_factor=2):

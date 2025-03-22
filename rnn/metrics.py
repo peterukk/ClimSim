@@ -220,7 +220,7 @@ def get_hybrid_loss(_lambda):
         return my_hybrid_loss(mse, energy, _lambda)
     return hybrid_loss
 
-def CRPS(y, y_pred, alpha=1, return_low_var_inds=False):
+def CRPS(y, y_sfc_dummy, y_pred, y_sfc_pred_dummy, beta=1, return_low_var_inds=False):
     """
     Calculate Continuous Ranked Probability Score.
 
@@ -233,6 +233,7 @@ def CRPS(y, y_pred, alpha=1, return_low_var_inds=False):
     Returns:
     - Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: CRPS and its components.
     """ 
+    
     # print("shape ypred", y_pred.shape, "y true", y.shape)
 
     if len(y.shape)==4:
@@ -261,15 +262,17 @@ def CRPS(y, y_pred, alpha=1, return_low_var_inds=False):
     # cdist out term1 (batch,1,nens)
     # cdist out term2 (batch, nens, nens)   
     # print("shape ytrue", y.shape, "y pred", y_pred.shape )
-    MSE     = torch.cdist(y, y_pred).mean() 
+    MAE     = torch.cdist(y, y_pred).mean() 
     # ens_var = torch.cdist(y_pred, y_pred).mean(0).sum() / (self.ens_size * (self.ens_size - 1))
     
     cmean_out = torch.cdist(y_pred, y_pred) # B, nens, nens
 
     ens_var = cmean_out.mean(0).sum() / (ens_size * (ens_size - 1))
     
-    MSE     /= y_pred.size(-1) ** 0.5
-    ens_var /= y_pred.size(-1) ** 0.5
+    MAE         /= y_pred.size(-1) ** 0.5
+    ens_var     /= y_pred.size(-1) ** 0.5
+    
+    CRPS =  beta * 2 * MAE - ens_var # beta should be 1
     
     if return_low_var_inds:
         x = cmean_out[:,0,1]
@@ -278,6 +281,13 @@ def CRPS(y, y_pred, alpha=1, return_low_var_inds=False):
 
         # print("shape cmean out", cmean_out.shape, "shape inds", inds.shape)
         # print("cmean out 0, 01,   2048, 01", cmean_out[0,0,1], cmean_out[2048,0,1])
-        return alpha * 2 * MSE - ens_var, MSE, ens_var, inds
+        # return beta * 2 * MSE - ens_var, MSE, ens_var, inds
+        return CRPS,  ens_var, inds
+
     else:
-        return alpha * 2 * MSE - ens_var, MSE, ens_var
+        return CRPS, ens_var
+
+def get_CRPS(beta): 
+    def customCRPS(y_true, y_true_sfc_dummy, y_pred, y_pred_sfc_dummy):
+        return CRPS(y_true, y_true_sfc_dummy, y_pred, y_pred_sfc_dummy, beta)
+    return customCRPS

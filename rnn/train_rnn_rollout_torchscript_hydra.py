@@ -31,7 +31,7 @@ device = torch.device("cuda" if cuda else "cpu")
 print(device)
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from models import RNN_autoreg, MyRNN, LSTM_autoreg_torchscript, SpaceStateModel, LSTM_torchscript
+from models import  MyRNN, LSTM_autoreg_torchscript, SpaceStateModel, LSTM_torchscript
 from utils import generator_xy, BatchSampler
 # from metrics import get_energy_metric, get_hybrid_loss, my_mse_flatten
 import metrics as metrics
@@ -274,6 +274,16 @@ def main(cfg: DictConfig):
         ny_pp = ny 
     # ny_pp = ny 
     
+    
+    if cfg.add_stochastic_layer:
+        use_ensemble = True 
+        ensemble_size = 2
+        if cfg.loss_fn_type != "CRPS":
+            raise NotImplementedError("To train stochastic RNN, use CRPS loss")
+    else:
+        use_ensemble = False
+        ensemble_size = 0
+        
     print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
     if len(cfg.nneur)==3:
       use_third_rnn = True 
@@ -281,6 +291,7 @@ def main(cfg: DictConfig):
       use_third_rnn = False 
     else: 
       raise NotImplementedError()
+
 
     if cfg.model_type=="LSTM":
         if cfg.autoregressive:
@@ -296,10 +307,14 @@ def main(cfg: DictConfig):
                         use_initial_mlp = cfg.use_initial_mlp,
                         use_intermediate_mlp = cfg.use_intermediate_mlp,
                         add_pres = cfg.add_pres,
+                        add_stochastic_layer = cfg.add_stochastic_layer, 
                         output_prune = cfg.output_prune,
                         use_memory = cfg.autoregressive,
                         separate_radiation = cfg.separate_radiation,
-                        use_third_rnn = use_third_rnn)
+                        use_ensemble = use_ensemble,
+                        use_third_rnn = use_third_rnn,
+                        nh_mem = cfg.nh_mem)#,
+                        #ensemble_size = ensemble_size)
         else:
             model = LSTM_torchscript(hyam,hybm,
                         out_scale = yscale_lev,
@@ -401,18 +416,17 @@ def main(cfg: DictConfig):
     metric_h_con = metrics.get_energy_metric(hyai, hybi)
     metric_water_con = metrics.get_water_conservation(hyai, hybi)
     mse = metrics.get_mse_flatten(weights)
-    
-    ensemble_predictions = False
+
     
     if cfg.loss_fn_type == "mse":
         loss_fn = mse
     elif cfg.loss_fn_type == "huber":
         loss_fn = metrics.get_huber_flatten(weights)
+    elif cfg.loss_fn_type == "CRPS":
+        loss_fn = metrics.get_CRPS(1.0)
     else:
         raise NotImplementedError()
-    
-    hybrid_loss = metrics.get_hybrid_loss(torch.tensor(cfg._lambda))
-    
+        
     if cfg.optimizer == "adam":
         optimizer = torch.optim.Adam(model.parameters(), lr = cfg.lr)
     elif cfg.optimizer == "adamw":
@@ -460,7 +474,7 @@ def main(cfg: DictConfig):
             self.train = train
             self.report_freq = 800
             self.batch_size = batch_size
-            self.ensemble_size = 1
+            # self.ensemble_size = 1
             self.model = model 
             # self.autoregressive = autoregressive
             # self.loss_fn = loss_fn
@@ -472,10 +486,10 @@ def main(cfg: DictConfig):
         def eval_one_epoch(self, epoch, timesteps=1):
             report_freq = self.report_freq
             running_loss = 0.0; running_energy = 0.0; running_water = 0.0
-            epoch_loss = 0.0
-            epoch_mse = 0.0; epoch_mae = 0.0
+            epoch_loss = 0.0; epoch_mse = 0.0;
             epoch_R2precc = 0.0
             epoch_hcon = 0.0; epoch_wcon = 0.0
+            epoch_ens_var = 0.0
             epoch_r2_lev = 0.0
             epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
             epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
@@ -498,7 +512,7 @@ def main(cfg: DictConfig):
                 yto_lay = []; yto_sfc = []
                 # model.rnn1_mem = torch.randn(self.batch_size, nlev, model.nh_mem, device=device)
                 # model.rnn1_mem = torch.zeros(self.batch_size, nlev, model.nh_mem, device=device)
-                rnn1_mem = torch.zeros(self.batch_size*self.ensemble_size, model.nlev, model.nh_mem, device=device)
+                rnn1_mem = torch.zeros(self.batch_size*ensemble_size, model.nlev, model.nh_mem, device=device)
                 loss_update_start_index = 60
             else:
                 loss_update_start_index = 0
@@ -541,7 +555,16 @@ def main(cfg: DictConfig):
                     # yto_sfc0 = ytos_sfc_chk[ichunk]
                     
                     tcomp0= time.time()
-                        
+                    
+                    # if use_ensemble:
+                    # # if self.add_stochastic_layer:
+                    #     x_lay0 = x_lay0.unsqueeze(0)
+                    #     x_lay0 = torch.repeat_interleave(x_lay0,repeats=2,dim=0)
+                    #     x_lay0 = x_lay0.flatten(0,1)
+                    #     x_sfc0 = x_sfc0.flatten(0,1)
+                    #     x_sfc0 = torch.repeat_interleave(x_sfc0,repeats=2,dim=0)
+                    #     x_sfc0 = x_sfc0.unsqueeze(0)                  
+                    
                     with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=cfg.mp_autocast):
                         if cfg.autoregressive:
                             preds_lay0, preds_sfc0, rnn1_mem = self.model(x_lay0, x_sfc0, rnn1_mem)
@@ -581,12 +604,18 @@ def main(cfg: DictConfig):
                             
                         with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=cfg.mp_autocast):
                             
-                            main_loss = loss_fn(targets_lay, targets_sfc, preds_lay, preds_sfc)
-                            
-                            if ensemble_predictions:
-                                preds_lay = torch.reshape(preds_lay, (timesteps, 2, self.batch_size, nlev, nx))
+                            loss = loss_fn(targets_lay, targets_sfc, preds_lay, preds_sfc)
+                            if cfg.loss_fn_type == "CRPS":
+                                loss, ens_var = loss 
+                                
+                            if use_ensemble:
+                                # print("preds shape", preds_lay)
+                                # use only first member from here on 
+                                preds_lay = torch.reshape(preds_lay, (timesteps, 2, self.batch_size, nlev, ny))
                                 preds_lay = torch.reshape(preds_lay[:,0,:,:], shape=targets_lay.shape)
-                            
+                                preds_sfc = torch.reshape(preds_sfc, (timesteps, 2, self.batch_size, ny_sfc))
+                                preds_sfc = torch.reshape(preds_sfc[:,0,:], shape=targets_sfc.shape)
+                                              
                             if use_mp_constraint:
                                 ypo_lay, ypo_sfc = model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
                                 with torch.no_grad(): 
@@ -612,10 +641,7 @@ def main(cfg: DictConfig):
                             water_con       = torch.mean(torch.square(water_con_p - water_con_t))
                             
                             if cfg.use_energy_loss: 
-                                # loss = hybrid_loss(main_loss, h_con)
-                                loss = main_loss + cfg._lambda*h_con
-                            else:
-                                loss = main_loss
+                                loss = loss + cfg._lambda*h_con
 
                             if cfg.use_water_loss:
                                 loss = loss + cfg._alpha * water_con
@@ -647,13 +673,16 @@ def main(cfg: DictConfig):
                             with torch.no_grad():
                                 epoch_loss      += loss.item()
                                 if cfg.loss_fn_type =="mse":
-                                    epoch_mse       += main_loss.item()
+                                    epoch_mse       += loss.item()
                                 else:
                                     epoch_mse       += mse(targets_lay, targets_sfc, preds_lay, preds_sfc)
                                 #epoch_mae       += mae.item()
                             
                                 epoch_hcon  += h_con.item()
                                 epoch_wcon  += water_con.item()
+                                
+                                if cfg.loss_fn_type == "CRPS":
+                                    epoch_ens_var += ens_var.item()
                                 # print("shape ypo", ypo_lay.shape, "yto", yto_lay.shape)
                                 # water_con       = metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf)
                                 # # print("true:")
@@ -694,8 +723,7 @@ def main(cfg: DictConfig):
                         if cfg.autoregressive:
                             preds_lay = []; preds_sfc = []
                             targets_lay = []; targets_sfc = [] 
-                            surf_pres = []; x_lay_raw = []
-                            yto_lay = []; yto_sfc = []
+                            x_lay_raw = []; yto_lay = []; yto_sfc = []
                             x_sfc = []
                             rnn1_mem = rnn1_mem.detach()
                             
@@ -728,6 +756,9 @@ def main(cfg: DictConfig):
     
             self.metrics['loss'] =  epoch_loss / k
             self.metrics['mean_squared_error'] = epoch_mse / k
+            if cfg.loss_fn_type == "CRPS": 
+                self.metrics['ens_var'] =  epoch_ens_var / k
+
             self.metrics["h_conservation"] =  epoch_hcon / k
             self.metrics["water_conservation"] =  epoch_wcon / k
 
@@ -785,7 +816,7 @@ def main(cfg: DictConfig):
                                                                 R2_moistening, # self.metrics['R2_moistening'],                                                              
                                                                 self.metrics['R2_precc'] ))
             
-            del loss, main_loss, h_con
+            del loss, h_con
             if cfg.autoregressive:
                 del rnn1_mem
             if cuda: 
@@ -872,6 +903,7 @@ def main(cfg: DictConfig):
             # if cfg.save_model and val_loss < best_val_loss:
             if cfg.save_model and val_loss > best_val_loss:
                 print("New best validation result obtained, saving model to", SAVE_PATH)
+                model = model.to("cpu")
                 torch.save({
                             'epoch': epoch,
                             'model_state_dict': model.state_dict(),
@@ -882,7 +914,8 @@ def main(cfg: DictConfig):
                 scripted_model = scripted_model.eval()
                 scripted_model.save(save_file_torch)
                 best_val_loss = val_loss 
-                  
+                model = model.to(device)
+
         print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timesteps))
         print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
     

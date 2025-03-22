@@ -171,6 +171,13 @@ qinput_prune, snowhice_fix, v5_input, mp_constraint = True, True, False, True
 model_path_script = "saved_models/LSTM-Hidden_lr0.001.neur96-96_xv4_yv5_num77672_script.pt"
 qinput_prune, snowhice_fix, v5_input, mp_constraint = True, True, False, True
 
+model_path_script = "saved_models/LSTM-Hidden_lr0.001.neur96-96_xv4_yv5_num41445_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint = True, True, False, True
+
+model_path_script = "saved_models/LSTM-Hidden_lr0.001.neur160-160_xv4_yv5_num5695_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint = True, True, False, True
+
+
 model = torch.jit.load(model_path_script)
 
 class NewModel_constraint(nn.Module):
@@ -195,6 +202,13 @@ class NewModel_constraint(nn.Module):
         self.v5_input = v5_input
         self.mp_constraint = mp_constraint 
         
+        self.xmean_lev      = self.original_model.xmean_lev.to("cpu")
+        self.xdiv_lev       = self.original_model.xdiv_lev.to("cpu")
+        self.xmean_sca      = self.original_model.xmean_sca.to("cpu")
+        self.xdiv_sca       = self.original_model.xdiv_sca.to("cpu")
+        self.yscale_lev     = self.original_model.yscale_lev.to("cpu")
+        self.yscale_sca     = self.original_model.yscale_sca.to("cpu")
+
     def preprocessing(self, x_main0, x_sfc0):
         # v4 input array
         x_main = x_main0.clone()
@@ -220,8 +234,8 @@ class NewModel_constraint(nn.Module):
             #                            mean     max - min
             # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
             # x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
-            x_main = (x_main - self.original_model.xmean_lev)/(self.original_model.xdiv_lev)
-            x_sfc =  (x_sfc -  self.original_model.xmean_sca)/(self.original_model.xdiv_sca)
+            x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+            x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
             
         else:
             # v4 inputs
@@ -231,8 +245,8 @@ class NewModel_constraint(nn.Module):
             #                            mean     max - min
             # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
             # x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
-            x_main = (x_main - self.original_model.xmean_lev)/(self.original_model.xdiv_lev)
-            x_sfc =  (x_sfc -  self.original_model.xmean_sca)/(self.original_model.xdiv_sca)
+            x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+            x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
             
             if self.qinput_prune:
                 x_main[:,0:15,2:3] = 0.0
@@ -275,8 +289,8 @@ class NewModel_constraint(nn.Module):
 
         out_lev, out_sfc, rnn1_mem = self.original_model(x_main, x_sfc, rnn1_mem)
 
-        out_lev      = out_lev / self.original_model.yscale_lev
-        out_sfc      = out_sfc / self.original_model.yscale_sca
+        out_lev      = out_lev / self.yscale_lev
+        out_sfc      = out_sfc / self.yscale_sca
         
         nlev_mem = rnn1_mem.shape[1]
         
@@ -484,24 +498,6 @@ for i in range(6):
 fig.subplots_adjust(hspace=0.6)
 
 
-    
-
-# fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
-#                         gridspec_kw = {'wspace':0}) #layout="constrained")
-# for i in range(6):
-#     axs[i].plot(x, R2[:,i]); 
-#     axs[i].set_title(labels[i])
-#     axs[i].set_ylim(0,1)
-#     axs[i].set_xlim(0,60)
-#     axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
-#     if i>0:
-#         axs[i].set_yticklabels([])
-#     axs[i].set_xticklabels([])
-
-# fig.subplots_adjust(hspace=0)
-
-
-# fig.suptitle("Bias for val first 2160 batches")
 
 # y_true = y_lev_np.reshape(-1,384,60,6)
 # y_pred = outs_lev.reshape(-1,384,60,6)
@@ -520,18 +516,19 @@ u_t_mean = y_true[:,:,:,4].mean(axis=0)
 u_p_mean = y_pred[:,:,:,4].mean(axis=0)
 v_t_mean = y_true[:,:,:,5].mean(axis=0)
 v_p_mean = y_pred[:,:,:,5].mean(axis=0)
+gc.collect()
 
-colors = ['b','g']
-fig, ax1 = plt.subplots()
-ax1.hist([clw_t_mean.flatten(),clw_p_mean.flatten()],color=colors, label=['clw', 'clw-pred'])
-ax1.set_yscale('log')
-ax1.legend()
+# colors = ['b','g']
+# fig, ax1 = plt.subplots()
+# ax1.hist([clw_t_mean.flatten(),clw_p_mean.flatten()],color=colors, label=['clw', 'clw-pred'])
+# ax1.set_yscale('log')
+# ax1.legend()
 
-colors = ['b','g']
-fig, ax2 = plt.subplots()
-ax2.hist([clw_t_mean.flatten(),clw_p_mean.flatten()],color=colors, label=['cli', 'cli-pred'])
-ax2.set_yscale('log')
-ax2.legend()
+# colors = ['b','g']
+# fig, ax2 = plt.subplots()
+# ax2.hist([clw_t_mean.flatten(),clw_p_mean.flatten()],color=colors, label=['cli', 'cli-pred'])
+# ax2.set_yscale('log')
+# ax2.legend()
 
 # import mpl_scatter_density # adds projection='scatter_density'
 # from matplotlib.colors import LinearSegmentedColormap
@@ -608,6 +605,7 @@ lat = ds2.lat
 lon = ds2.lon
 level = ds2.lev.values
 
+labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
 
 y = np.arange(60)
 ncols, nrows = 3,2

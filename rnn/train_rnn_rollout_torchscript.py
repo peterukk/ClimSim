@@ -1360,31 +1360,45 @@ import matplotlib.pyplot as plt
 
 
 labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
-# y = np.arange(60)
-# ncols, nrows = 1,6
-# fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
-#                         layout="constrained")
-# for i in range(6):
-#     axs[i].plot(R2[:,i],y)
-#     axs[i].invert_yaxis()
-#     axs[i].set_xlim(0,1)
-#     axs[i].set_title(labels[i])
+y = np.arange(60)
+ncols, nrows = 1,6
+fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
+                        layout="constrained")
+for i in range(6):
+    axs[i].plot(R2[:,i],y)
+    axs[i].invert_yaxis()
+    axs[i].set_xlim(0,1)
+    axs[i].set_title(labels[i])
     
 
 x = np.arange(60)
-ncols, nrows = 6,1
-fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
-                        gridspec_kw = {'wspace':0}) #layout="constrained")
-for i in range(6):
-    axs[i].plot(x, R2[:,i]); 
-    axs[i].set_title(labels[i])
-    axs[i].set_ylim(0,1)
-    axs[i].set_xlim(0,60)
-    axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
-    if i>0:
-        axs[i].set_yticklabels([])
-    axs[i].set_xticklabels([])
+# ncols, nrows = 6,1
+# fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
+#                         gridspec_kw = {'wspace':0}) #layout="constrained")
+# for i in range(6):
+#     axs[i].plot(x, R2[:,i]); 
+#     axs[i].set_title(labels[i])
+#     axs[i].set_ylim(0,1)
+#     axs[i].set_xlim(0,60)
+#     axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
+#     if i>0:
+#         axs[i].set_yticklabels([])
+#     axs[i].set_xticklabels([])
 
+labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
+y = np.arange(60)
+ncols, nrows = 3,2
+fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
+                        layout="constrained")
+j = 0
+for irow in range(2):
+    for icol in range(3):
+        axs[irow,icol].plot(R2[:,j],y)
+        axs[irow,icol].invert_yaxis()
+        axs[irow,icol].set_xlim(0,1)
+        axs[irow,icol].set_title(labels[j])
+        j = j + 1
+    
 fig.subplots_adjust(hspace=0)
     
 
