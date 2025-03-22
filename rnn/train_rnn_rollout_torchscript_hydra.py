@@ -945,6 +945,8 @@ def main(cfg: DictConfig):
                 scripted_model = scripted_model.eval()
                 scripted_model.save(save_file_torch)
                 best_val_loss = val_loss 
+                if cfg.loss_fn_type == "CRPS":
+                    model.use_ensemble=True
                 model = model.to(device)
 
         print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timesteps))
