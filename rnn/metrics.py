@@ -220,7 +220,7 @@ def get_hybrid_loss(_lambda):
         return my_hybrid_loss(mse, energy, _lambda)
     return hybrid_loss
 
-def CRPS(y, y_sfc_dummy, y_pred, y_sfc_pred_dummy, beta=1, return_low_var_inds=False):
+def CRPS(y, y_sfc, y_pred, y_sfc_pred, beta=1, return_low_var_inds=False):
     """
     Calculate Continuous Ranked Probability Score.
 
@@ -236,24 +236,34 @@ def CRPS(y, y_sfc_dummy, y_pred, y_sfc_pred_dummy, beta=1, return_low_var_inds=F
     
     # print("shape ypred", y_pred.shape, "y true", y.shape)
 
-    if len(y.shape)==4:
-        #autoreg training with time windows,
-        # y shape: (ntime, nb, nlev, ny)
-        # ypred:  (ntime, nens*nb, nlev, ny)    
-        time_steps,batch_size,seq_size,feature_size = y.shape
-        ens_size = y_pred.shape[1] // batch_size
-        y_pred = torch.reshape(y_pred, (time_steps, ens_size, batch_size, seq_size*feature_size))
-        y_pred = torch.transpose(y_pred, 1, 2) # time, batch, ens, seq_size*feature_size))
-        y_pred = torch.reshape(y_pred, (time_steps*batch_size, ens_size, seq_size*feature_size))
-        batch_size_new = y_pred.shape[0]
-        y = torch.reshape(y, (batch_size_new, 1, seq_size*feature_size))
-        # print("shape ypred", y_pred.shape, "y true", y.shape)
-    else:
-        batch_size,seq_size,feature_size = y.shape
-        ens_size = y_pred.shape[0] // batch_size
-        y_pred = torch.reshape(y_pred, (ens_size, batch_size, seq_size*feature_size))
-        y_pred = torch.transpose(y_pred, 0, 1) # batch_size, ens_size, nlev*ny
-        y = torch.reshape(y, (batch_size, 1, seq_size*feature_size))
+    # if len(y.shape)==4:
+    #     #autoreg training with time windows,
+    #     # y shape: (ntime, nb, nlev, ny)
+    #     # ypred:  (ntime, nens*nb, nlev, ny)    
+    #     time_steps,batch_size,seq_size,feature_size = y.shape
+    #     ens_size = y_pred.shape[1] // batch_size
+    #     y_pred = torch.reshape(y_pred, (time_steps, ens_size, batch_size, seq_size*feature_size))
+        
+        
+        
+    #     y_pred = torch.transpose(y_pred, 1, 2) # time, batch, ens, seq_size*feature_size))
+    #     y_pred = torch.reshape(y_pred, (time_steps*batch_size, ens_size, seq_size*feature_size))
+    #     batch_size_new = y_pred.shape[0]
+    #     y = torch.reshape(y, (batch_size_new, 1, seq_size*feature_size))
+    #     # print("shape ypred", y_pred.shape, "y true", y.shape)
+    # else:
+        
+    batch_size,seq_size,feature_size = y.shape
+    ens_size = y_pred.shape[0] // batch_size           # seq_size*feature_size
+    y_pred = torch.reshape(y_pred, (ens_size, batch_size, -1))
+    # NEW: ADD SFC
+    y_sfc_pred = torch.reshape(y_sfc_pred, (ens_size, batch_size, -1))
+    y_pred = torch.cat((y_pred, y_sfc_pred), axis=-1)
+    y_pred = torch.transpose(y_pred, 0, 1) # batch_size, ens_size, nlev*ny
+    y_sfc = torch.reshape(y_sfc,(batch_size,1,-1))
+    y = torch.reshape(y, (batch_size, 1, -1))
+    y = torch.cat((y, y_sfc),axis=-1)
+
     # cdist
     # x1 (Tensor) – input tensor of shape B×P×M
     # x2 (Tensor) – input tensor of shape B×R×M
@@ -288,6 +298,6 @@ def CRPS(y, y_sfc_dummy, y_pred, y_sfc_pred_dummy, beta=1, return_low_var_inds=F
         return CRPS, ens_var
 
 def get_CRPS(beta): 
-    def customCRPS(y_true, y_true_sfc_dummy, y_pred, y_pred_sfc_dummy):
-        return CRPS(y_true, y_true_sfc_dummy, y_pred, y_pred_sfc_dummy, beta)
+    def customCRPS(y_true, y_true_sfc, y_pred, y_pred_sfc):
+        return CRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, beta)
     return customCRPS
