@@ -396,7 +396,8 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.rnn0   = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)
             self.rnn1   = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)  # (input_size, hidden_size)
             if self.add_stochastic_layer:
-                self.rnn2 = MyStochasticGRULayer(self.nx_rnn3, self.nh_rnn3)  
+                use_bias=False
+                self.rnn2 = MyStochasticGRULayer(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias)  
             else:
                 self.rnn2   = nn.LSTM(self.nx_rnn3, self.nh_rnn3,  batch_first=True)
         else:
@@ -406,7 +407,8 @@ class LSTM_autoreg_torchscript(nn.Module):
 
             self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)  # (input_size, hidden_size)
             if self.add_stochastic_layer:
-                self.rnn2 = MyStochasticGRULayer(self.nx_rnn2, self.nh_rnn2)  
+                use_bias=False
+                self.rnn2 = MyStochasticGRULayer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)  
             else:
                 self.rnn2 = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
 
@@ -837,8 +839,9 @@ class SRNN_autoreg_torchscript(nn.Module):
         self.mlp_surface    = nn.Linear(self.nx_sfc, self.nh_rnn1)
         self.mlp_toa        = nn.Linear(1, self.nh_rnn2)
 
-        self.rnn1      = MyStochasticGRULayer(self.nx_rnn1, self.nh_rnn1) 
-        self.rnn2      = MyStochasticGRULayer(self.nx_rnn2, self.nh_rnn2)
+        use_bias=True
+        self.rnn1      = MyStochasticGRULayer(self.nx_rnn1, self.nh_rnn1, use_bias=use_bias) 
+        self.rnn2      = MyStochasticGRULayer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)
 
         nh_rnn = self.nh_rnn2
 
