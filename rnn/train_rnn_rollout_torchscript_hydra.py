@@ -925,6 +925,8 @@ def main(cfg: DictConfig):
             # if cfg.save_model and val_loss < best_val_loss:
             if cfg.save_model and val_loss > best_val_loss:
                 print("New best validation result obtained, saving model to", SAVE_PATH)
+                if cfg.loss_fn_type == "CRPS":
+                    model.use_ensemble=False
                 model = model.to("cpu")
                 torch.save({
                             'epoch': epoch,
