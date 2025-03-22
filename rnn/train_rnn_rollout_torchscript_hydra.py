@@ -423,7 +423,7 @@ def main(cfg: DictConfig):
     elif cfg.loss_fn_type == "huber":
         loss_fn = metrics.get_huber_flatten(weights)
     elif cfg.loss_fn_type == "CRPS":
-        loss_fn = metrics.get_CRPS(1.0)
+        loss_fn = metrics.get_CRPS(cfg.beta)
     else:
         raise NotImplementedError()
         
