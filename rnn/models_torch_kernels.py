@@ -130,7 +130,7 @@ class MyStochasticGRULayer(jit.ScriptModule):
         # self.bias_hh = Parameter(torch.randn((3 * hidden_size),dtype=dtype))
         # self.bias_zh = Parameter(torch.randn((3 * hidden_size),dtype=dtype))
 
-        self.weight_encoder =  Parameter(torch.randn((2*hidden_size, input_size + hidden_size),dtype=dtype))
+        self.weight_encoder =  Parameter(torch.randn((input_size + hidden_size, 2*hidden_size),dtype=dtype))
         # self.weight_encoder_sigma =  Parameter(torch.randn((input_size + hidden_size, hidden_size),dtype=dtype))
 
         self.reset_parameters()
@@ -145,14 +145,18 @@ class MyStochasticGRULayer(jit.ScriptModule):
     # @torch.compile
     def forward(
         self, input_seq: Tensor, hidden: Tensor) -> Tensor: #Tuple[Tensor, Tensor]:
-        epss = torch.randn_like(input_seq)
-        inputs = input_seq.unbind(0)
+        
+        nlev, batch_size, nx = input_seq.shape
+
+        # epss = torch.randn_like(input_seq)
+        epss = torch.randn((nlev, batch_size, self.hidden_size),device=input_seq.device)
         epss = epss.unbind(0)
+        
+        inputs = input_seq.unbind(0)
+
 
         outputs = torch.jit.annotate(List[Tensor], [])
         
-        epss = torch.randn_like(input_seq)
-
         
         for i in range(len(input_seq)):
             x = inputs[i]

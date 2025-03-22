@@ -292,10 +292,10 @@ def CRPS(y, y_sfc, y_pred, y_sfc_pred, beta=1, return_low_var_inds=False):
         # print("shape cmean out", cmean_out.shape, "shape inds", inds.shape)
         # print("cmean out 0, 01,   2048, 01", cmean_out[0,0,1], cmean_out[2048,0,1])
         # return beta * 2 * MSE - ens_var, MSE, ens_var, inds
-        return CRPS,  ens_var, inds
+        return CRPS,  MAE, ens_var, inds
 
     else:
-        return CRPS, ens_var
+        return CRPS, MAE, ens_var
 
 def get_CRPS(beta): 
     def customCRPS(y_true, y_true_sfc, y_pred, y_pred_sfc):

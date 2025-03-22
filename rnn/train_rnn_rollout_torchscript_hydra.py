@@ -31,7 +31,7 @@ device = torch.device("cuda" if cuda else "cpu")
 print(device)
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from models import  MyRNN, LSTM_autoreg_torchscript, SpaceStateModel, LSTM_torchscript
+from models import  MyRNN, LSTM_autoreg_torchscript, SpaceStateModel, LSTM_torchscript, SRNN_autoreg_torchscript
 from utils import generator_xy, BatchSampler
 # from metrics import get_energy_metric, get_hybrid_loss, my_mse_flatten
 import metrics as metrics
@@ -325,6 +325,23 @@ def main(cfg: DictConfig):
                         use_initial_mlp = cfg.use_initial_mlp,
                         use_intermediate_mlp = cfg.use_intermediate_mlp,
                         add_pres = cfg.add_pres, output_prune = cfg.output_prune)
+    elif cfg.model_type=="SRNN":
+        model = SRNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
+                    out_scale = yscale_lev,
+                    out_sfc_scale = yscale_sca, 
+                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                    device=device,
+                    nx = nx, nx_sfc=nx_sfc, 
+                    ny = ny, ny_sfc=ny_sfc, 
+                    nneur=cfg.nneur, 
+                    use_initial_mlp = cfg.use_initial_mlp,
+                    use_intermediate_mlp = cfg.use_intermediate_mlp,
+                    add_pres = cfg.add_pres,
+                    output_prune = cfg.output_prune,
+                    use_memory = cfg.autoregressive,
+                    use_ensemble = use_ensemble,
+                    nh_mem = cfg.nh_mem)#,
     else:
         model = SpaceStateModel(hyam, hybm, 
                     out_scale = yscale_lev,
@@ -489,7 +506,7 @@ def main(cfg: DictConfig):
             epoch_loss = 0.0; epoch_mse = 0.0;
             epoch_R2precc = 0.0
             epoch_hcon = 0.0; epoch_wcon = 0.0
-            epoch_ens_var = 0.0
+            epoch_ens_var = 0.0; epoch_det_skill = 0.0; epoch_spreadskill = 0.0
             epoch_r2_lev = 0.0
             epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
             epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
@@ -606,7 +623,7 @@ def main(cfg: DictConfig):
                             
                             loss = loss_fn(targets_lay, targets_sfc, preds_lay, preds_sfc)
                             if cfg.loss_fn_type == "CRPS":
-                                loss, ens_var = loss 
+                                loss, det_skill, ens_var = loss 
                                 
                             if use_ensemble:
                                 # print("preds shape", preds_lay)
@@ -683,6 +700,9 @@ def main(cfg: DictConfig):
                                 
                                 if cfg.loss_fn_type == "CRPS":
                                     epoch_ens_var += ens_var.item()
+                                    epoch_det_skill += det_skill.item()
+                                    epoch_spreadskill += ens_var.item() / det_skill.item()
+
                                 # print("shape ypo", ypo_lay.shape, "yto", yto_lay.shape)
                                 # water_con       = metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf)
                                 # # print("true:")
@@ -758,6 +778,8 @@ def main(cfg: DictConfig):
             self.metrics['mean_squared_error'] = epoch_mse / k
             if cfg.loss_fn_type == "CRPS": 
                 self.metrics['ens_var'] =  epoch_ens_var / k
+                self.metrics['det_skill'] =  epoch_det_skill / k
+                self.metrics['spread_skill_ratio'] =  epoch_spreadskill / k
 
             self.metrics["h_conservation"] =  epoch_hcon / k
             self.metrics["water_conservation"] =  epoch_wcon / k
