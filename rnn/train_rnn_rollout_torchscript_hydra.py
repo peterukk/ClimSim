@@ -657,6 +657,7 @@ def main(cfg: DictConfig):
                             # print("true:")
                             water_con_t     = metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf)
                             water_con       = torch.mean(torch.square(water_con_p - water_con_t))
+                            del water_con_p, water_con_t
                             
                             if cfg.use_energy_loss: 
                                 loss = loss + cfg._lambda*h_con
@@ -677,10 +678,10 @@ def main(cfg: DictConfig):
                             optimizer.zero_grad()
                             loss = loss.detach()
                             h_con = h_con.detach() 
+                            water_con = water_con.detach()
                             
                         ypo_lay = ypo_lay.detach(); ypo_sfc = ypo_sfc.detach()
                         yto_lay = yto_lay.detach(); yto_sfc = yto_sfc.detach()
-                        
                             
                         running_loss    += loss.item()
                         running_energy  += h_con.item()
