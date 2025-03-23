@@ -12,7 +12,7 @@ import torch.nn.parameter as Parameter
 # from layers_callbacks_torch import LayerPressure 
 import torch.nn.functional as F
 from models_torch_kernels import GLU
-from models_torch_kernels import MyStochasticGRU, MyStochasticGRULayer
+from models_torch_kernels import MyStochasticGRU, MyStochasticGRULayer, MyStochasticLSTMLayer
 import numpy as np 
 from typing import Final 
 
@@ -749,6 +749,358 @@ class LSTM_autoreg_torchscript(nn.Module):
         return out, out_sfc, rnn1_mem
 
 
+class LSTM_autoreg_torchscript_radflux(nn.Module):
+    use_initial_mlp: Final[bool]
+    use_intermediate_mlp: Final[bool]
+    add_pres: Final[bool]
+    add_stochastic_layer: Final[bool]
+    output_prune: Final[bool]
+    use_ensemble: Final[bool]
+    use_memory: Final[bool]
+
+    def __init__(self, hyam, hybm,  hyai, hybi,
+                out_scale, out_sfc_scale, 
+                xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
+                device,
+                nlev=60, nx = 4, nx_sfc=3, ny = 4, ny_sfc=3, nneur=(64,64), 
+                use_initial_mlp=False, 
+                use_intermediate_mlp=True,
+                add_pres=False,
+                add_stochastic_layer=False,
+                output_prune=False,
+                use_memory=False,
+                use_ensemble=False,
+                coeff_stochastic = 0.0,
+                nh_mem=16):
+        super(LSTM_autoreg_torchscript_radflux, self).__init__()
+        self.ny = ny 
+        self.nlev = nlev 
+        self.nx_sfc = nx_sfc 
+        self.ny_sfc = ny_sfc
+        self.nneur = nneur 
+        self.use_initial_mlp=use_initial_mlp
+        self.output_prune = output_prune
+        self.add_pres = add_pres
+        if self.add_pres:
+            self.preslay = LayerPressure(hyam,hybm)
+            nx = nx +1
+        self.nx = nx
+        self.nh_rnn1 = self.nneur[0]
+        self.nx_rnn2 = self.nneur[0]
+        self.nh_rnn2 = self.nneur[1]
+
+        self.use_memory= use_memory
+        self.use_ensemble = use_ensemble
+        # if self.predict_flux:
+        self.preslev = LayerPressure(hyai, hybi, norm=False)
+        if self.use_initial_mlp:
+            self.nx_rnn1 = self.nneur[0]
+        else:
+            self.nx_rnn1 = nx
+
+        # if self.separate_radiation:
+        self.nlev = 50
+        self.nlev_rad = 60
+        self.nx_rad = self.nx - 2
+        # self.nx_rad = nx - 2
+        self.nx_rnn1 = self.nx_rnn1 - 3
+        self.nx_sfc_rad = 5
+        self.nx_sfc = self.nx_sfc  - self.nx_sfc_rad
+        self.ny_rad = 4
+        self.ny_sfc_rad = 4
+        self.ny_sfc = 2
+            
+        # self.ensemble_size = ensemble_size
+        self.add_stochastic_layer = add_stochastic_layer
+        self.coeff_stochastic = coeff_stochastic
+        self.nonlin = nn.Tanh()
+        self.relu = nn.ReLU()
+
+        yscale_lev = torch.from_numpy(out_scale).to(device)
+        yscale_sca = torch.from_numpy(out_sfc_scale).to(device)
+        xmean_lev  = torch.from_numpy(xmean_lev).to(device)
+        xmean_sca  = torch.from_numpy(xmean_sca).to(device)
+        xdiv_lev   = torch.from_numpy(xdiv_lev).to(device)
+        xdiv_sca   = torch.from_numpy(xdiv_sca).to(device)
+        
+        self.register_buffer('yscale_lev', yscale_lev)
+        self.register_buffer('yscale_sca', yscale_sca)
+        self.register_buffer('xmean_lev', xmean_lev)
+        self.register_buffer('xmean_sca', xmean_sca)
+        self.register_buffer('xdiv_lev', xdiv_lev)
+        self.register_buffer('xdiv_sca', xdiv_sca)
+
+        # in ClimSim config of E3SM, the CRM physics first computes 
+        # moist physics on 50 levels, and then computes radiation on 60 levels!
+        self.use_intermediate_mlp=use_intermediate_mlp
+            
+        if self.use_memory:
+            if self.use_intermediate_mlp:
+                # self.nh_mem = self.nneur[1] // 4
+                # if nh_mem is None:
+                #     self.nh_mem = self.nneur[1] // 8
+                # else:
+                self.nh_mem = nh_mem
+
+            else:
+                self.nh_mem = self.nneur[1]
+            # self.rnn1_mem = None 
+            print("Building RNN that feeds its hidden memory at t0,z0 to its inputs at t1,z0")
+        else: 
+            self.nh_mem = 0
+            print("Building RNN without convective memory")
+
+        print("Initial mlp: {}, intermediate mlp: {}".format(self.use_initial_mlp, self.use_intermediate_mlp))
+ 
+        self.nx_rnn1 = self.nx_rnn1 + self.nh_mem
+        self.nh_rnn1 = self.nneur[0]
+        
+        print("nx rnn1", self.nx_rnn1, "nh rnn1", self.nh_rnn1)
+        print("nx rnn2", self.nx_rnn2, "nh rnn2", self.nh_rnn2)  
+        print("nx sfc", self.nx_sfc)
+
+        if self.use_initial_mlp:
+            self.mlp_initial = nn.Linear(self.nx_rad, self.nneur[0])
+
+        self.mlp_surface1  = nn.Linear(self.nx_sfc, self.nh_rnn1)
+        self.mlp_surface2  = nn.Linear(self.nx_sfc, self.nh_rnn1)
+
+        # self.rnn1      = nn.LSTMCell(self.nx_rnn1, self.nh_rnn1)  # (input_size, hidden_size)
+        # self.rnn2      = nn.LSTMCell(self.nx_rnn2, self.nh_rnn2)
+
+        self.mlp_toa1  = nn.Linear(2, self.nh_rnn2)
+        self.mlp_toa2  = nn.Linear(2, self.nh_rnn2)
+
+        self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)  # (input_size, hidden_size)
+        if self.add_stochastic_layer:
+            use_bias=False
+            self.rnn2 = MyStochasticGRULayer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)  
+        else:
+            self.rnn2 = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
+
+        nh_rnn = self.nh_rnn2
+
+        if self.use_intermediate_mlp: 
+            self.mlp_latent = nn.Linear(nh_rnn, self.nh_mem)
+            self.mlp_output = nn.Linear(self.nh_mem, self.ny)
+        else:
+            self.mlp_output = nn.Linear(nh_rnn, self.ny)
+            
+        self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc)
+            
+        # if self.separate_radiation:
+            # self.nh_rnn1_rad = self.nh_rnn1 
+            # self.nh_rnn2_rad = self.nh_rnn2 
+        self.nh_rnn1_rad = 96 
+        self.nh_rnn2_rad = 96
+        self.rnn1_rad      = nn.GRU(self.nh_mem+self.nx_rad, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
+        self.rnn2_rad      = nn.GRU(self.nh_rnn1_rad, self.nh_rnn2_rad,  batch_first=True) 
+        self.mlp_surface_rad = nn.Linear(self.nx_sfc_rad, self.nh_rnn1_rad)
+        self.mlp_surface_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_sfc_rad)
+        self.mlp_toa_rad  = nn.Linear(2, self.nh_rnn2_rad)
+        self.mlp_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_rad)
+
+    def temperature_scaling(self, T_raw):
+        liquid_ratio = (T_raw - 253.16) * 0.05 
+        liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
+        return liquid_ratio
+    
+    def postprocessing(self, out, out_sfc):
+        out             = out / self.yscale_lev
+        out_sfc         = out_sfc / self.yscale_sca
+        return out, out_sfc
+        
+
+    def forward(self, inputs_main, inputs_aux, rnn1_mem):
+        if self.use_ensemble:
+            inputs_main = inputs_main.unsqueeze(0)
+            inputs_aux = inputs_aux.unsqueeze(0)
+            # inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
+            # inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
+            inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
+            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
+            inputs_main = inputs_main.flatten(0,1)
+            inputs_aux = inputs_aux.flatten(0,1)
+            # print("shape inp main", inputs_main.shape)
+                    
+        batch_size = inputs_main.shape[0]
+        # print("shape inputs main", inputs_main.shape)
+        if self.add_pres:
+            sp = torch.unsqueeze(inputs_aux[:,0:1],1)
+            # undo scaling
+            sp = sp*35451.17 + 98623.664
+            pres  = self.preslay(sp)
+            inputs_main = torch.cat((inputs_main,pres),dim=2)
+            
+                    # Do not use inputs -2,-3,-4 (O3, CH4, N2O) or first 10 levels
+        inputs_main_crm = torch.cat((inputs_main[:,10:,0:-4], inputs_main[:,10:,-1:]),dim=2)
+            
+        if self.use_initial_mlp:
+            inputs_main_crm = self.mlp_initial(inputs_main_crm)
+            inputs_main_crm = self.nonlin(inputs_main_crm)  
+            
+        # print("shape inputs main", inputs_main_crm.shape, "mem shape", rnn1_mem.shape)
+
+        if self.use_memory:
+            # rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
+            inputs_main_crm = torch.cat((inputs_main_crm,rnn1_mem), dim=2)
+            
+        # TOA is first in memory, so to start at the surface we need to go backwards
+        rnn1_input = torch.flip(inputs_main_crm, [1])
+    
+        # The input (a vertical sequence) is concatenated with the
+        # output of the RNN from the previous time step 
+        
+        # CRM aux inputs do not include 'cam_in_ALDIF' 'cam_in_ALDIR' 'cam_in_ASDIF' 'cam_in_ASDIR'
+        #  'cam_in_LWUP' 
+        inputs_sfc = torch.cat((inputs_aux[:,0:6],inputs_aux[:,11:]),dim=1)
+
+        hx = self.mlp_surface1(inputs_sfc)
+        hx = self.nonlin(hx)
+        cx = self.mlp_surface2(inputs_sfc)
+        cx = self.nonlin(cx)
+        hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
+
+        rnn1out, states = self.rnn1(rnn1_input, hidden)
+        
+        # For now do NOT predict fluxes for convection, only radiation
+        # if self.predict_flux:
+        # rnn1out = torch.cat((torch.unsqueeze(hx,1),rnn1out),dim=1)
+
+        rnn1out = torch.flip(rnn1out, [1])
+
+        inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
+        hx2 = self.mlp_toa1(inputs_toa)
+        if not self.add_stochastic_layer: 
+            cx2 = self.mlp_toa2(inputs_toa)
+        
+        if self.add_stochastic_layer:
+            hidden2 = hx2
+        else:
+            hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
+
+        
+        if self.add_stochastic_layer:
+            input_rnn2 = torch.transpose(rnn1out,0,1)
+            
+            rnn2out = self.rnn2(input_rnn2, hidden2)
+            final_sfc_inp = rnn2out[-1,:,:]
+
+            rnn2out = torch.transpose(rnn2out,0,1)
+
+        else:
+            input_rnn2 = rnn1out
+            rnn2out, states = self.rnn2(input_rnn2, hidden2)
+
+            (last_h, last_c) = states
+            final_sfc_inp = last_h.squeeze() 
+            
+        # Add a stochastic perturbation
+        # Convective memory is still based on the deterministic model,
+        # and does not include the stochastic perturbation
+        # concat and use_intermediate_mlp should be set to false
+        # if self.add_stochastic_layer:
+        #     srnn_input = torch.transpose(rnn2out,0,1)
+        #     srnn_input = torch.flip(srnn_input, [0])
+        #     # srnn_input = torch.transpose(self.rnn1_mem,0,1)
+        #     # srnn_input = torch.transpose(rnn1_mem,0,1)
+        #     # transpose is needed because this layer assumes seq. dim first
+            
+        #     hx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)  # (batch, hidden_size)
+        #     z = self.rnn_stochastic(srnn_input, hx2)
+        #     z = torch.flip(z, [0])
+
+        #     z = torch.transpose(z,0,1)
+        #     # z = torch.flip(z, [1])
+        #     # rnn2out = z
+        #     # z is a perburbation added to the hidden state
+        #     rnn2out = rnn2out + 0.01*z 
+        #     # rnn2out = rnn2out + self.coeff_stochastic*z 
+        
+        if self.use_intermediate_mlp: 
+            rnn2out = self.mlp_latent(rnn2out)
+          
+        if self.use_memory:
+            rnn1_mem = torch.flip(rnn2out, [1])
+            
+        # # Add a stochastic perturbation
+        # # Convective memory is still based on the deterministic model,
+        # # and does not include the stochastic perturbation
+        # # concat and use_intermediate_mlp should be set to false
+
+        out = self.mlp_output(rnn2out)
+
+        out_sfc = self.mlp_surface_output(final_sfc_inp)
+        
+        # RADIATION
+        # if self.separate_radiation:
+        # out_crm = out.clone()
+        out_new = torch.zeros(batch_size, self.nlev_rad, self.ny, device=inputs_main.device)
+        out_new[:,10:,:] = out
+        # Start at surface again
+        # Do not use inputs 4,5 (winds)
+        inputs_main_rad =  torch.cat((inputs_main[:,:,0:4], inputs_main[:,:,6:]),dim=2)
+        # # add dT, dq, dq_cldliq, dq_cldice from crm 
+        # inputs_main_rad[:,:,0:1] = inputs_main_rad[:,:,0:1] + tend
+        
+        # T_old =   inputs_main * (self.xcoeff_lev[2,:,0:1] - self.xcoeff_lev[1,:,0:1]) + self.xcoeff_lev[0,:,0:1] 
+        # T_new = T_old + dT
+        inputs_rad =  torch.zeros(batch_size, self.nlev_rad, self.nh_mem+self.nx_rad,device=inputs_main.device)
+        inputs_rad[:,10:,0:self.nh_mem] = torch.flip(rnn2out, [1])
+        inputs_rad[:,:,self.nh_mem:] = inputs_main_rad
+        # inputs_rad = torch.flip(inputs_rad, [1])
+
+        inputs_sfc_rad = inputs_aux[:,6:11]
+        hx = self.mlp_surface_rad(inputs_sfc_rad)
+        hidden = (torch.unsqueeze(hx,0))
+        rnn_out, last_h = self.rnn1_rad(inputs_rad, hidden)
+        hx = torch.unsqueeze(hx,1)
+        # print("shape out rnnrad", rnn_out.shape, "hidden", hx.shape)
+        rnn_out = torch.cat((hx,rnn_out),dim=1)
+
+        rnn_out = torch.flip(rnn_out, [1])
+
+        inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
+        hx2 = self.mlp_toa_rad(inputs_toa)
+        hidden2 = (torch.unsqueeze(hx2,0))
+
+        rnn_out, last_h = self.rnn2_rad(rnn_out, hidden2)
+        out_rad = self.mlp_output_rad(rnn_out) # 4: LW_down, LW_up, SW_down, SW_yp
+        
+        lw_down = out_rad[:,:,0:1]
+        lw_down_sfc = lw_down[:,-1]
+        lw_up = out_rad[:,:,1:2]
+        lw_net = lw_down - lw_up
+
+        sw_down = out_rad[:,:,2:3]
+        sw_up = out_rad[:,:,3:4]
+        sw_net = sw_down - sw_up       
+        sw_net_sfc = sw_net[:,-1]
+        
+        rad_net = lw_net + sw_net
+        flux_diff = rad_net[:,1:] - rad_net[:,0:-1]
+        
+        gcp = 9.80665 / 1004
+        preslev  = self.preslev(sp)
+        pres_diff = preslev[:,1:] - preslev[:,0:-1]
+        dT_rad = gcp * flux_diff / pres_diff
+        
+        # dT_tot = dT_crm + dT_rad
+        out_new[:,:,0:1] = out_new[:,:,0:1] + dT_rad   
+        # print("shape out new", out_new.shape)
+
+        out_sfc_rad = self.mlp_surface_output_rad(last_h)
+        out_sfc_rad = torch.squeeze(out_sfc_rad)
+
+        #1D (scalar) Output variables: ['cam_out_NETSW', 'cam_out_FLWDS', 'cam_out_PRECSC', 
+        #'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
+        # print("shape 1", out_sfc_rad.shape, "2", out_sfc.shape)
+        # rad predicts everything except PRECSC, PRECC
+        out_sfc =  torch.cat((sw_net_sfc, lw_down_sfc, out_sfc, out_sfc_rad),dim=1)
+        # print("shape out sfc", out_sfc.shape, "swn", sw_net_sfc.shape, "lwd", lw_down.shape, "outsfcrad", out_sfc_rad.shape)
+        out_sfc = self.relu(out_sfc)
+
+        return out_new, out_sfc, rnn1_mem
 
 class SRNN_autoreg_torchscript(nn.Module):
     use_initial_mlp: Final[bool]
@@ -758,7 +1110,7 @@ class SRNN_autoreg_torchscript(nn.Module):
     use_ensemble: Final[bool]
     use_memory: Final[bool]
     separate_radiation: Final[bool]
-
+    use_lstm: Final[bool]
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
@@ -770,6 +1122,7 @@ class SRNN_autoreg_torchscript(nn.Module):
                 output_prune=False,
                 use_memory=False,
                 use_ensemble=True,
+                use_lstm=True,
                 nh_mem=64):
         super(SRNN_autoreg_torchscript, self).__init__()
         self.ny = ny 
@@ -797,6 +1150,7 @@ class SRNN_autoreg_torchscript(nn.Module):
             
         self.nonlin = nn.Tanh()
         self.relu = nn.ReLU()
+        self.use_lstm=use_lstm
 
         yscale_lev = torch.from_numpy(out_scale).to(device)
         yscale_sca = torch.from_numpy(out_sfc_scale).to(device)
@@ -838,10 +1192,19 @@ class SRNN_autoreg_torchscript(nn.Module):
 
         self.mlp_surface    = nn.Linear(self.nx_sfc, self.nh_rnn1)
         self.mlp_toa        = nn.Linear(2, self.nh_rnn2)
-
+        
         use_bias=True
-        self.rnn1      = MyStochasticGRULayer(self.nx_rnn1, self.nh_rnn1, use_bias=use_bias) 
-        self.rnn2      = MyStochasticGRULayer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)
+        if self.use_lstm:
+            self.rnn1      = MyStochasticLSTMLayer(self.nx_rnn1, self.nh_rnn1) 
+            self.rnn2      = MyStochasticLSTMLayer(self.nx_rnn2, self.nh_rnn2)
+            self.mlp_surface2    = nn.Linear(self.nx_sfc, self.nh_rnn1)
+            self.mlp_toa2        = nn.Linear(2, self.nh_rnn2)
+        else:
+            self.rnn1      = MyStochasticGRULayer(self.nx_rnn1, self.nh_rnn1, use_bias=use_bias) 
+            self.rnn2      = MyStochasticGRULayer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)
+
+             
+        
 
         nh_rnn = self.nh_rnn2
 
@@ -918,6 +1281,7 @@ class SRNN_autoreg_torchscript(nn.Module):
             # rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
             inputs_main = torch.cat((inputs_main,rnn1_mem), dim=2)
             
+            
         inputs_main = torch.transpose(inputs_main,0,1)
         rnn1_input =  torch.flip(inputs_main, [0])
 
@@ -926,16 +1290,27 @@ class SRNN_autoreg_torchscript(nn.Module):
         hx = self.nonlin(hx)
         
         # print("shape inp", rnn1_input.shape, "hx", hx.shape)
-
-        rnn1out = self.rnn1(rnn1_input, hx)
+        if self.use_lstm:
+            cx = self.mlp_surface2(inputs_sfc)
+            cx = self.nonlin(cx)
+            hidden = (hx, cx)
+            rnn1out, states = self.rnn1(rnn1_input, hidden)
+        else:
+            rnn1out = self.rnn1(rnn1_input, hx)
         
         rnn1out = torch.flip(rnn1out, [0])
 
         inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
         hx2 = self.mlp_toa(inputs_toa)
         hx2 = self.nonlin(hx2)
-
-        rnn2out = self.rnn2(rnn1out, hx2)
+        if self.use_lstm:
+            cx2 = self.mlp_toa(inputs_toa)
+            cx2 = self.nonlin(cx2)
+            hidden = (hx2, cx2)
+            rnn2out, states = self.rnn2(rnn1out, hidden)
+        else:
+            rnn2out = self.rnn2(rnn1out, hx2)
+        
         last_hidden = rnn2out[-1,:]
 
         rnn2out = torch.transpose(rnn2out,0,1)

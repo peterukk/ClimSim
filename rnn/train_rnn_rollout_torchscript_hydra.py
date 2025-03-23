@@ -31,7 +31,7 @@ device = torch.device("cuda" if cuda else "cpu")
 print(device)
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from models import  MyRNN, LSTM_autoreg_torchscript, SpaceStateModel, LSTM_torchscript, SRNN_autoreg_torchscript
+from models import  MyRNN, LSTM_autoreg_torchscript, SpaceStateModel, LSTM_torchscript, SRNN_autoreg_torchscript, LSTM_autoreg_torchscript_radflux
 from utils import generator_xy, BatchSampler
 # from metrics import get_energy_metric, get_hybrid_loss, my_mse_flatten
 import metrics as metrics
@@ -65,8 +65,8 @@ def main(cfg: DictConfig):
     else:
         use_mp_constraint=False 
         
-        if (not cfg.output_norm_per_level):
-            raise NotImplementedError()
+        # if (not cfg.output_norm_per_level):
+        #     raise NotImplementedError()
     
     if cfg.memory=="None":
         cfg.autoregressive=False
@@ -196,7 +196,15 @@ def main(cfg: DictConfig):
     else:
         yscale_lev = np.repeat(np.array([2.3405453e+04, 2.3265182e+08, 1.4898973e+08, 6.4926711e+04,
                 7.8328773e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        
+        if cfg.new_nolev_scaling:
+            if use_mp_constraint:
+                
+                yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.58085550e+08, 5.00182069e+04,
+                       6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            else:
+                yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.91623978e+08, 3.23919949e+08, 
+                    5.00182069e+04, 6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+                
     if cfg.input_norm_per_level:
         xmax_lev = input_max[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
         xmin_lev = input_min[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
@@ -226,10 +234,7 @@ def main(cfg: DictConfig):
                    -4.69117053e-02, -4.92735580e-03, -1.11688621e-06, -4.69117053e-02,
                     9.70113589e-09,  1.78764156e-10,  3.65223324e-10], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
             xmean_lev = np.repeat(np.zeros((15), dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            
-            yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.58085550e+08, 5.00182069e+04,
-                   6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            
+
     weights=None 
     
     if cfg.mp_mode==2:
@@ -297,7 +302,7 @@ def main(cfg: DictConfig):
             raise NotImplementedError("To train stochastic RNN, use CRPS loss")
     else:
         use_ensemble = False
-        ensemble_size = 0
+        ensemble_size = 1
         
     print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
     if len(cfg.nneur)==3:
@@ -357,6 +362,23 @@ def main(cfg: DictConfig):
                     use_memory = cfg.autoregressive,
                     use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem)#,
+    elif cfg.model_type=="radflux":
+        model = LSTM_autoreg_torchscript_radflux(hyam,hybm,hyai,hybi,
+                    out_scale = yscale_lev,
+                    out_sfc_scale = yscale_sca, 
+                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                    device=device,
+                    nx = nx, nx_sfc=nx_sfc, 
+                    ny = ny, ny_sfc=ny_sfc, 
+                    nneur=cfg.nneur, 
+                    use_initial_mlp = cfg.use_initial_mlp,
+                    use_intermediate_mlp = cfg.use_intermediate_mlp,
+                    add_pres = cfg.add_pres,
+                    output_prune = cfg.output_prune,
+                    use_memory = cfg.autoregressive,
+                    use_ensemble = use_ensemble,
+                    nh_mem = cfg.nh_mem)#,
     else:
         model = SpaceStateModel(hyam, hybm, 
                     out_scale = yscale_lev,
@@ -368,9 +390,9 @@ def main(cfg: DictConfig):
     
     model = model.to(device)
     
-    if cfg.autoregressive:
-        # model.rnn1_mem = torch.randn(nloc, nlev, model.nh_mem, device=device)
-        rnn1_mem = torch.zeros(nloc, model.nlev, model.nh_mem, device=device)
+    # if cfg.autoregressive:
+    #     # model.rnn1_mem = torch.randn(nloc, nlev, model.nh_mem, device=device)
+    #     rnn1_mem = torch.zeros(nloc, model.nlev, model.nh_mem, device=device)
     
     infostr = summary(model)
     num_params = infostr.total_params
@@ -861,7 +883,7 @@ def main(cfg: DictConfig):
                                                                 R2_moistening, # self.metrics['R2_moistening'],                                                              
                                                                 self.metrics['R2_precc'] ))
             
-            del loss, h_con
+            del loss, h_con, water_con
             if cfg.autoregressive:
                 del rnn1_mem
             if cuda: 
