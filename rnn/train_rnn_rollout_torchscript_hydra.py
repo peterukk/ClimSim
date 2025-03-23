@@ -31,7 +31,7 @@ device = torch.device("cuda" if cuda else "cpu")
 print(device)
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from models import  MyRNN, LSTM_autoreg_torchscript, SpaceStateModel, LSTM_torchscript, SRNN_autoreg_torchscript, LSTM_autoreg_torchscript_radflux
+from models import  MyRNN, LSTM_autoreg_torchscript, SpaceStateModel, LSTM_torchscript, SRNN_autoreg_torchscript #, LSTM_autoreg_torchscript_radflux
 from utils import generator_xy, BatchSampler
 # from metrics import get_energy_metric, get_hybrid_loss, my_mse_flatten
 import metrics as metrics
@@ -362,23 +362,23 @@ def main(cfg: DictConfig):
                     use_memory = cfg.autoregressive,
                     use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem)#,
-    elif cfg.model_type=="radflux":
-        model = LSTM_autoreg_torchscript_radflux(hyam,hybm,hyai,hybi,
-                    out_scale = yscale_lev,
-                    out_sfc_scale = yscale_sca, 
-                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                    device=device,
-                    nx = nx, nx_sfc=nx_sfc, 
-                    ny = ny, ny_sfc=ny_sfc, 
-                    nneur=cfg.nneur, 
-                    use_initial_mlp = cfg.use_initial_mlp,
-                    use_intermediate_mlp = cfg.use_intermediate_mlp,
-                    add_pres = cfg.add_pres,
-                    output_prune = cfg.output_prune,
-                    use_memory = cfg.autoregressive,
-                    use_ensemble = use_ensemble,
-                    nh_mem = cfg.nh_mem)#,
+    # elif cfg.model_type=="radflux":
+    #     model = LSTM_autoreg_torchscript_radflux(hyam,hybm,hyai,hybi,
+    #                 out_scale = yscale_lev,
+    #                 out_sfc_scale = yscale_sca, 
+    #                 xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+    #                 xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+    #                 device=device,
+    #                 nx = nx, nx_sfc=nx_sfc, 
+    #                 ny = ny, ny_sfc=ny_sfc, 
+    #                 nneur=cfg.nneur, 
+    #                 use_initial_mlp = cfg.use_initial_mlp,
+    #                 use_intermediate_mlp = cfg.use_intermediate_mlp,
+    #                 add_pres = cfg.add_pres,
+    #                 output_prune = cfg.output_prune,
+    #                 use_memory = cfg.autoregressive,
+    #                 use_ensemble = use_ensemble,
+    #                 nh_mem = cfg.nh_mem)#,
     else:
         model = SpaceStateModel(hyam, hybm, 
                     out_scale = yscale_lev,
