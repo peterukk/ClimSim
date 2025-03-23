@@ -837,7 +837,7 @@ class SRNN_autoreg_torchscript(nn.Module):
             self.mlp_initial = nn.Linear(nx, self.nneur[0])
 
         self.mlp_surface    = nn.Linear(self.nx_sfc, self.nh_rnn1)
-        self.mlp_toa        = nn.Linear(1, self.nh_rnn2)
+        self.mlp_toa        = nn.Linear(2, self.nh_rnn2)
 
         use_bias=True
         self.rnn1      = MyStochasticGRULayer(self.nx_rnn1, self.nh_rnn1, use_bias=use_bias) 

@@ -215,6 +215,21 @@ def main(cfg: DictConfig):
                 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00,
                 1.95962779e-06,  8.22708859e-07,  3.88440249e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
     
+        if cfg.new_nolev_scaling:
+            xmax_lev = np.repeat(np.array([3.21864136e+02, 1.0000000e+00, 1.0000000e+00, 1.0000000e+00,
+                   2.13669708e+02, 1.41469925e+02, 6.18724059e-03, 8.70866188e-07,
+                   4.59552743e-02, 6.18724059e-03, 8.70866188e-07, 4.59552743e-02,
+                   1.80104525e-05, 9.98605856e-07, 4.90858383e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            
+            xmin_lev = np.repeat(np.array([ 1.56582825e+02,  0.0000000e+00,  0.0000000e+00,  0.0000000e+00,
+                   -1.46704926e+02, -2.35915283e+02, -4.92735580e-03, -1.11688621e-06,
+                   -4.69117053e-02, -4.92735580e-03, -1.11688621e-06, -4.69117053e-02,
+                    9.70113589e-09,  1.78764156e-10,  3.65223324e-10], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            xmean_lev = np.repeat(np.zeros((15), dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            
+            yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.58085550e+08, 5.00182069e+04,
+                   6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            
     weights=None 
     
     if cfg.mp_mode==2:
