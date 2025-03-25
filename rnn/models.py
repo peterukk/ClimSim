@@ -898,6 +898,9 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         self.rnn1_rad      = nn.GRU(self.ny_crm+self.nx_rad, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
         self.rnn2_rad      = nn.GRU(self.nh_rnn1_rad, self.nh_rnn2_rad,  batch_first=True) 
         self.mlp_surface_rad = nn.Linear(self.nx_sfc_rad, self.nh_rnn1_rad)
+        self.mlp_flux_scale = nn.Linear(self.nx_sfc_rad, 32)
+        self.mlp_flux_scale2 = nn.Linear(32,1)
+
         self.mlp_surface_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_sfc_rad)
         # self.mlp_toa_rad  = nn.Linear(2, self.nh_rnn2_rad)
         self.mlp_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_rad)
@@ -1073,9 +1076,12 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         rnn_out, last_h = self.rnn2_rad(rnn_out, hidden2)
         out_rad = self.mlp_output_rad(rnn_out) # 4: LW_down, LW_up, SW_down, SW_yp
         
-        lw_down = out_rad[:,:,0:1]
+        lw_flux_scale = self.mlp_flux_scale(inputs_sfc_rad)
+        lw_flux_scale = self.mlp_flux_scale2(lw_flux_scale)
+
+        lw_down = out_rad[:,:,0:1] * torch.reshape(lw_flux_scale,(-1,1,1))
         lw_down_sfc = lw_down[:,-1]
-        lw_up = out_rad[:,:,1:2]
+        lw_up = out_rad[:,:,1:2] * torch.reshape(lw_flux_scale,(-1,1,1))
         lw_net = lw_down - lw_up
 
         sw_down = out_rad[:,:,2:3]*torch.reshape(incflux,(-1,1,1))
@@ -1101,6 +1107,8 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         # normalize SW flux outputs
         out_sfc_rad = out_sfc_rad * self.yscale_sca[4:]
         sw_net_sfc  = sw_net_sfc  * self.yscale_sca[0:1]
+        
+        # lw_down_sfc = lw_down_sfc * self.yscale_sca[1:2]
 
         #1D (scalar) Output variables: ['cam_out_NETSW', 'cam_out_FLWDS', 'cam_out_PRECSC', 
         #'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
