@@ -31,7 +31,7 @@ device = torch.device("cuda" if cuda else "cpu")
 print(device)
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from models import  MyRNN, LSTM_autoreg_torchscript, SpaceStateModel, LSTM_torchscript, SRNN_autoreg_torchscript #, LSTM_autoreg_torchscript_radflux
+from models import  MyRNN, LSTM_autoreg_torchscript, SpaceStateModel, LSTM_torchscript, SRNN_autoreg_torchscript, LSTM_autoreg_torchscript_radflux
 from utils import generator_xy, BatchSampler
 # from metrics import get_energy_metric, get_hybrid_loss, my_mse_flatten
 import metrics as metrics
@@ -190,7 +190,7 @@ def main(cfg: DictConfig):
     
     
     yscale_sca = output_scale[vars_1D_outp].to_dataarray(dim='features', name='outputs_sca').transpose().values
-    
+
     if cfg.output_norm_per_level:
         yscale_lev = output_scale[vars_2D_outp].to_dataarray(dim='features', name='outputs_lev').transpose().values
     else:
@@ -273,8 +273,16 @@ def main(cfg: DictConfig):
         nx_sfc = nx_sfc - 5
         sfc_vars_remove = (17, 18, 19, 20, 21)
         xdiv_sca =  np.delete(xdiv_sca,sfc_vars_remove)
-        xmean_sca =  np.delete(xmean_sca,sfc_vars_remove) 
-    
+        xmean_sca =  np.delete(xmean_sca,sfc_vars_remove)
+
+    if cfg.model_type=="radflux":
+        xdiv_sca[1] = 1.0 
+        xdiv_sca[6] = 1.0 
+        xmean_sca[1] = 0.0
+        xmean_sca[6] = 0.0
+        # yscale_sca[0]  = 1.0 
+        # yscale_sca[4:] = 1.0 
+
     if cfg.snowhice_fix:
         xmean_sca[15] = 0.0 
         xdiv_sca[15] = 1.0 
@@ -362,23 +370,23 @@ def main(cfg: DictConfig):
                     use_memory = cfg.autoregressive,
                     use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem)#,
-    # elif cfg.model_type=="radflux":
-    #     model = LSTM_autoreg_torchscript_radflux(hyam,hybm,hyai,hybi,
-    #                 out_scale = yscale_lev,
-    #                 out_sfc_scale = yscale_sca, 
-    #                 xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-    #                 xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-    #                 device=device,
-    #                 nx = nx, nx_sfc=nx_sfc, 
-    #                 ny = ny, ny_sfc=ny_sfc, 
-    #                 nneur=cfg.nneur, 
-    #                 use_initial_mlp = cfg.use_initial_mlp,
-    #                 use_intermediate_mlp = cfg.use_intermediate_mlp,
-    #                 add_pres = cfg.add_pres,
-    #                 output_prune = cfg.output_prune,
-    #                 use_memory = cfg.autoregressive,
-    #                 use_ensemble = use_ensemble,
-    #                 nh_mem = cfg.nh_mem)#,
+    elif cfg.model_type=="radflux":
+        model = LSTM_autoreg_torchscript_radflux(hyam,hybm,hyai,hybi,
+                    out_scale = yscale_lev,
+                    out_sfc_scale = yscale_sca, 
+                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                    device=device,
+                    nx = nx, nx_sfc=nx_sfc, 
+                    ny = ny, ny_sfc=ny_sfc, 
+                    nneur=cfg.nneur, 
+                    use_initial_mlp = cfg.use_initial_mlp,
+                    use_intermediate_mlp = cfg.use_intermediate_mlp,
+                    add_pres = cfg.add_pres,
+                    output_prune = cfg.output_prune,
+                    use_memory = cfg.autoregressive,
+                    use_ensemble = use_ensemble,
+                    nh_mem = cfg.nh_mem)#,
     else:
         model = SpaceStateModel(hyam, hybm, 
                     out_scale = yscale_lev,
@@ -447,22 +455,32 @@ def main(cfg: DictConfig):
                               prefetch_factor = prefetch_factor, 
                               pin_memory=pin, persistent_workers=persistent)
     
-        
     
-    val_data = generator_xy(val_data_path, cache=cfg.cache, add_refpres = cfg.add_refpres, 
+    if cfg.cache:
+        val_cache = True 
+        no_multiprocessing_val = True 
+        prefetch_factor_val = None 
+        num_workers_val = 0 
+    else:
+        val_cache = cfg.cache 
+        no_multiprocessing_val = no_multiprocessing 
+        prefetch_factor_val = prefetch_factor 
+        num_workers_val = cfg.num_workers 
+
+    val_data = generator_xy(val_data_path, cache=val_cache, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune,
-                    ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
+                    ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing_val)
     
     val_batch_sampler = BatchSampler(cfg.chunksize_val, 
                                        # num_samples=val_data.ntimesteps*nloc_val, shuffle=shuffle_data)
                                        num_samples=val_data.ntimesteps, shuffle = cfg.shuffle_data)
     
-    val_loader = DataLoader(dataset=val_data, num_workers = cfg.num_workers, 
+    val_loader = DataLoader(dataset=val_data, num_workers = num_workers_val, 
                               sampler = val_batch_sampler, 
                               batch_size=None, batch_sampler=None, 
-                              prefetch_factor = prefetch_factor, 
+                              prefetch_factor = prefetch_factor_val, 
                               pin_memory=pin, persistent_workers=persistent)
     
     nloc_val = batch_size_val = val_data.nloc
@@ -541,7 +559,7 @@ def main(cfg: DictConfig):
             report_freq = self.report_freq
             running_loss = 0.0; running_energy = 0.0; running_water = 0.0
             running_var=0.0
-            epoch_loss = 0.0; epoch_mse = 0.0;
+            epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0
             epoch_R2precc = 0.0
             epoch_hcon = 0.0; epoch_wcon = 0.0
             epoch_ens_var = 0.0; epoch_det_skill = 0.0; epoch_spreadskill = 0.0
@@ -732,6 +750,8 @@ def main(cfg: DictConfig):
                                     epoch_mse       += loss.item()
                                 else:
                                     epoch_mse       += mse(targets_lay, targets_sfc, preds_lay, preds_sfc)
+
+                                epoch_huber       += metrics.huber_flatten(targets_lay, targets_sfc, preds_lay, preds_sfc)                                   
                                 #epoch_mae       += mae.item()
                             
                                 epoch_hcon  += h_con.item()
@@ -821,6 +841,8 @@ def main(cfg: DictConfig):
     
             self.metrics['loss'] =  epoch_loss / k
             self.metrics['mean_squared_error'] = epoch_mse / k
+            self.metrics['huber'] = epoch_huber / k
+
             if cfg.loss_fn_type == "CRPS": 
                 self.metrics['ens_var'] =  epoch_ens_var / k
                 self.metrics['det_skill'] =  epoch_det_skill / k
