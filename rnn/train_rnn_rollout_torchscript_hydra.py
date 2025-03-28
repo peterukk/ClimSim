@@ -65,8 +65,6 @@ def main(cfg: DictConfig):
     else:
         use_mp_constraint=False 
         
-        # if (not cfg.output_norm_per_level):
-        #     raise NotImplementedError()
     
     if cfg.memory=="None":
         cfg.autoregressive=False
@@ -75,23 +73,12 @@ def main(cfg: DictConfig):
         cfg.shuffle_data = False 
         
     if cfg.mp_autocast:
-    # if cuda:
         print(torch.cuda.get_device_name(0))
-        # cfg.mp_autocast = True 
-        print(torch.cuda.is_bf16_supported())
-        # if torch.cuda.is_bf16_supported(): 
-        #     dtype=torch.bfloat16 
-        #     use_scaler = False
-        # else:
-        #     dtype=torch.float16
-        #     use_scaler = True 
         dtype=torch.float16
         cfg.use_scaler = True 
     else:
         dtype=torch.float32
-        # cfg.mp_autocast = False
         cfg.use_scaler = False
-        
         
     # --------------------------------------
     
@@ -341,6 +328,7 @@ def main(cfg: DictConfig):
                         separate_radiation = cfg.separate_radiation,
                         use_ensemble = use_ensemble,
                         use_third_rnn = use_third_rnn,
+                        concat = cfg.concat,
                         nh_mem = cfg.nh_mem)#,
                         #ensemble_size = ensemble_size)
         else:
@@ -398,26 +386,18 @@ def main(cfg: DictConfig):
     
     model = model.to(device)
     
-    # if cfg.autoregressive:
-    #     # model.rnn1_mem = torch.randn(nloc, nlev, model.nh_mem, device=device)
-    #     rnn1_mem = torch.zeros(nloc, model.nlev, model.nh_mem, device=device)
-    
     infostr = summary(model)
     num_params = infostr.total_params
-    # print(infostr)
     
     if cfg.use_scaler:
         # scaler = torch.amp.GradScaler(autocast = True)
         scaler = torch.amp.GradScaler(device.type)
-        
-    # scripted_model = torch . jit . script ( model )
-    
+            
     batch_size_tr = nloc
     
     # To improve IO, which is a bottleneck, increase the batch size by a factor of chunk_factor and 
     # load this many batches at once. These chk then need to be manually split into batches 
     # within the data iteration loop   
-    
     pin = False
     persistent=False
     
@@ -455,32 +435,21 @@ def main(cfg: DictConfig):
                               prefetch_factor = prefetch_factor, 
                               pin_memory=pin, persistent_workers=persistent)
     
-    
-    if cfg.cache:
-        val_cache = True 
-        no_multiprocessing_val = True 
-        prefetch_factor_val = None 
-        num_workers_val = 0 
-    else:
-        val_cache = cfg.cache 
-        no_multiprocessing_val = no_multiprocessing 
-        prefetch_factor_val = prefetch_factor 
-        num_workers_val = cfg.num_workers 
 
-    val_data = generator_xy(val_data_path, cache=val_cache, add_refpres = cfg.add_refpres, 
+    val_data = generator_xy(val_data_path, cache=cfg.val_cache, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune,
-                    ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing_val)
+                    ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
     
     val_batch_sampler = BatchSampler(cfg.chunksize_val, 
                                        # num_samples=val_data.ntimesteps*nloc_val, shuffle=shuffle_data)
                                        num_samples=val_data.ntimesteps, shuffle = cfg.shuffle_data)
     
-    val_loader = DataLoader(dataset=val_data, num_workers = num_workers_val, 
+    val_loader = DataLoader(dataset=val_data, num_workers = num_workers, 
                               sampler = val_batch_sampler, 
                               batch_size=None, batch_sampler=None, 
-                              prefetch_factor = prefetch_factor_val, 
+                              prefetch_factor = prefetch_factor, 
                               pin_memory=pin, persistent_workers=persistent)
     
     nloc_val = batch_size_val = val_data.nloc
@@ -536,20 +505,14 @@ def main(cfg: DictConfig):
         )       
     
     class model_train_eval:
-        # def __init__(self, conf, dataloader, model, autoregressive, loss_fn, dtype, batch_size = 384, train=True):
         def __init__(self, dataloader, model, batch_size = 384, train=True):
- 
             super().__init__()
-            # self.cfg = conf
             self.loader = dataloader
             self.dtype = dtype
             self.train = train
             self.report_freq = 800
             self.batch_size = batch_size
-            # self.ensemble_size = 1
             self.model = model 
-            # self.autoregressive = autoregressive
-            # self.loss_fn = loss_fn
             # self.metric_R2 =  R2Score(num_outputs=ny_pp).to(device) 
             self.metric_R2 =  R2Score().to(device) 
 
@@ -583,8 +546,6 @@ def main(cfg: DictConfig):
                 targets_lay = []; targets_sfc = [] 
                 x_sfc = [];  x_lay_raw = []
                 yto_lay = []; yto_sfc = []
-                # model.rnn1_mem = torch.randn(self.batch_size, nlev, model.nh_mem, device=device)
-                # model.rnn1_mem = torch.zeros(self.batch_size, nlev, model.nh_mem, device=device)
                 rnn1_mem = torch.zeros(self.batch_size*ensemble_size, model.nlev, model.nh_mem, device=device)
                 loss_update_start_index = 60
             else:
@@ -592,9 +553,6 @@ def main(cfg: DictConfig):
                 
             for i,data in enumerate(self.loader):
                 # print("shape mem 2 {}".format(model.rnn1_mem.shape))
-    
-                # x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, ytos_lay_chk, ytos_sfc_chk, x_lay_raw_chk  = data
-                # x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk, ytos_lay_chk, ytos_sfc_chk  = data
                 x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk  = data
     
                 # print(" x lay raw 0,50::", x_lay_raw_chk[0,50:,0])
@@ -603,16 +561,12 @@ def main(cfg: DictConfig):
                 x_sfc_chk       = x_sfc_chk.to(device)
                 targets_sfc_chk = targets_sfc_chk.to(device)
                 targets_lay_chk = targets_lay_chk.to(device)
-                # ytos_lay_chk    = ytos_lay_chk.to(device) # these are the raw (unnormalized) full outputs
-                # ytos_sfc_chk    = ytos_sfc_chk.to(device)
                 
                 x_lay_chk       = torch.split(x_lay_chk, self.batch_size)
                 x_lay_raw_chk   = torch.split(x_lay_raw_chk, self.batch_size)
                 x_sfc_chk       = torch.split(x_sfc_chk, self.batch_size)
                 targets_sfc_chk = torch.split(targets_sfc_chk, self.batch_size)
                 targets_lay_chk = torch.split(targets_lay_chk, self.batch_size)
-                # ytos_lay_chk    = torch.split(ytos_lay_chk, self.batch_size)
-                # ytos_sfc_chk    = torch.split(ytos_sfc_chk, self.batch_size)
                 
                 # to speed-up IO, we loaded chk=many batches, which now need to be divided into batches
                 # each batch is one time step
@@ -620,23 +574,10 @@ def main(cfg: DictConfig):
                     x_lay0 = x_lay_chk[ichunk]
                     x_lay_raw0 = x_lay_raw_chk[ichunk]
                     x_sfc0 = x_sfc_chk[ichunk]
-                    # sp0 = x_sfc0[:,0:1]; lhf0 = x_sfc[0,2:3] 
                     target_lay0 = targets_lay_chk[ichunk]
                     target_sfc0 = targets_sfc_chk[ichunk]
-    
-                    # yto_lay0 = ytos_lay_chk[ichunk]
-                    # yto_sfc0 = ytos_sfc_chk[ichunk]
-                    
-                    tcomp0= time.time()
-                    
-                    # if use_ensemble:
-                    # # if self.add_stochastic_layer:
-                    #     x_lay0 = x_lay0.unsqueeze(0)
-                    #     x_lay0 = torch.repeat_interleave(x_lay0,repeats=2,dim=0)
-                    #     x_lay0 = x_lay0.flatten(0,1)
-                    #     x_sfc0 = x_sfc0.flatten(0,1)
-                    #     x_sfc0 = torch.repeat_interleave(x_sfc0,repeats=2,dim=0)
-                    #     x_sfc0 = x_sfc0.unsqueeze(0)                  
+                        
+                    tcomp0= time.time()               
                     
                     with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=cfg.mp_autocast):
                         if cfg.autoregressive:
@@ -648,19 +589,13 @@ def main(cfg: DictConfig):
                         # In the autoregressive training case are gathering many time steps before computing loss
                         preds_lay.append(preds_lay0); preds_sfc.append(preds_sfc0)
                         targets_lay.append(target_lay0); targets_sfc.append(target_sfc0)
-                        # surf_pres.append(sp0)
                         x_sfc.append(x_sfc0)
                         x_lay_raw.append(x_lay_raw0)
-                        # yto_lay.append(yto_lay0)
-                        # yto_sfc.append(yto_sfc0)                    
                     else:
                         preds_lay = preds_lay0; preds_sfc = preds_sfc0
                         targets_lay = target_lay0; targets_sfc = target_sfc0
-                        # surf_pres = sp0
                         x_lay_raw = x_lay_raw0
                         x_sfc = x_sfc0
-                        # yto_lay = yto_lay0
-                        # yto_sfc = yto_sfc0
                         
                     if (not cfg.autoregressive) or (cfg.autoregressive and (j+1) % timesteps==0):
                 
@@ -669,11 +604,8 @@ def main(cfg: DictConfig):
                             preds_sfc   = torch.cat(preds_sfc)
                             targets_lay = torch.cat(targets_lay)
                             targets_sfc = torch.cat(targets_sfc)
-                            # surf_pres   = torch.cat(surf_pres)
                             x_sfc       = torch.cat(x_sfc)
                             x_lay_raw   = torch.cat(x_lay_raw)
-                            # yto_lay     = torch.cat(yto_lay)
-                            # yto_sfc     = torch.cat(yto_sfc)   
                             
                         with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=cfg.mp_autocast):
                             
@@ -705,11 +637,10 @@ def main(cfg: DictConfig):
                                 x_sfc = x_sfc*model.xdiv_sca + model.xmean_sca 
                                 surf_pres_denorm = x_sfc[:,0:1]
                                 lhf = x_sfc[:,2] 
-                            # surf_pres_denorm = surf_pres*(sp_max - sp_min) + sp_mean
+
                             h_con = metric_h_con(yto_lay, ypo_lay, surf_pres_denorm)
 
                             water_con_p     = metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf)
-                            # print("true:")
                             water_con_t     = metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf)
                             water_con       = torch.mean(torch.square(water_con_p - water_con_t))
                             del water_con_p, water_con_t
@@ -720,7 +651,6 @@ def main(cfg: DictConfig):
                             if cfg.use_water_loss:
                                 loss = loss + cfg._alpha * water_con
                                 
-                                                
                         if self.train:
                             if cfg.use_scaler:
                                 scaler.scale(loss).backward()
@@ -770,7 +700,6 @@ def main(cfg: DictConfig):
                                 # print("water con loss", water_con_loss)
                                 # print("pred con", water_con, "true con", water_con_true)
 
-                                
                                 biases_lev, biases_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc)
                                 epoch_bias_lev += np.mean(biases_lev)
                                 epoch_bias_heating += biases_lev[0]
@@ -814,10 +743,7 @@ def main(cfg: DictConfig):
                         running_energy = running_energy / (report_freq/timesteps)
                         
                         r2raw = self.metric_R2.compute()
-                        #r2raw_prec = self.metric_R2_precc.compute()
     
-                        #ypo_lay, ypo_sfc = model.postprocessing(preds_lay, preds_sfc)
-                        #yto_lay, yto_sfc = model.postprocessing(targets_lay, targets_sfc) 
                         #r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
                         if cfg.loss_fn_type == "CRPS": 
                             running_var = running_var / (report_freq/timesteps)
@@ -835,10 +761,7 @@ def main(cfg: DictConfig):
                     j += 1
                     
                 del x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk
-                
-            #if self.loader.dataset.cache and epoch==0:
-            #    self.loader.dataset.cache_loaded = True
-    
+                    
             self.metrics['loss'] =  epoch_loss / k
             self.metrics['mean_squared_error'] = epoch_mse / k
             self.metrics['huber'] = epoch_huber / k
@@ -859,7 +782,6 @@ def main(cfg: DictConfig):
             self.metrics["bias_cldliq"] = epoch_bias_clw / k 
             self.metrics["bias_cldice"] = epoch_bias_cli / k 
     
-            #self.metrics['energymetric'] = epoch_energy / k
             #self.metrics['mean_absolute_error'] = epoch_mae / k
             #self.metrics['ks'] =  epoch_ks / k2
             self.metrics['R2'] = self.metric_R2.compute()
@@ -881,9 +803,6 @@ def main(cfg: DictConfig):
             #self.metrics['R2_precc'] = self.metric_R2_precc.compute()
             self.metrics['R2_precc'] = epoch_R2precc / k
         
-
-            # self.metrics['mae_lev_clw'] = epoch_mae_lev_clw / k
-            # self.metrics['mae_lev_cli'] = epoch_mae_lev_cli / k
             self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
             self.metrics['mae_cli'] = np.nanmean(epoch_mae_lev_cli / k)
             
@@ -912,12 +831,6 @@ def main(cfg: DictConfig):
                 torch.cuda.empty_cache()
             gc.collect()
     
-    # 160 160
-    # autoreg, hybrid-loss, 2 years concat
-    
-    # train_runner = model_train_eval(train_loader, model, batch_size_tr, cfg.autoregressive, train=True)
-    # val_runner = model_train_eval(val_loader, model, batch_size_val, cfg.autoregressive, train=False)
-    
     train_runner = model_train_eval(train_loader, model, batch_size_tr,  train=True)
     val_runner = model_train_eval(val_loader, model, batch_size_val, train=False)
     
@@ -933,8 +846,6 @@ def main(cfg: DictConfig):
     save_file_torch = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script.pt"
     # best_val_loss = np.inf
     best_val_loss = 0.0
-
-    # w
     
     for epoch in range(cfg.num_epochs):
         t0 = time.time()

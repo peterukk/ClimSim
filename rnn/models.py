@@ -263,6 +263,7 @@ class LSTM_autoreg_torchscript(nn.Module):
     separate_radiation: Final[bool]
     # predict_flux: Final[bool]
     use_third_rnn: Final[bool]
+    concat: Final[bool]
 
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
@@ -278,6 +279,7 @@ class LSTM_autoreg_torchscript(nn.Module):
                 separate_radiation=False,
                 use_third_rnn=False,
                 use_ensemble=False,
+                concat=False,
                 # predict_flux=False,
                 # ensemble_size=1,
                 coeff_stochastic = 0.0,
@@ -308,7 +310,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         #     self.use_third_rnn = False 
         # else:
         #     raise NotImplementedError()
-
+        self.concat=concat
         self.use_memory= use_memory
         self.separate_radiation=separate_radiation
         self.use_ensemble = use_ensemble
@@ -420,7 +422,10 @@ class LSTM_autoreg_torchscript(nn.Module):
         #     # self.rnn_stochastic = StochasticGRUCell(nx_srnn, self.nh_rnn2)  # (input_size, hidden_size)
         #     self.rnn_stochastic = MyStochasticGRULayer(nx_srnn, nh_srnn)  # (input_size, hidden_size)
             
-        nh_rnn = self.nh_rnn2
+        if self.concat: 
+            nh_rnn = self.nh_rnn1 + self.nh_rnn2
+        else:
+            nh_rnn = self.nh_rnn2
 
         if self.use_intermediate_mlp: 
             self.mlp_latent = nn.Linear(nh_rnn, self.nh_mem)
@@ -612,7 +617,6 @@ class LSTM_autoreg_torchscript(nn.Module):
             hidden2 = hx2
         else:
             hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
-
         
         if self.add_stochastic_layer:
             input_rnn2 = torch.transpose(rnn1out,0,1)
@@ -629,27 +633,8 @@ class LSTM_autoreg_torchscript(nn.Module):
             (last_h, last_c) = states
             final_sfc_inp = last_h.squeeze() 
             
-        # Add a stochastic perturbation
-        # Convective memory is still based on the deterministic model,
-        # and does not include the stochastic perturbation
-        # concat and use_intermediate_mlp should be set to false
-        # if self.add_stochastic_layer:
-        #     srnn_input = torch.transpose(rnn2out,0,1)
-        #     srnn_input = torch.flip(srnn_input, [0])
-        #     # srnn_input = torch.transpose(self.rnn1_mem,0,1)
-        #     # srnn_input = torch.transpose(rnn1_mem,0,1)
-        #     # transpose is needed because this layer assumes seq. dim first
-            
-        #     hx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)  # (batch, hidden_size)
-        #     z = self.rnn_stochastic(srnn_input, hx2)
-        #     z = torch.flip(z, [0])
-
-        #     z = torch.transpose(z,0,1)
-        #     # z = torch.flip(z, [1])
-        #     # rnn2out = z
-        #     # z is a perburbation added to the hidden state
-        #     rnn2out = rnn2out + 0.01*z 
-        #     # rnn2out = rnn2out + self.coeff_stochastic*z 
+        if self.concat:
+            rnn2out = torch.cat((rnn1out, rnn2out), dim=2)
         
         if self.use_intermediate_mlp: 
             rnn2out = self.mlp_latent(rnn2out)

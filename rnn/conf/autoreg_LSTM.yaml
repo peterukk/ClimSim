@@ -1,25 +1,30 @@
-tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_nocompress_chunk3.h5
+tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_gzip8_chunk1_subset.h5
 val_data_fname: data_v4_rnn_nonorm_year8_nocompress_chunk3.h5
-tr_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
-val_data_dir: "/media/peter/CrucialBX500/data/ClimSim/low_res_expanded/"
+tr_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
+val_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
 
+# cache option: during the first epoch, as the data is loaded it is put in shared (RAM) memory
+# this allows to use multiple workers without copying the data to each worker
 cache: false
+val_cache: false 
 num_workers: 4
 chunksize_train: 42
 chunksize_val: 14
 
 autoregressive: true
 mp_mode: 1
-#input_norm_per_level: true
-#output_norm_per_level: true
-#loss_fn_type: mse
-#_lambda: 1.0e-05
-#loss_fn_type: huber
-#_lambda: 5.0e-06
+use_energy_loss: true
 input_norm_per_level: false
 output_norm_per_level: false
+new_nolev_scaling: true
+# loss_fn_type: mse
+# _lambda: 1.0e-05
 loss_fn_type: huber
-_lambda: 5.0e-05
+_lambda: 5.0e-06
+# input_norm_per_level: false
+# output_norm_per_level: false
+use_water_loss: false
+_alpha: 5.0e4
 output_prune: true
 qinput_prune: true
 rh_prune: true
@@ -27,27 +32,26 @@ remove_past_sfc_inputs: true
 v4_to_v5_inputs: false
 snowhice_fix: true
 
+nh_mem: 16
 nneur:
-- 96
-- 96
-- 96
+- 144
+- 144
 
 add_pres: true
 add_refpres: false
 add_stochastic_layer: false
-use_initial_mlp: true
+use_initial_mlp: false
 use_intermediate_mlp: true
-concat: false
 memory: Hidden
 model_type: LSTM
+concat: false
 separate_radiation: false
 
 save_model: true
 use_wandb: true
-num_epochs: 20
-use_energy_loss: true
+num_epochs: 30
 lr: 0.001
-mp_autocast: false
+mp_autocast: true
 use_scaler: true
 shuffle_data: false
 timestep_scheduling: true
@@ -56,12 +60,12 @@ optimizer: adam
 rollout_schedule:
 - 1
 - 1
-- 1
 - 2
-- 3
-- 4
-- 4
-- 4
-- 4
-- 4
+- 2
+- 2
+- 2
+- 2
+- 2
+- 2
+- 2
 
