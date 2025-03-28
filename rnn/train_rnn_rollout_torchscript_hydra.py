@@ -39,6 +39,8 @@ from torchmetrics.regression import R2Score
 import wandb
 from omegaconf import DictConfig
 import hydra
+import matplotlib.pyplot as plt
+
 
 @hydra.main(version_base="1.2", config_path="conf", config_name="autoreg_LSTM")
 def main(cfg: DictConfig):
@@ -83,6 +85,7 @@ def main(cfg: DictConfig):
     # --------------------------------------
     
     grid_info = xr.open_dataset(grid_path)
+    level = grid_info.lev.values
     input_mean = xr.open_dataset(norm_path + 'inputs/input_mean_v4_pervar.nc').astype(np.float32)
     input_max = xr.open_dataset(norm_path + 'inputs/input_max_v4_pervar.nc').astype(np.float32)
     input_min = xr.open_dataset(norm_path + 'inputs/input_min_v4_pervar.nc').astype(np.float32)
@@ -920,11 +923,33 @@ def main(cfg: DictConfig):
                     model.use_ensemble=True
                 model = model.to(device)
 
+                R2 = val_runner.metrics["R2_lev"]
+                labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
+                ncols, nrows = 3,2
+                fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
+                                        layout="constrained")
+                j = 0
+                for irow in range(2):
+                    for icol in range(3):
+                        axs[irow,icol].plot(R2[:,j],level)
+                        axs[irow,icol].invert_yaxis()
+                        axs[irow,icol].set_xlim(0,1)
+                        axs[irow,icol].set_title(labels[j])
+                        j = j + 1
+                    
+                fig.subplots_adjust(hspace=0)
+                plt.savefig(os.path.join('saved_models/val_eval/', 'val_R2_{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}.pdf'.format(cfg.model_type,
+                                                                                cfg.memory, cfg.lr, 
+                                                                                cfg.nneur[0], cfg.nneur[1], 
+                                                                                inpstr, outpstr,
+                                                                                model_num)))
+
         print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timesteps))
         print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
     
     if cfg.use_wandb:
         wandb.finish()
-    
+
+
 if __name__ == "__main__":
     main()
