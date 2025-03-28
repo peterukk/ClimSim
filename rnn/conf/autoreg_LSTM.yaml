@@ -3,8 +3,11 @@ val_data_fname: data_v4_rnn_nonorm_year8_nocompress_chunk3.h5
 tr_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
 val_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
 
-# cache option: during the first epoch, as the data is loaded it is put in shared (RAM) memory
-# this allows to use multiple workers without copying the data to each worker
+# cache option: during the first epoch, as the data is loaded it is put in shared (RAM) memory, 
+# from which it is loaded in subsequent epochs
+# this allows to use multiple workers and fast RAM memory without copying the data to each worker, 
+# which is especially useful on systems without SSDs. If the data is on a fast SSD, there is no need
+# to put the data in memory assuming multiple workers and prefetching is used
 cache: false
 val_cache: false 
 num_workers: 4
