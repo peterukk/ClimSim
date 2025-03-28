@@ -44,12 +44,22 @@ def my_mse(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
 
 def compute_biases(y_true_lev, y_pred_lev):
 
-    mean_t_lev = torch.nanmean(y_true_lev,dim=(0,1))
-    mean_p_lev = torch.nanmean(y_pred_lev,dim=(0,1))
+    # mean_t_lev = torch.nanmean(y_true_lev,dim=(0,1))
+    # mean_p_lev = torch.nanmean(y_pred_lev,dim=(0,1))
   
-    biases_lev = mean_t_lev - mean_p_lev
+    # biases_lev = mean_t_lev - mean_p_lev
 
-    return biases_lev.detach().cpu().numpy()
+    mean_t_lev = torch.nanmean(y_true_lev,dim=(0))
+    mean_p_lev = torch.nanmean(y_pred_lev,dim=(0))
+
+    biases_perlev = mean_t_lev - mean_p_lev
+
+    mean_t_nolev = torch.nanmean(mean_t_lev,dim=(0))
+    mean_p_nolev = torch.nanmean(mean_p_lev,dim=(0))
+  
+    biases_nolev = mean_t_nolev - mean_p_nolev
+
+    return biases_nolev.detach().cpu().numpy(), biases_perlev.detach().cpu().numpy()
 
 
 def compute_absolute_biases(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):

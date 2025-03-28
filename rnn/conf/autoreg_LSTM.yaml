@@ -16,13 +16,13 @@ chunksize_val: 14
 
 autoregressive: true
 mp_mode: 1
-use_energy_loss: true
-input_norm_per_level: false
-output_norm_per_level: false
-new_nolev_scaling: true
+input_norm_per_level: true
+output_norm_per_level: true
+new_nolev_scaling: false
 # loss_fn_type: mse
-# _lambda: 1.0e-05
 loss_fn_type: huber
+use_energy_loss: false
+# _lambda: 1.0e-05
 _lambda: 5.0e-06
 # input_norm_per_level: false
 # output_norm_per_level: false
@@ -47,13 +47,14 @@ use_initial_mlp: false
 use_intermediate_mlp: true
 memory: Hidden
 model_type: LSTM
-concat: false
+concat: true
 separate_radiation: false
 
 save_model: true
 use_wandb: true
 num_epochs: 30
 lr: 0.001
+timestepped_optimizer: true
 mp_autocast: true
 use_scaler: true
 shuffle_data: false

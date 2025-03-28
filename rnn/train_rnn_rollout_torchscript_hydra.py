@@ -521,7 +521,7 @@ def main(cfg: DictConfig):
 
             self.metrics = {}
             
-        def eval_one_epoch(self, epoch, timesteps=1):
+        def eval_one_epoch(self, optim, epoch, timesteps=1):
             report_freq = self.report_freq
             running_loss = 0.0; running_energy = 0.0; running_water = 0.0
             running_var=0.0
@@ -532,7 +532,7 @@ def main(cfg: DictConfig):
             epoch_r2_lev = 0.0
             epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
             epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
-            epoch_bias_lev_tot = 0.0 
+            epoch_bias_lev_tot = 0.0; epoch_bias_perlev= 0.0
             epoch_mae_lev_clw = 0.0; epoch_mae_lev_cli = 0.0
             t_comp =0 
             t0_it = time.time()
@@ -540,9 +540,9 @@ def main(cfg: DictConfig):
             
             if cfg.optimizer == "adamwschedulefree":
                 if self.train:
-                    optimizer.train()
+                    optim.train()
                 else:
-                    optimizer.eval()
+                    optim.eval()
             
             if cfg.autoregressive:
                 preds_lay = []; preds_sfc = []
@@ -657,13 +657,13 @@ def main(cfg: DictConfig):
                         if self.train:
                             if cfg.use_scaler:
                                 scaler.scale(loss).backward()
-                                scaler.step(optimizer)
+                                scaler.step(optim)
                                 scaler.update()
                             else:
                                 loss.backward()       
-                                optimizer.step()
+                                optim.step()
                 
-                            optimizer.zero_grad()
+                            optim.zero_grad()
                             loss = loss.detach()
                             h_con = h_con.detach() 
                             water_con = water_con.detach()
@@ -710,8 +710,9 @@ def main(cfg: DictConfig):
                                 epoch_bias_cli += biases_lev[3]
                                 epoch_bias_sfc += np.mean(biases_sfc)
 
-                                biases_lev = metrics.compute_biases(yto_lay, ypo_lay)
-                                epoch_bias_lev_tot += np.mean(biases_lev)
+                                biases_nolev, biases_perlev = metrics.compute_biases(yto_lay, ypo_lay)
+                                epoch_bias_lev_tot += np.mean(biases_nolev)
+                                epoch_bias_perlev += biases_perlev
 
                                 self.metric_R2.update(ypo_lay.reshape((-1,ny_pp)), yto_lay.reshape((-1,ny_pp)))
                                        
@@ -784,6 +785,8 @@ def main(cfg: DictConfig):
             self.metrics["bias_heating"] = epoch_bias_heating / k 
             self.metrics["bias_cldliq"] = epoch_bias_clw / k 
             self.metrics["bias_cldice"] = epoch_bias_cli / k 
+
+            self.metrics["bias_perlev"] = epoch_bias_perlev / k 
     
             #self.metrics['mean_absolute_error'] = epoch_mae / k
             #self.metrics['ks'] =  epoch_ks / k2
@@ -850,6 +853,7 @@ def main(cfg: DictConfig):
     # best_val_loss = np.inf
     best_val_loss = 0.0
     
+    tsteps_old = 1
     for epoch in range(cfg.num_epochs):
         t0 = time.time()
         
@@ -859,7 +863,14 @@ def main(cfg: DictConfig):
             timesteps=timewindow_default
             
         print("Epoch {} Training rollout timesteps: {} ".format(epoch+1, timesteps))
-        train_runner.eval_one_epoch(epoch, timesteps)
+        train_runner.eval_one_epoch(optimizer, epoch, timesteps)
+
+        if cfg.timestepped_optimizer and (timesteps==(tsteps_old+1)):
+            print("Timestepped optimizer turned on, doubling learning rate upon increased time window")
+            for g in optimizer.param_groups:
+                g['lr'] = 2*g['lr']
+        tsteps_old = timesteps
+
         if train_runner.loader.dataset.cache:
             train_runner.loader.dataset.cache_loaded = True
         
@@ -880,7 +891,7 @@ def main(cfg: DictConfig):
         
         if epoch%2:
             print("VALIDATION..")
-            val_runner.eval_one_epoch(epoch, timesteps)
+            val_runner.eval_one_epoch(optimizer, epoch, timesteps)
             if val_runner.loader.dataset.cache:
                 val_runner.loader.dataset.cache_loaded = True
 
@@ -926,23 +937,37 @@ def main(cfg: DictConfig):
                 R2 = val_runner.metrics["R2_lev"]
                 labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
                 ncols, nrows = 3,2
-                fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
+                fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(7.5, 4.5),
                                         layout="constrained")
                 j = 0
                 for irow in range(2):
                     for icol in range(3):
                         axs[irow,icol].plot(R2[:,j],level)
+                        axs[irow,icol].set_ylim(0,1000)
                         axs[irow,icol].invert_yaxis()
                         axs[irow,icol].set_xlim(0,1)
                         axs[irow,icol].set_title(labels[j])
                         j = j + 1
                     
                 fig.subplots_adjust(hspace=0)
-                plt.savefig(os.path.join('saved_models/val_eval/', 'val_R2_{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}.pdf'.format(cfg.model_type,
-                                                                                cfg.memory, cfg.lr, 
-                                                                                cfg.nneur[0], cfg.nneur[1], 
-                                                                                inpstr, outpstr,
-                                                                                model_num)))
+                plt.savefig(os.path.join('saved_models/val_eval/', '{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_val_R2.pdf'.format(cfg.model_type,
+                                                                                cfg.memory, cfg.lr, cfg.nneur[0], cfg.nneur[1], 
+                                                                                inpstr, outpstr, model_num)))
+                plt.clf()
+                bias = val_runner.metrics["bias_perlev"]
+                ncols, nrows = 6,1
+                fig, axs = plt.subplots(ncols=nrows, nrows=ncols, figsize=(7.0, 12.0)) #layout="constrained")
+                for i in range(6):
+                    axs[i].plot(x, bias[:,i]); 
+                    axs[i].set_title(labels[i])
+                    axs[i].set_xlim(0,60)
+                    axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
+
+                fig.subplots_adjust(hspace=0.6)                                                     
+                plt.savefig(os.path.join('saved_models/val_eval/', '{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_val_bias.pdf'.format(cfg.model_type,
+                                                                                cfg.memory, cfg.lr, cfg.nneur[0], cfg.nneur[1], 
+                                                                                inpstr, outpstr, model_num)))
+
 
         print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timesteps))
         print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
