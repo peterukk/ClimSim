@@ -478,6 +478,9 @@ def main(cfg: DictConfig):
     elif cfg.optimizer == "adamwschedulefree":
         import schedulefree
         optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=cfg.lr)
+    elif cfg.optimizer == "soap":
+        from soap import SOAP
+        optimizer = SOAP(lr = cfg.lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
     else:
         raise NotImplementedError()
   
@@ -863,13 +866,14 @@ def main(cfg: DictConfig):
             timesteps=timewindow_default
             
         print("Epoch {} Training rollout timesteps: {} ".format(epoch+1, timesteps))
-        train_runner.eval_one_epoch(optimizer, epoch, timesteps)
 
         if cfg.timestepped_optimizer and (timesteps==(tsteps_old+1)):
             print("Timestepped optimizer turned on, doubling learning rate upon increased time window")
             for g in optimizer.param_groups:
                 g['lr'] = 2*g['lr']
         tsteps_old = timesteps
+
+        train_runner.eval_one_epoch(optimizer, epoch, timesteps)
 
         if train_runner.loader.dataset.cache:
             train_runner.loader.dataset.cache_loaded = True
