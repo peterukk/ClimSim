@@ -449,7 +449,7 @@ def main(cfg: DictConfig):
                                        # num_samples=val_data.ntimesteps*nloc_val, shuffle=shuffle_data)
                                        num_samples=val_data.ntimesteps, shuffle = cfg.shuffle_data)
     
-    val_loader = DataLoader(dataset=val_data, num_workers = num_workers, 
+    val_loader = DataLoader(dataset=val_data, num_workers = cfg.num_workers, 
                               sampler = val_batch_sampler, 
                               batch_size=None, batch_sampler=None, 
                               prefetch_factor = prefetch_factor, 
