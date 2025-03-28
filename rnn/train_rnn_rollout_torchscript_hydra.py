@@ -958,7 +958,7 @@ def main(cfg: DictConfig):
                 ncols, nrows = 6,1
                 fig, axs = plt.subplots(ncols=nrows, nrows=ncols, figsize=(7.0, 12.0)) #layout="constrained")
                 for i in range(6):
-                    axs[i].plot(x, bias[:,i]); 
+                    axs[i].plot(np.arange(60), bias[:,i]); 
                     axs[i].set_title(labels[i])
                     axs[i].set_xlim(0,60)
                     axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
