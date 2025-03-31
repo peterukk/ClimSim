@@ -480,7 +480,7 @@ def main(cfg: DictConfig):
         optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=cfg.lr)
     elif cfg.optimizer == "soap":
         from soap import SOAP
-        optimizer = SOAP(lr = cfg.lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
+        optimizer = SOAP(model.parameters(), lr = cfg.lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
     else:
         raise NotImplementedError()
   
@@ -528,7 +528,7 @@ def main(cfg: DictConfig):
             report_freq = self.report_freq
             running_loss = 0.0; running_energy = 0.0; running_water = 0.0
             running_var=0.0
-            epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0
+            epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0: epoch_mae = 0.0
             epoch_R2precc = 0.0
             epoch_hcon = 0.0; epoch_wcon = 0.0
             epoch_ens_var = 0.0; epoch_det_skill = 0.0; epoch_spreadskill = 0.0
@@ -537,6 +537,7 @@ def main(cfg: DictConfig):
             epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
             epoch_bias_lev_tot = 0.0; epoch_bias_perlev= 0.0
             epoch_mae_lev_clw = 0.0; epoch_mae_lev_cli = 0.0
+            epoch_rmse_perlev = 0.0 
             t_comp =0 
             t0_it = time.time()
             j = 0; k = 0; k2=2    
@@ -687,8 +688,8 @@ def main(cfg: DictConfig):
                                 else:
                                     epoch_mse       += mse(targets_lay, targets_sfc, preds_lay, preds_sfc)
 
-                                epoch_huber       += metrics.huber_flatten(targets_lay, targets_sfc, preds_lay, preds_sfc)                                   
-                                #epoch_mae       += mae.item()
+                                epoch_huber, epoch_mae       += metrics.huber_flatten(targets_lay, targets_sfc, preds_lay, preds_sfc)                                   
+                                # epoch_mae       += metrics.mean_absolute_error(targets_lay, preds_lay)
                             
                                 epoch_hcon  += h_con.item()
                                 epoch_wcon  += water_con.item()
@@ -716,6 +717,9 @@ def main(cfg: DictConfig):
                                 biases_nolev, biases_perlev = metrics.compute_biases(yto_lay, ypo_lay)
                                 epoch_bias_lev_tot += np.mean(biases_nolev)
                                 epoch_bias_perlev += biases_perlev
+
+                                epoch_rmse_perlev += metrics.rmse(yto_lay, ypo_lay)
+
 
                                 self.metric_R2.update(ypo_lay.reshape((-1,ny_pp)), yto_lay.reshape((-1,ny_pp)))
                                        
@@ -790,8 +794,9 @@ def main(cfg: DictConfig):
             self.metrics["bias_cldice"] = epoch_bias_cli / k 
 
             self.metrics["bias_perlev"] = epoch_bias_perlev / k 
-    
-            #self.metrics['mean_absolute_error'] = epoch_mae / k
+            self.metrics["rmse_perlev"] = epoch_rmse_perlev / k 
+
+            self.metrics['mean_absolute_error'] = epoch_mae / k
             #self.metrics['ks'] =  epoch_ks / k2
             self.metrics['R2'] = self.metric_R2.compute()
             
@@ -857,6 +862,7 @@ def main(cfg: DictConfig):
     best_val_loss = 0.0
     
     tsteps_old = 1
+    new_lr = cfg.lr
     for epoch in range(cfg.num_epochs):
         t0 = time.time()
         
@@ -868,9 +874,25 @@ def main(cfg: DictConfig):
         print("Epoch {} Training rollout timesteps: {} ".format(epoch+1, timesteps))
 
         if cfg.timestepped_optimizer and (timesteps==(tsteps_old+1)):
-            print("Timestepped optimizer turned on, doubling learning rate upon increased time window")
-            for g in optimizer.param_groups:
-                g['lr'] = 2*g['lr']
+            # print("Timestepped optimizer turned on, doubling learning rate upon increased time window")
+            # for g in optimizer.param_groups:
+            #     g['lr'] = 2*g['lr']
+            new_lr = (timesteps/(tsteps_old)) * new_lr
+            print("Timestepped optimizer turned on,setting rate to {}".format(new_lr))
+
+            if cfg.optimizer == "adam":
+                optimizer = torch.optim.Adam(model.parameters(), lr = new_lr)
+            elif cfg.optimizer == "adamw":
+                optimizer = torch.optim.AdamW(model.parameters(), lr = new_lr)
+            elif cfg.optimizer == "adamwschedulefree":
+                import schedulefree
+                optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=new_lr)
+            elif cfg.optimizer == "soap":
+                from soap import SOAP
+                optimizer = SOAP(model.parameters(), lr = new_lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
+            else:
+                raise NotImplementedError()
+
         tsteps_old = timesteps
 
         train_runner.eval_one_epoch(optimizer, epoch, timesteps)
@@ -880,6 +902,7 @@ def main(cfg: DictConfig):
         
         if cfg.use_wandb: 
             logged_metrics = train_runner.metrics.copy()
+            logged_metrics.pop("rmse_perlev"); logged_metrics.pop("bias_perlev")
             nan_inds = np.isnan(logged_metrics['R2_lev']); num_nans = np.sum(nan_inds)
             nan_inds_moistening = np.isnan(logged_metrics['R2_lev'][:,1])
             # num_nans_moist = np.sum(nan_inds_moistening)
@@ -901,6 +924,7 @@ def main(cfg: DictConfig):
 
             if cfg.use_wandb: 
                 logged_metrics = val_runner.metrics.copy()
+                logged_metrics.pop("rmse_perlev"); logged_metrics.pop("bias_perlev")
                 nan_inds = np.isnan(logged_metrics['R2_lev']); num_nans = np.sum(nan_inds)
                 nan_inds_moistening = np.isnan(logged_metrics['R2_lev'][:,1])
                 # num_nans_moist = np.sum(nan_inds_moistening)
@@ -959,8 +983,7 @@ def main(cfg: DictConfig):
                                                                                 inpstr, outpstr, model_num)))
                 plt.clf()
                 bias = val_runner.metrics["bias_perlev"]
-                ncols, nrows = 6,1
-                fig, axs = plt.subplots(ncols=nrows, nrows=ncols, figsize=(7.0, 12.0)) #layout="constrained")
+                fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 15.5)) #layout="constrained")
                 for i in range(6):
                     axs[i].plot(np.arange(60), bias[:,i]); 
                     axs[i].set_title(labels[i])
@@ -971,6 +994,21 @@ def main(cfg: DictConfig):
                 plt.savefig(os.path.join('saved_models/val_eval/', '{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_val_bias.pdf'.format(cfg.model_type,
                                                                                 cfg.memory, cfg.lr, cfg.nneur[0], cfg.nneur[1], 
                                                                                 inpstr, outpstr, model_num)))
+
+                plt.clf()
+                rmse = val_runner.metrics["rmse_perlev"]
+                fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 15.5)) #layout="constrained")
+                for i in range(6):
+                    axs[i].plot(np.arange(60), rmse[:,i]); 
+                    axs[i].set_title(labels[i])
+                    axs[i].set_xlim(0,60)
+                    axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
+
+                fig.subplots_adjust(hspace=0.6)                                                     
+                plt.savefig(os.path.join('saved_models/val_eval/', '{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_val_rmse.pdf'.format(cfg.model_type,
+                                                                                cfg.memory, cfg.lr, cfg.nneur[0], cfg.nneur[1], 
+                                                                                inpstr, outpstr, model_num)))
+
 
 
         print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timesteps))

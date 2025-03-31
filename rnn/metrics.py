@@ -41,6 +41,10 @@ def my_mse(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
     mse2 = torch.mean(torch.square(y_pred_sfc - y_true_sfc))
     return (mse1+mse2)/2
 
+def rmse(y_true_lev, y_pred_lev):
+    val_rmse = torch.sqrt(torch.mean(torch.square(y_pred_lev - y_true_lev),dim=(0)))
+    return val_rmse.detach().cpu().numpy()
+
 
 def compute_biases(y_true_lev, y_pred_lev):
 
@@ -116,7 +120,11 @@ def huber_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=None):
     
     criterion = nn.SmoothL1Loss()
     err =  criterion(y_pred_flat, y_true_flat)
-    return err
+
+    mae = nn.L1Loss()
+    mae_err = mae(y_pred_flat, y_true_flat)
+    return err, mae_err
+
 
 def get_mse_flatten(weights):
     def my_mse_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
