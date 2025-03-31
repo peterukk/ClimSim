@@ -528,7 +528,7 @@ def main(cfg: DictConfig):
             report_freq = self.report_freq
             running_loss = 0.0; running_energy = 0.0; running_water = 0.0
             running_var=0.0
-            epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0: epoch_mae = 0.0
+            epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0; epoch_mae = 0.0
             epoch_R2precc = 0.0
             epoch_hcon = 0.0; epoch_wcon = 0.0
             epoch_ens_var = 0.0; epoch_det_skill = 0.0; epoch_spreadskill = 0.0
@@ -688,7 +688,9 @@ def main(cfg: DictConfig):
                                 else:
                                     epoch_mse       += mse(targets_lay, targets_sfc, preds_lay, preds_sfc)
 
-                                epoch_huber, epoch_mae       += metrics.huber_flatten(targets_lay, targets_sfc, preds_lay, preds_sfc)                                   
+                                huber, mae       = metrics.huber_flatten(targets_lay, targets_sfc, preds_lay, preds_sfc)
+                                epoch_huber += huber
+                                epoch_mae += mae
                                 # epoch_mae       += metrics.mean_absolute_error(targets_lay, preds_lay)
                             
                                 epoch_hcon  += h_con.item()
