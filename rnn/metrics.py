@@ -121,10 +121,26 @@ def huber_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=None):
     criterion = nn.SmoothL1Loss()
     err =  criterion(y_pred_flat, y_true_flat)
 
-    mae = nn.L1Loss()
-    mae_err = mae(y_pred_flat, y_true_flat)
-    return err, mae_err
+    return err
 
+def metrics_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=None):
+    
+    if weights is not None:
+        y_pred_lev = weights*y_pred_lev
+        y_true_lev = weights*y_true_lev
+
+    y_pred_flat =  torch.cat((y_pred_lev.flatten(start_dim=1),y_pred_sfc),dim=1)
+    y_true_flat =  torch.cat((y_true_lev.flatten(start_dim=1),y_true_sfc),dim=1)
+    
+    func_huber = nn.SmoothL1Loss()
+    huber =  criterion(y_pred_flat, y_true_flat)
+
+    func_mae = nn.L1Loss()
+    mae = func_mae(y_pred_flat, y_true_flat)
+
+    mse = torch.mean(torch.square(y_pred_flat - y_true_flat))
+
+    return huber, mse, mae
 
 def get_mse_flatten(weights):
     def my_mse_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
@@ -135,6 +151,11 @@ def get_huber_flatten(weights):
     def my_huber_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
         return huber_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=weights)
     return my_huber_flatten
+
+def get_metrics_flatten(weights):
+    def my_loss_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
+        return metrics_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=weights)
+    return my_loss_flatten 
 
 def energy_metric(yto, ypo, sp, hyai,hybi):
     

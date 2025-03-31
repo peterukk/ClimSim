@@ -459,13 +459,14 @@ def main(cfg: DictConfig):
     
     metric_h_con = metrics.get_energy_metric(hyai, hybi)
     metric_water_con = metrics.get_water_conservation(hyai, hybi)
-    mse = metrics.get_mse_flatten(weights)
 
+    # mse = metrics.get_mse_flatten(weights)
+    det_metrics = get_metrics_flatten(weights)
     
     if cfg.loss_fn_type == "mse":
-        loss_fn = mse
+        loss_fn = det_metrics
     elif cfg.loss_fn_type == "huber":
-        loss_fn = metrics.get_huber_flatten(weights)
+        loss_fn = det_metrics
     elif cfg.loss_fn_type == "CRPS":
         loss_fn = metrics.get_CRPS(cfg.beta)
     else:
@@ -619,6 +620,12 @@ def main(cfg: DictConfig):
                             loss = loss_fn(targets_lay, targets_sfc, preds_lay, preds_sfc)
                             if cfg.loss_fn_type == "CRPS":
                                 loss, det_skill, ens_var = loss 
+                            else:
+                                huber, mse, mae = loss 
+                                if cfg.loss_fn_type == "huber":
+                                    loss = huber
+                                else:
+                                    loss = mse
                                 
                             if use_ensemble:
                                 # print("preds shape", preds_lay)
@@ -669,6 +676,10 @@ def main(cfg: DictConfig):
                 
                             optim.zero_grad()
                             loss = loss.detach()
+                            if cfg.loss_fn_type == "CRPS":
+                                det_skill = det_skill.detach(); ens_var = ens_var.detach()
+                            else: 
+                                huber = huber.detach(); mse = mse.detach(); mae = mae.detach()
                             h_con = h_con.detach() 
                             water_con = water_con.detach()
                             
@@ -683,14 +694,12 @@ def main(cfg: DictConfig):
                         if j>loss_update_start_index:
                             with torch.no_grad():
                                 epoch_loss      += loss.item()
-                                if cfg.loss_fn_type =="mse":
-                                    epoch_mse       += loss.item()
-                                else:
-                                    epoch_mse       += mse(targets_lay, targets_sfc, preds_lay, preds_sfc)
+                                if cfg.loss_fn_type =="CRPS":
+                                    huber, mse, mae       = det_metrics(targets_lay, targets_sfc, preds_lay, preds_sfc)
 
-                                huber, mae       = metrics.huber_flatten(targets_lay, targets_sfc, preds_lay, preds_sfc)
-                                epoch_huber += huber
-                                epoch_mae += mae
+                                epoch_huber += huber.item()
+                                epoch_mse += mse.item()
+                                epoch_mae += mae.item()
                                 # epoch_mae       += metrics.mean_absolute_error(targets_lay, preds_lay)
                             
                                 epoch_hcon  += h_con.item()
