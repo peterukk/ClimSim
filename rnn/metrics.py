@@ -133,7 +133,7 @@ def metrics_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=None
     y_true_flat =  torch.cat((y_true_lev.flatten(start_dim=1),y_true_sfc),dim=1)
     
     func_huber = nn.SmoothL1Loss()
-    huber =  criterion(y_pred_flat, y_true_flat)
+    huber =  func_huber(y_pred_flat, y_true_flat)
 
     func_mae = nn.L1Loss()
     mae = func_mae(y_pred_flat, y_true_flat)

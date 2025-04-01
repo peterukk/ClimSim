@@ -164,6 +164,7 @@ class generator_xy(torch.utils.data.Dataset):
                  rh_prune=False,
                  output_prune=False,
                  mp_mode=0,
+                 include_prev_inputs=False, # include inputs 9,10,11 of the previous time step
                  no_multiprocessing=False,
                  snowhice_fix=True): # 0 = regular outputs, 1 = mp constraint, 2 = pred liq ratio
                  # use_mp_constraint=False):
@@ -183,6 +184,7 @@ class generator_xy(torch.utils.data.Dataset):
         self.qinput_prune = qinput_prune
         self.rh_prune = rh_prune 
         self.output_prune=output_prune
+        self.include_prev_inputs = include_prev_inputs
         if self.mp_mode==1:
             self.use_mp_constraint = True 
             self.pred_liq_ratio  = False
@@ -227,15 +229,15 @@ class generator_xy(torch.utils.data.Dataset):
         if ycoeffs is not None:
             self.yscale_lev, self.yscale_sca = ycoeffs
        
-        if type(self.filepath)==list:
-            # In this case, each time a chunk is fetched, all the files are opened and the
-            # data is concatenated along the column dimension
-            self.num_files = len(self.filepath)
-            print("Number of files: {}".format(self.num_files))
-            hdf = h5py.File(self.filepath[0], 'r')
-        else:
-            self.num_files = 1
-            hdf = h5py.File(self.filepath, 'r')
+        # if type(self.filepath)==list:
+        #     # In this case, each time a chunk is fetched, all the files are opened and the
+        #     # data is concatenated along the column dimension
+        #     self.num_files = len(self.filepath)
+        #     print("Number of files: {}".format(self.num_files))
+        #     hdf = h5py.File(self.filepath[0], 'r')
+        # else:
+        self.num_files = 1
+        hdf = h5py.File(self.filepath, 'r')
             
         dims = hdf['input_lev'].shape
         if len(dims)==4:
@@ -245,6 +247,12 @@ class generator_xy(torch.utils.data.Dataset):
             _, self.nlev, self.nx = dims
             self.separate_timedim=False 
             self.ntimesteps = hdf['input_lev'].shape[0]//self.nloc
+
+        if self.include_prev_inputs:
+          self.nx = self.nx + 6
+          if not self.separate_timedim:
+            raise NotImplementedError()
+
         print("Data shape: {} for data in {}".format(dims, filepath))
         self.nx_sfc = hdf['input_sca'].shape[-1]
         self.ny = hdf['output_lev'].shape[-1]
@@ -373,78 +381,65 @@ class generator_xy(torch.utils.data.Dataset):
         # t0_it = time.time()
         # print("inds ", indices[0:3], "...", indices[-1])
 
-        if self.num_files>1:
-            i = 0
-            for filepath in self.filepath:
-                hdf = h5py.File(filepath, 'r')
-                # hdf = self.hdf
-
-                x_lev_b0 = hdf['input_lev'][indices,:]
-                x_sfc_b0 = hdf['input_sca'][indices,:]
-                y_lev_b0 = hdf['output_lev'][indices,:]
-                y_sfc_b0 = hdf['output_sca'][indices,:]
-                # print("1shape x file i ", x_lev_b0.shape)
-                x_lev_b0 = x_lev_b0.reshape(-1,self.nloc,self.nlev,self.nx)
-                x_sfc_b0 = x_sfc_b0.reshape(-1,self.nloc,self.nx_sfc)
-                y_lev_b0 = y_lev_b0.reshape(-1,self.nloc,self.nlev,self.ny)
-                y_sfc_b0 = y_sfc_b0.reshape(-1,self.nloc,self.ny_sfc)
-                # print("2 shape x file i ", x_lev_b0.shape)
-
-                if i==0:
-                    x_lev_b = x_lev_b0
-                    x_sfc_b = x_sfc_b0
-                    y_lev_b = y_lev_b0
-                    y_sfc_b = y_sfc_b0
-                else:
-                    x_lev_b = np.concatenate((x_lev_b, x_lev_b0), axis=1)
-                    x_sfc_b = np.concatenate((x_sfc_b, x_sfc_b0), axis=1)
-                    y_lev_b = np.concatenate((y_lev_b, y_lev_b0), axis=1)
-                    y_sfc_b = np.concatenate((y_sfc_b, y_sfc_b0), axis=1)
-                    
-                i = i + 1
-                
-            x_lev_b = x_lev_b.reshape(-1,self.nlev,self.nx)
-            x_sfc_b = x_sfc_b.reshape(-1,self.nx_sfc)
-            y_lev_b = y_lev_b.reshape(-1,self.nlev,self.ny)
-            y_sfc_b = y_sfc_b.reshape(-1,self.ny_sfc)
-
-        else:       
-            if self.cache and self.cache_loaded: 
-                x_lev_b = self.input_lev[indices,:]
-                x_sfc_b = self.input_sca[indices,:] 
-                y_lev_b = self.output_lev[indices,:]  
-                y_sfc_b = self.output_sca[indices,:] 
+        if self.include_prev_inputs:
+            if indices[0]>0:
+                inds_prev = indices[0:-1]
+                inds_prev.insert(0,inds_prev[0]-1)
             else:
-                hdf = h5py.File(self.filepath, 'r')
-                # hdf = self.hdf
+                inds_prev = indices[0:-1]
+                # inds_prev.insert(0,inds_prev[0])
+        # print(indices, "|||||||||", inds_prev)
+          
+        if self.cache and self.cache_loaded: 
+            x_lev_b = self.input_lev[indices,:]
+            x_sfc_b = self.input_sca[indices,:] 
+            y_lev_b = self.output_lev[indices,:]  
+            y_sfc_b = self.output_sca[indices,:] 
+            if self.include_prev_inputs:
+                # prev_inputs = self.input_lev[inds_prev,:,:,[0,1,2,3,4,5]]
+                prev_inputs = self.input_lev[inds_prev,:,:,:]
+                prev_inputs = prev_inputs[:,:,:,[0,1,2,3,4,5]]
 
-                x_lev_b = hdf['input_lev'][indices,:]
-                x_sfc_b = hdf['input_sca'][indices,:]
-                y_lev_b = hdf['output_lev'][indices,:]
-                y_sfc_b = hdf['output_sca'][indices,:]
-                # x_lev_b = hdf['input_lev'][indices[0]:indices[-1]+1,:]
-                # x_sfc_b = hdf['input_sca'][indices[0]:indices[-1]+1,:]
-                # y_lev_b = hdf['output_lev'][indices[0]:indices[-1]+1,:]
-                # y_sfc_b = hdf['output_sca'][indices[0]:indices[-1]+1,:]
+        else:
+            hdf = h5py.File(self.filepath, 'r')
+            # hdf = self.hdf
 
-                if self.cache and (not self.cache_loaded):
-                    self.input_lev[indices,:] = x_lev_b
-                    self.input_sca[indices,:] = x_sfc_b
-                    self.output_lev[indices,:] = y_lev_b
-                    self.output_sca[indices,:] = y_sfc_b
+            x_lev_b = hdf['input_lev'][indices,:]
+            x_sfc_b = hdf['input_sca'][indices,:]
+            y_lev_b = hdf['output_lev'][indices,:]
+            y_sfc_b = hdf['output_sca'][indices,:]
+            # x_lev_b = hdf['input_lev'][indices[0]:indices[-1]+1,:]
+            # x_sfc_b = hdf['input_sca'][indices[0]:indices[-1]+1,:]
+            # y_lev_b = hdf['output_lev'][indices[0]:indices[-1]+1,:]
+            # y_sfc_b = hdf['output_sca'][indices[0]:indices[-1]+1,:]
+            if self.include_prev_inputs:
+                # prev_inputs = hdf['input_lev'][inds_prev,:,:,[0,1,2,3,4,5]]
+                prev_inputs = hdf['input_lev'][inds_prev]
+                prev_inputs = prev_inputs[:,:,:,[0,1,2,3,4,5]]
 
-                hdf.close() 
+            if self.cache and (not self.cache_loaded):
+                self.input_lev[indices,:] = x_lev_b
+                self.input_sca[indices,:] = x_sfc_b
+                self.output_lev[indices,:] = y_lev_b
+                self.output_sca[indices,:] = y_sfc_b
 
-            if self.separate_timedim:
-                # print("inds", indices)
-                # x_lev_b = x_lev_b.reshape(-1,self.nlev, self.nx)
-                # x_sfc_b = x_sfc_b.reshape(-1,self.nx_sfc)
-                # y_lev_b = y_lev_b.reshape(-1,self.nlev, self.ny)
-                # y_sfc_b = y_sfc_b.reshape(-1,self.ny_sfc)
-                x_lev_b.shape = (-1,self.nlev, self.nx)
-                x_sfc_b.shape = (-1,self.nx_sfc)
-                y_lev_b.shape = (-1,self.nlev, self.ny)
-                y_sfc_b.shape = (-1,self.ny_sfc)
+            hdf.close() 
+
+        if self.include_prev_inputs:
+            if indices[0]==0:
+                prev_inputs = np.concatenate((np.zeros_like(prev_inputs[0:1]),prev_inputs),axis=0)
+            x_lev_b = np.concatenate((x_lev_b, prev_inputs),axis=-1)
+
+        if self.separate_timedim:
+            # print("inds", indices)
+            # x_lev_b = x_lev_b.reshape(-1,self.nlev, self.nx)
+            # x_sfc_b = x_sfc_b.reshape(-1,self.nx_sfc)
+            # y_lev_b = y_lev_b.reshape(-1,self.nlev, self.ny)
+            # y_sfc_b = y_sfc_b.reshape(-1,self.ny_sfc)
+            x_lev_b.shape = (-1,self.nlev, self.nx)
+            x_sfc_b.shape = (-1,self.nx_sfc)
+            y_lev_b.shape = (-1,self.nlev, self.ny)
+            y_sfc_b.shape = (-1,self.ny_sfc)
                 
         #hdf.close()
   

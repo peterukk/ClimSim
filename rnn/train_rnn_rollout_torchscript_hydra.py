@@ -249,6 +249,11 @@ def main(cfg: DictConfig):
         xdiv1_min = np.min(xdiv1[xdiv1>0.0])
         xdiv1[xdiv1==0.0] = xdiv1_min
         xdiv_lev[:,-2] = xdiv1 
+        
+    if cfg.include_prev_inputs:
+        xmean_lev = np.concatenate((xmean_lev, xmean_lev[:,0:6]), axis=1)
+        xdiv_lev =  np.concatenate((xdiv_lev, xdiv_lev[:,0:6]), axis=1)
+                 
     
     if cfg.add_refpres:
         xmean_lev = np.concatenate((xmean_lev, np.zeros(nlev).reshape(nlev,1)), axis=1)
@@ -281,6 +286,9 @@ def main(cfg: DictConfig):
     xcoeff_lev = np.stack((xmean_lev, xdiv_lev))
     xcoeffs = np.float32(xcoeff_lev), np.float32(xcoeff_sca)
     
+    if cfg.include_prev_inputs:
+        nx = nx + 6 
+        
     if cfg.add_refpres:
         nx = nx + 1
         
@@ -425,7 +433,7 @@ def main(cfg: DictConfig):
     train_data = generator_xy(tr_data_path, cache = cfg.cache, nloc = nloc, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
-                    qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune,
+                    qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, include_prev_inputs=cfg.include_prev_inputs,
                     ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
     
     train_batch_sampler = BatchSampler(cfg.chunksize_train, # samples per chunk 
@@ -442,7 +450,7 @@ def main(cfg: DictConfig):
     val_data = generator_xy(val_data_path, cache=cfg.val_cache, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
-                    qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune,
+                    qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, include_prev_inputs=cfg.include_prev_inputs,
                     ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
     
     val_batch_sampler = BatchSampler(cfg.chunksize_val, 
@@ -461,7 +469,7 @@ def main(cfg: DictConfig):
     metric_water_con = metrics.get_water_conservation(hyai, hybi)
 
     # mse = metrics.get_mse_flatten(weights)
-    det_metrics = get_metrics_flatten(weights)
+    det_metrics = metrics.get_metrics_flatten(weights)
     
     if cfg.loss_fn_type == "mse":
         loss_fn = det_metrics
