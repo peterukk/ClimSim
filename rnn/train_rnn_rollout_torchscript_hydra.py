@@ -984,7 +984,7 @@ def main(cfg: DictConfig):
                 R2 = val_runner.metrics["R2_lev"]
                 labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
                 ncols, nrows = 3,2
-                fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(7.5, 4.5),
+                fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(9.5, 4.5),
                                         layout="constrained")
                 j = 0
                 for irow in range(2):
@@ -1002,7 +1002,7 @@ def main(cfg: DictConfig):
                                                                                 inpstr, outpstr, model_num)))
                 plt.clf()
                 bias = val_runner.metrics["bias_perlev"]
-                fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 15.5)) #layout="constrained")
+                fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
                 for i in range(6):
                     axs[i].plot(np.arange(60), bias[:,i]); 
                     axs[i].set_title(labels[i])
@@ -1016,7 +1016,7 @@ def main(cfg: DictConfig):
 
                 plt.clf()
                 rmse = val_runner.metrics["rmse_perlev"]
-                fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 15.5)) #layout="constrained")
+                fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
                 for i in range(6):
                     axs[i].plot(np.arange(60), rmse[:,i]); 
                     axs[i].set_title(labels[i])
