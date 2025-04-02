@@ -473,16 +473,16 @@ class LSTM_autoreg_torchscript(nn.Module):
         out_sfc         = out_sfc / self.yscale_sca
         return out, out_sfc
         
-    def pp_mp(self, out, out_sfc, x_denorm):
+    def pp_mp(self, out, out_sfc, x_denormed):
 
         # out_denorm      = out / self.yscale_lev.to(device=out.device)
         # out_sfc_denorm  = out_sfc / self.yscale_sca.to(device=out.device)
-        out_denorm      = out / self.yscale_lev
+        out_denorm      = out     / self.yscale_lev
         out_sfc_denorm  = out_sfc / self.yscale_sca
 
-        T_before        = x_denorm[:,:,0:1]
-        qliq_before     = x_denorm[:,:,2:3]
-        qice_before     = x_denorm[:,:,3:4]   
+        T_before        = x_denormed[:,:,0:1]
+        qliq_before     = x_denormed[:,:,2:3]
+        qice_before     = x_denormed[:,:,3:4]   
         qn_before       = qliq_before + qice_before 
 
         # print("shape x denorm", x_denorm.shape, "T", T_before.shape)

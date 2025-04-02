@@ -1,9 +1,9 @@
 tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_gzip8_chunk1_subset.h5
 val_data_fname: data_v4_rnn_nonorm_year8_nocompress_chunk3.h5
-#tr_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
-#val_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
-tr_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
-val_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
+tr_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
+val_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
+# tr_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
+# val_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
 
 
 # cache option: during the first epoch, as the data is loaded it is put in shared (RAM) memory, 
@@ -30,7 +30,7 @@ _lambda: 5.0e-06
 # input_norm_per_level: false
 # output_norm_per_level: false
 use_water_loss: false
-_alpha: 5.0e4
+_alpha: 2.0e7
 output_prune: true
 qinput_prune: true
 rh_prune: true
@@ -41,8 +41,8 @@ snowhice_fix: true
 
 nh_mem: 16
 nneur:
-- 144
-- 144
+- 192
+- 192
 
 add_pres: true
 add_refpres: false
@@ -51,23 +51,23 @@ use_initial_mlp: false
 use_intermediate_mlp: true
 memory: Hidden
 model_type: LSTM
-concat: true
+concat: false
 separate_radiation: false
 
 save_model: true
 use_wandb: true
 num_epochs: 30
 lr: 0.001
-timestepped_optimizer: false
 mp_autocast: true
 use_scaler: true
 shuffle_data: false
 timestep_scheduling: true
+timestepped_optimizer: false
 optimizer: soap
 #optimizer: adamwschedulefree
 rollout_schedule:
 - 1
-- 1
+- 2
 - 2
 - 2
 - 3

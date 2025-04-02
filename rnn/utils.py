@@ -165,6 +165,7 @@ class generator_xy(torch.utils.data.Dataset):
                  output_prune=False,
                  mp_mode=0,
                  include_prev_inputs=False, # include inputs 9,10,11 of the previous time step
+                 include_prev_outputs=False, # include previous TRUE tendencies in inputs as in Hu et al.
                  no_multiprocessing=False,
                  snowhice_fix=True): # 0 = regular outputs, 1 = mp constraint, 2 = pred liq ratio
                  # use_mp_constraint=False):
@@ -185,6 +186,7 @@ class generator_xy(torch.utils.data.Dataset):
         self.rh_prune = rh_prune 
         self.output_prune=output_prune
         self.include_prev_inputs = include_prev_inputs
+        self.include_prev_outputs = include_prev_outputs
         if self.mp_mode==1:
             self.use_mp_constraint = True 
             self.pred_liq_ratio  = False
@@ -249,19 +251,26 @@ class generator_xy(torch.utils.data.Dataset):
             self.ntimesteps = hdf['input_lev'].shape[0]//self.nloc
 
         if self.include_prev_inputs:
-          self.nx = self.nx + 6
-          if not self.separate_timedim:
-            raise NotImplementedError()
+            self.nx = self.nx + 6
+
+        if self.include_prev_outputs:
+            self.nx = self.nx + 5 
+
+        if self.include_prev_inputs or self.include_prev_outputs:
+            self.ntimesteps = self.ntimesteps - 1
+            if not self.separate_timedim: 
+                raise NotImplementedError()
+
 
         print("Data shape: {} for data in {}".format(dims, filepath))
         self.nx_sfc = hdf['input_sca'].shape[-1]
         self.ny = hdf['output_lev'].shape[-1]
         self.ny_sfc = hdf['output_sca'].shape[-1]
         
-        if type(self.filepath)==list:
-            self.ncol = self.num_files * nloc
-        else:
-            self.ncol = nloc
+        # if type(self.filepath)==list:
+        #     self.ncol = self.num_files * nloc
+        # else:
+        self.ncol = nloc
 
         self.cache_loaded = False
         if self.cache:
@@ -381,12 +390,13 @@ class generator_xy(torch.utils.data.Dataset):
         # t0_it = time.time()
         # print("inds ", indices[0:3], "...", indices[-1])
 
-        if self.include_prev_inputs:
+        if self.include_prev_inputs or self.include_prev_outputs:
             if indices[0]>0:
                 inds_prev = indices[0:-1]
                 inds_prev.insert(0,inds_prev[0]-1)
             else:
-                inds_prev = indices[0:-1]
+                raise NotImplementedError("First time index cannot be zero as it's used for memory")
+                # inds_prev = indices[0:-1]
                 # inds_prev.insert(0,inds_prev[0])
         # print(indices, "|||||||||", inds_prev)
           
@@ -395,11 +405,15 @@ class generator_xy(torch.utils.data.Dataset):
             x_sfc_b = self.input_sca[indices,:] 
             y_lev_b = self.output_lev[indices,:]  
             y_sfc_b = self.output_sca[indices,:] 
+
+            if self.include_prev_outputs:
+                prev_outputs = self.output_lev[inds_prev,:,:,:]
+                prev_outputs = prev_outputs[:,:,:,[0,1,2,3,4]]
+
             if self.include_prev_inputs:
                 # prev_inputs = self.input_lev[inds_prev,:,:,[0,1,2,3,4,5]]
                 prev_inputs = self.input_lev[inds_prev,:,:,:]
                 prev_inputs = prev_inputs[:,:,:,[0,1,2,3,4,5]]
-
         else:
             hdf = h5py.File(self.filepath, 'r')
             # hdf = self.hdf
@@ -412,6 +426,10 @@ class generator_xy(torch.utils.data.Dataset):
             # x_sfc_b = hdf['input_sca'][indices[0]:indices[-1]+1,:]
             # y_lev_b = hdf['output_lev'][indices[0]:indices[-1]+1,:]
             # y_sfc_b = hdf['output_sca'][indices[0]:indices[-1]+1,:]
+            if self.include_prev_outputs:
+                prev_outputs = hdf['output_lev'][inds_prev,:,:,:]
+                prev_outputs = prev_outputs[:,:,:,[0,1,2,3,4]]
+
             if self.include_prev_inputs:
                 # prev_inputs = hdf['input_lev'][inds_prev,:,:,[0,1,2,3,4,5]]
                 prev_inputs = hdf['input_lev'][inds_prev]
@@ -425,9 +443,12 @@ class generator_xy(torch.utils.data.Dataset):
 
             hdf.close() 
 
+        if self.include_prev_outputs:
+            x_lev_b = np.concatenate((x_lev_b, prev_outputs),axis=-1)
+
         if self.include_prev_inputs:
-            if indices[0]==0:
-                prev_inputs = np.concatenate((np.zeros_like(prev_inputs[0:1]),prev_inputs),axis=0)
+            # if indices[0]==0:
+            #     prev_inputs = np.concatenate((np.zeros_like(prev_inputs[0:1]),prev_inputs),axis=0)
             x_lev_b = np.concatenate((x_lev_b, prev_inputs),axis=-1)
 
         if self.separate_timedim:
@@ -673,10 +694,14 @@ def chunkize(filelist, chunk_size, shuffle_before_chunking=False, shuffle_after_
 
 
 class BatchSampler(torch.utils.data.Sampler):
-    def __init__(self, num_samples_per_chunk, num_samples, shuffle=False):
+    def __init__(self, num_samples_per_chunk, num_samples, shuffle=False, skip_first=False):
         self.num_samples_per_chunk = num_samples_per_chunk
         self.num_samples = num_samples
-        indices_all = list(range(self.num_samples))
+        self.skip_first = skip_first 
+        if self.skip_first:
+            indices_all = list(range(1,self.num_samples))
+        else:
+            indices_all = list(range(self.num_samples))
         print("Shuffling the indices: {}".format(shuffle))
         self.indices_chunked = chunkize(indices_all,self.num_samples_per_chunk,
                                         shuffle_before_chunking=False,

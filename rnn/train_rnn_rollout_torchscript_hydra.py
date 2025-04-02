@@ -165,7 +165,6 @@ def main(cfg: DictConfig):
     #'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
     
     hf.close()
-    print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
     
     if cfg.v4_to_v5_inputs:
         vars_2D_inp.remove('state_q0002') # liq
@@ -178,7 +177,33 @@ def main(cfg: DictConfig):
         vars_2D_outp.remove('ptend_q0003')
         vars_2D_outp.insert(2,"ptend_qn")
     
+    if cfg.include_prev_outputs:
+        if not cfg.output_norm_per_level:
+            raise NotImplementedError("Only level-specific norm coefficients saved for previous tendency outputs")
+
+        vars_2D_inp.append('state_t_prvphy')
+        vars_2D_inp.append('state_q0001_prvphy')
+        vars_2D_inp.append('state_q0002_prvphy')
+        vars_2D_inp.append('state_q0003_prvphy')
+        vars_2D_inp.append('state_u_prvphy')
+        nx = nx + 5
     
+    if cfg.include_prev_inputs:
+        nx = nx + 6 
+        
+    if cfg.add_refpres:
+        nx = nx + 1
+        
+    # if use_mp_constraint:
+    if cfg.mp_mode==1:
+        ny_pp = ny # The 6 original outputs will be after postprocessing
+        ny = ny - 1 # The model itself only has 5 outputs (total cloud water)
+    else:
+        ny_pp = ny 
+    # ny_pp = ny 
+
+    print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
+
     yscale_sca = output_scale[vars_1D_outp].to_dataarray(dim='features', name='outputs_sca').transpose().values
 
     if cfg.output_norm_per_level:
@@ -254,7 +279,6 @@ def main(cfg: DictConfig):
         xmean_lev = np.concatenate((xmean_lev, xmean_lev[:,0:6]), axis=1)
         xdiv_lev =  np.concatenate((xdiv_lev, xdiv_lev[:,0:6]), axis=1)
                  
-    
     if cfg.add_refpres:
         xmean_lev = np.concatenate((xmean_lev, np.zeros(nlev).reshape(nlev,1)), axis=1)
         xdiv_lev =  np.concatenate((xdiv_lev, np.ones(nlev).reshape(nlev,1)), axis=1)
@@ -285,20 +309,6 @@ def main(cfg: DictConfig):
     xcoeff_sca = np.stack((xmean_sca, xdiv_sca))
     xcoeff_lev = np.stack((xmean_lev, xdiv_lev))
     xcoeffs = np.float32(xcoeff_lev), np.float32(xcoeff_sca)
-    
-    if cfg.include_prev_inputs:
-        nx = nx + 6 
-        
-    if cfg.add_refpres:
-        nx = nx + 1
-        
-    # if use_mp_constraint:
-    if cfg.mp_mode==1:
-        ny_pp = ny # The 6 original outputs will be after postprocessing
-        ny = ny - 1 # The model itself only has 5 outputs (total cloud water)
-    else:
-        ny_pp = ny 
-    # ny_pp = ny 
     
     
     if cfg.add_stochastic_layer:
@@ -433,7 +443,8 @@ def main(cfg: DictConfig):
     train_data = generator_xy(tr_data_path, cache = cfg.cache, nloc = nloc, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
-                    qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, include_prev_inputs=cfg.include_prev_inputs,
+                    qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
+                    include_prev_inputs=cfg.include_prev_inputs, include_prev_outputs=cfg.include_prev_outputs,
                     ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
     
     train_batch_sampler = BatchSampler(cfg.chunksize_train, # samples per chunk 
@@ -769,14 +780,16 @@ def main(cfg: DictConfig):
                     # # print statistics 
                     if j % report_freq == (report_freq-1): # print every 200 minibatches
                         elaps = time.time() - t0_it
-                        running_loss = running_loss / (report_freq/timesteps)
-                        running_energy = running_energy / (report_freq/timesteps)
-                        
+                        fac = report_freq/timesteps
+                        running_loss = running_loss / fac
+                        running_energy = running_energy / fac
+                        running_water = running_water / fac
+
                         r2raw = self.metric_R2.compute()
     
                         #r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
                         if cfg.loss_fn_type == "CRPS": 
-                            running_var = running_var / (report_freq/timesteps)
+                            running_var = running_var / fac
 
                             print("[{:d}, {:d}] Loss: {:.2e} var {:.2e} h-con: {:.2e}  w-con: {:.2e}  runR2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
                                                             j+1, running_loss,running_var, running_energy,running_water, r2raw, elaps, t_comp), flush=True)
