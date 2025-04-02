@@ -467,7 +467,8 @@ def main(cfg: DictConfig):
     val_data = generator_xy(val_data_path, cache=cfg.val_cache, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
-                    qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, include_prev_inputs=cfg.include_prev_inputs,
+                    qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
+                    include_prev_inputs=cfg.include_prev_inputs, include_prev_outputs=cfg.include_prev_outputs,
                     ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
     
     val_batch_sampler = BatchSampler(cfg.chunksize_val, 
