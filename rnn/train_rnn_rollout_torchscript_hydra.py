@@ -190,6 +190,11 @@ def main(cfg: DictConfig):
     
     if cfg.include_prev_inputs:
         nx = nx + 6 
+
+    if cfg.include_prev_inputs or cfg.include_prev_outputs:
+        skip_first_index=True 
+    else:
+        skip_first_index=False
         
     if cfg.add_refpres:
         nx = nx + 1
@@ -449,7 +454,8 @@ def main(cfg: DictConfig):
     
     train_batch_sampler = BatchSampler(cfg.chunksize_train, # samples per chunk 
                                        # num_samples=train_data.ntimesteps*nloc, shuffle=shuffle_data)
-                                       num_samples = train_data.ntimesteps, shuffle = cfg.shuffle_data)
+                                       num_samples = train_data.ntimesteps, shuffle = cfg.shuffle_data, 
+                                       skip_first=skip_first_index)
     
     train_loader = DataLoader(dataset = train_data, num_workers = cfg.num_workers, 
                               sampler = train_batch_sampler, 
@@ -466,7 +472,8 @@ def main(cfg: DictConfig):
     
     val_batch_sampler = BatchSampler(cfg.chunksize_val, 
                                        # num_samples=val_data.ntimesteps*nloc_val, shuffle=shuffle_data)
-                                       num_samples=val_data.ntimesteps, shuffle = cfg.shuffle_data)
+                                       num_samples=val_data.ntimesteps, shuffle = cfg.shuffle_data,
+                                       skip_first=skip_first_index)
     
     val_loader = DataLoader(dataset=val_data, num_workers = cfg.num_workers, 
                               sampler = val_batch_sampler, 
