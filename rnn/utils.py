@@ -187,14 +187,9 @@ class generator_xy(torch.utils.data.Dataset):
         self.output_prune=output_prune
         self.include_prev_inputs = include_prev_inputs
         self.include_prev_outputs = include_prev_outputs
-        if self.mp_mode==1:
+        if self.mp_mode>0:
             self.use_mp_constraint = True 
-            self.pred_liq_ratio  = False
-        elif self.mp_mode==2:
-            self.pred_liq_ratio  = True 
-            self.use_mp_constraint = False 
         else:
-            self.pred_liq_ratio  = False 
             self.use_mp_constraint = False    
         
         self.v4_to_v5_inputs    = v4_to_v5_inputs
@@ -482,7 +477,7 @@ class generator_xy(torch.utils.data.Dataset):
         # print("Runtime load {:.2f}s".format(elaps))
         # t0_it = time.time()
   
-        x_lev_b_denorm = np.copy(x_lev_b[:,:,0:4])
+        x_lev_b_denorm = np.copy(x_lev_b[:,:,0:8])
 
         if self.add_refpres:
             dim0,dim1,dim2 = x_lev_b.shape
@@ -589,36 +584,6 @@ class generator_xy(torch.utils.data.Dataset):
         if self.use_mp_constraint:
             y_lev_b[:,:,2] = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
             y_lev_b = np.delete(y_lev_b, 3, axis=2) 
-        elif self.pred_liq_ratio:
-            # total = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
-            # liq_frac = y_lev_b[:,:,2] / total 
-            # liq_frac[np.isinf(liq_ratio)] = 0 
-            # liq_frac[np.isnan(liq_ratio)] = 0
-            # # print("liq ratio", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
-            
-            qliq_before     = x_lev_b_denorm[:,:,2]
-            qice_before     = x_lev_b_denorm[:,:,3]   
-            qn_before       = qliq_before + qice_before 
-            
-            dqliq = y_lev_b[:,:,2]
-            dqice = y_lev_b[:,:,3]  
-            dqn =  dqliq + dqice
-            
-            qn_new          = qn_before + dqn*1200  
-            qliq_new        = qliq_before + dqliq*1200
-            # qice_new        = qice_before + dqice*1200
-            liq_frac = qliq_new / qn_new
-            liq_frac[np.isinf(liq_frac)] = 0 
-            liq_frac[np.isnan(liq_frac)] = 0
-            liq_frac[liq_frac<0.0] = 0.0
-            liq_frac[liq_frac>1.0] = 1.0
-            
-            liq_frac = liq_frac**(1/16)
-            
-            # print("liq frac", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
-            # print("len", liq_frac.size, "< -0.1 ", liq_frac[liq_frac<-0.1].size, ">1.1 ", liq_frac[liq_frac>1.1].size)
-            y_lev_b[:,:,2] = dqn
-            y_lev_b[:,:,3] = liq_frac 
 
         # elaps = time.time() - t0_it
         # print("Runtime mp {:.2f}s".format(elaps))

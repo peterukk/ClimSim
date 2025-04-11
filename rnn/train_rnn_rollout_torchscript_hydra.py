@@ -31,7 +31,7 @@ device = torch.device("cuda" if cuda else "cpu")
 print(device)
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from models import  MyRNN, LSTM_autoreg_torchscript, SpaceStateModel, LSTM_torchscript, SRNN_autoreg_torchscript, LSTM_autoreg_torchscript_radflux
+from models import  MyRNN, LSTM_autoreg_torchscript, LSTM_torchscript, SRNN_autoreg_torchscript, LSTM_autoreg_torchscript_radflux
 from utils import generator_xy, BatchSampler
 # from metrics import get_energy_metric, get_hybrid_loss, my_mse_flatten
 import metrics as metrics
@@ -60,8 +60,10 @@ def main(cfg: DictConfig):
     # cfg = OmegaConf.load("conf/autoreg_LSTM.yaml")
     
     # mp_mode = 0   # regular 6 outputs
-    # mp_mode = 1   # 5 outputs, pred qn, liq_ratio diagnosed (mp_constraint)
-    # mp_mode = 2   # 6 outputs, pred qn and liq_ratio
+    # mp_mode = 1   # 5 outputs, pred qn, liq_ratio diagnosed from temperature (mp_constraint)
+    # mp_mode = 2   # same as mode=1, but predict only total precipitation PRECC,
+                    # and again diagnose snow based on temperature
+                    
     if cfg.mp_mode>0:
         use_mp_constraint=True
     else:
@@ -195,17 +197,27 @@ def main(cfg: DictConfig):
         skip_first_index=True 
     else:
         skip_first_index=False
+
+    if cfg.swap_true_mem_with_pred_epoch>0:
+        if cfg.include_prev_inputs or cfg.add_refpres:
+            raise NotImplementedError()
+
         
     if cfg.add_refpres:
         nx = nx + 1
         
     # if use_mp_constraint:
-    if cfg.mp_mode==1:
+    if cfg.mp_mode>1:
         ny_pp = ny # The 6 original outputs will be after postprocessing
         ny = ny - 1 # The model itself only has 5 outputs (total cloud water)
     else:
         ny_pp = ny 
-    # ny_pp = ny 
+        
+    if cfg.mp_mode==2:
+        diagnose_precip = True
+    else:
+        diagnose_precip = False
+        
 
     print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
 
@@ -257,12 +269,6 @@ def main(cfg: DictConfig):
 
     weights=None 
     
-    if cfg.mp_mode==2:
-        liq_frac_scale = np.ones(nlev,dtype=np.float32).reshape(nlev,1)
-        liq_frac_scale[:] = 2.4
-        yscale_lev = np.concatenate((yscale_lev[:,0:3], liq_frac_scale, yscale_lev[:,3:]), axis=1)
-    
-            
     ycoeffs = (yscale_lev, yscale_sca)
     print("Y coeff shapes:", yscale_lev.shape, yscale_sca.shape)
     
@@ -353,6 +359,7 @@ def main(cfg: DictConfig):
                         use_memory = cfg.autoregressive,
                         separate_radiation = cfg.separate_radiation,
                         use_ensemble = use_ensemble,
+                        diagnose_precip = diagnose_precip,
                         use_third_rnn = use_third_rnn,
                         concat = cfg.concat,
                         nh_mem = cfg.nh_mem)#,
@@ -402,13 +409,14 @@ def main(cfg: DictConfig):
                     use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem)#,
     else:
-        model = SpaceStateModel(hyam, hybm, 
-                    out_scale = yscale_lev,
-                    out_sfc_scale = yscale_sca,  
-                    nlev=60, nx = nx, nx_sfc=nx_sfc, 
-                    ny = ny, ny_sfc=ny_sfc, 
-                    nneur = cfg.nneur, model_type = cfg.model_type, 
-                    use_initial_mlp = cfg.use_initial_mlp, add_pres=cfg.add_pres,  concat=cfg.concat)
+        print("using SSM")
+        # model = SpaceStateModel(hyam, hybm, 
+        #             out_scale = yscale_lev,
+        #             out_sfc_scale = yscale_sca,  
+        #             nlev=60, nx = nx, nx_sfc=nx_sfc, 
+        #             ny = ny, ny_sfc=ny_sfc, 
+        #             nneur = cfg.nneur, model_type = cfg.model_type, 
+        #             use_initial_mlp = cfg.use_initial_mlp, add_pres=cfg.add_pres,  concat=cfg.concat)
     
     model = model.to(device)
     
@@ -495,7 +503,12 @@ def main(cfg: DictConfig):
     elif cfg.loss_fn_type == "huber":
         loss_fn = det_metrics
     elif cfg.loss_fn_type == "CRPS":
-        loss_fn = metrics.get_CRPS(cfg.beta)
+        if cfg.crps_start_epoch>0: 
+            beta_initial = 500.0
+            loss_fn = metrics.get_CRPS(beta_initial)
+            print("Setting beta to", beta_initial)
+        else:
+            loss_fn = metrics.get_CRPS(cfg.beta)
     else:
         raise NotImplementedError()
         
@@ -552,10 +565,10 @@ def main(cfg: DictConfig):
 
             self.metrics = {}
             
-        def eval_one_epoch(self, optim, epoch, timesteps=1):
+        def eval_one_epoch(self, lossf, optim, epoch, timesteps=1):
             report_freq = self.report_freq
             running_loss = 0.0; running_energy = 0.0; running_water = 0.0
-            running_var=0.0
+            running_var=0.0; running_bias = 0.0
             epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0; epoch_mae = 0.0
             epoch_R2precc = 0.0
             epoch_hcon = 0.0; epoch_wcon = 0.0
@@ -644,10 +657,11 @@ def main(cfg: DictConfig):
                             
                         with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=cfg.mp_autocast):
                             
-                            loss = loss_fn(targets_lay, targets_sfc, preds_lay, preds_sfc)
                             if cfg.loss_fn_type == "CRPS":
-                                loss, det_skill, ens_var = loss 
+                                loss = lossf(targets_lay, targets_sfc, preds_lay, preds_sfc, timesteps)
+                                loss, det_skill, ens_var = loss
                             else:
+                                loss = lossf(targets_lay, targets_sfc, preds_lay, preds_sfc)
                                 huber, mse, mae = loss 
                                 if cfg.loss_fn_type == "huber":
                                     loss = huber
@@ -681,16 +695,23 @@ def main(cfg: DictConfig):
 
                             h_con = metric_h_con(yto_lay, ypo_lay, surf_pres_denorm)
 
-                            water_con_p     = metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf)
-                            water_con_t     = metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf)
+                            water_con_p     = metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw)
+                            water_con_t     = metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw) #,printdebug=True)
                             water_con       = torch.mean(torch.square(water_con_p - water_con_t))
                             del water_con_p, water_con_t
                             
+                            # if cfg.use_bias_loss:
+                            raw_bias_lev, raw_bias_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc )
+                            raw_bias_lev = torch.nanmean(raw_bias_lev)
+                            if cfg.use_bias_loss:
+                                loss = loss + cfg.w_bias*raw_bias_lev
+                            del raw_bias_sfc
+                                
                             if cfg.use_energy_loss: 
-                                loss = loss + cfg._lambda*h_con
+                                loss = loss + cfg.w_hcon*h_con
 
                             if cfg.use_water_loss:
-                                loss = loss + cfg._alpha * water_con
+                                loss = loss + cfg.w_wcon * water_con
                                 
                         if self.train:
                             if cfg.use_scaler:
@@ -716,6 +737,7 @@ def main(cfg: DictConfig):
                         running_loss    += loss.item()
                         running_energy  += h_con.item()
                         running_water   += water_con.item()
+                        running_bias    += raw_bias_lev.item() 
                         if cfg.loss_fn_type == "CRPS": running_var += ens_var.item() 
                         #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
                         if j>loss_update_start_index:
@@ -745,7 +767,7 @@ def main(cfg: DictConfig):
                                 # print("water con loss", water_con_loss)
                                 # print("pred con", water_con, "true con", water_con_true)
 
-                                biases_lev, biases_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc)
+                                biases_lev, biases_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc, numpy=True)
                                 epoch_bias_lev += np.mean(biases_lev)
                                 epoch_bias_heating += biases_lev[0]
                                 epoch_bias_clw += biases_lev[2]
@@ -761,7 +783,9 @@ def main(cfg: DictConfig):
 
                                 self.metric_R2.update(ypo_lay.reshape((-1,ny_pp)), yto_lay.reshape((-1,ny_pp)))
                                        
-                                r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
+                                prec_pred = ypo_sfc.reshape(-1,ny_sfc)[:,3].cpu().numpy()
+                                prec_true = yto_sfc.reshape(-1,ny_sfc)[:,3].cpu().numpy()
+                                r2_np = np.corrcoef((prec_pred,prec_true))[0,1]
                                 epoch_R2precc += r2_np
                                 #print("R2 numpy", r2_np, "R2 torch", self.metric_R2_precc(ypo_sfc[:,3:4], yto_sfc[:,3:4]) )
     
@@ -783,6 +807,8 @@ def main(cfg: DictConfig):
                             x_lay_raw = []; yto_lay = []; yto_sfc = []
                             x_sfc = []
                             rnn1_mem = rnn1_mem.detach()
+                            if cfg.swap_true_mem_with_pred_epoch>0:
+                                prev_pred = prev_pred.detach()
                             
                     t_comp += time.time() - tcomp0
                     # # print statistics 
@@ -792,6 +818,7 @@ def main(cfg: DictConfig):
                         running_loss = running_loss / fac
                         running_energy = running_energy / fac
                         running_water = running_water / fac
+                        running_bias = running_bias / fac
 
                         r2raw = self.metric_R2.compute()
     
@@ -799,14 +826,15 @@ def main(cfg: DictConfig):
                         if cfg.loss_fn_type == "CRPS": 
                             running_var = running_var / fac
 
-                            print("[{:d}, {:d}] Loss: {:.2e} var {:.2e} h-con: {:.2e}  w-con: {:.2e}  runR2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
-                                                            j+1, running_loss,running_var, running_energy,running_water, r2raw, elaps, t_comp), flush=True)
+                            print("[{:d}, {:d}] Loss: {:.2e} var {:.2e} h-con: {:.2e}  w-con: {:.2e}  MBE: {:.2e}  R2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
+                                                            j+1, running_loss,running_var, running_energy,running_water, running_bias,r2raw, elaps, t_comp), flush=True)
                             running_var = 0.0
                         else:
-                            print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  runR2: {:.2f},  elapsed {:.1f}s (compute {:.1f})" .format(epoch + 1, 
-                                                            j+1, running_loss,running_energy,running_water, r2raw, elaps, t_comp), flush=True)
+                            print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  MBE: {:.2e}  R2: {:.2f},  took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
+                                                            j+1, running_loss,running_energy,running_water,running_bias, r2raw, elaps, t_comp), flush=True)
                         running_loss = 0.0
                         running_energy = 0.0; running_water=0.0
+                        running_bias = 0.0
                         t0_it = time.time()
                         t_comp = 0
                     j += 1
@@ -933,9 +961,25 @@ def main(cfg: DictConfig):
             else:
                 raise NotImplementedError()
 
+        if cfg.loss_fn_type == "CRPS" and cfg.crps_start_epoch>0 and (epoch==cfg.crps_start_epoch):
+            print("Decreasing beta to  ", cfg.beta, "and resetting optimizer")
+            loss_fn = metrics.get_CRPS(cfg.beta) 
+            if cfg.optimizer == "adam":
+                optimizer = torch.optim.Adam(model.parameters(), lr = cfg.lr)
+            elif cfg.optimizer == "adamw":
+                optimizer = torch.optim.AdamW(model.parameters(), lr = cfg.lr)
+            elif cfg.optimizer == "adamwschedulefree":
+                import schedulefree
+                optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=cfg.lr)
+            elif cfg.optimizer == "soap":
+                from soap import SOAP
+                optimizer = SOAP(model.parameters(), lr = cfg.lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
+            else:
+                raise NotImplementedError()
+
         tsteps_old = timesteps
 
-        train_runner.eval_one_epoch(optimizer, epoch, timesteps)
+        train_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps)
 
         if train_runner.loader.dataset.cache:
             train_runner.loader.dataset.cache_loaded = True
@@ -958,7 +1002,7 @@ def main(cfg: DictConfig):
         
         if epoch%2:
             print("VALIDATION..")
-            val_runner.eval_one_epoch(optimizer, epoch, timesteps)
+            val_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps)
             if val_runner.loader.dataset.cache:
                 val_runner.loader.dataset.cache_loaded = True
 

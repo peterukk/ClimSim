@@ -66,7 +66,7 @@ def compute_biases(y_true_lev, y_pred_lev):
     return biases_nolev.detach().cpu().numpy(), biases_perlev.detach().cpu().numpy()
 
 
-def compute_absolute_biases(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
+def compute_absolute_biases(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, numpy=False):
     # 1) Mean across batches
     mean_t_lev  = torch.nanmean(y_true_lev,dim=(0))
     mean_p_lev  = torch.nanmean(y_pred_lev,dim=(0))
@@ -81,7 +81,10 @@ def compute_absolute_biases(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
     # 4) Mean again across levels / features as needed to distill into scalar metric
     biases_lev = torch.nanmean(biases_lev, dim=(0)) 
     
-    return biases_lev.detach().cpu().numpy(), biases_sfc.detach().cpu().numpy()
+    if numpy:
+        return biases_lev.detach().cpu().numpy(), biases_sfc.detach().cpu().numpy()
+    else:
+        return biases_lev, biases_sfc
 
 
 
@@ -204,33 +207,47 @@ def get_energy_metric(hyai, hybi):
 def mse(y_true, y_pred):
     mse = torch.mean(torch.square(y_pred- y_true))
     return mse
-
+    
 def get_water_conservation(hyai, hybi):
-    def wc(pred_lev, pred_sfc, sp, LHF):
+    def wc(pred_lev, pred_sfc, sp, LHF, xlay, printdebug=False): #, xlay, printdebug=False):
         Lv = torch.tensor(2.5104e6)
-        precip = (pred_sfc[:,2] + pred_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
+        # precip = (pred_sfc[:,2] + pred_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
+        precip = (pred_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
+
         one_over_grav = torch.tensor(0.1020408163) # 1/9.8
         thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
-                        + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
-
-        # pressure_grid_p1 = 1e5 * hyai.reshape(1,-1) # (1, 61)
-        # pressure_grid_p2 = hybi.reshape(1,-1) * sp # (batch_size, 61)
-        # pressure_grid = pressure_grid_p1 + pressure_grid_p2 # (batch_size, 61)
-        # dp = pressure_grid[:,1:] - pressure_grid[:,:-1] # (batch_size, 60)
-        # thick2 = one_over_grav * dp 
+            + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
 
         qv = pred_lev[:,:,1]
         ql = pred_lev[:,:,2]
         qi = pred_lev[:,:,3]
-
-        lhs = torch.sum(thick*(qv + ql + qi),1)
+        dp_water = thick*(qv + ql + qi)
+        lhs = torch.sum(dp_water,1)
         rhs = LHF / Lv - precip
-        # print("lhs", lhs[100].item(), "rhs", rhs[100].item(), "precip", precip[100].item())
+        if printdebug: 
+            total_water_dyn = torch.sum(thick*xlay[:,:,7],1)
+            # print("mean fac2", torch.mean(lhs[precip>0.0] / precip[precip>0.0]).item(), "std fac", torch.std(lhs[precip>0.0]/precip[precip>0.0]).item())
+            # print("fac precip / lhs", torch.nanmean(precip/lhs).item(), "fac rhs / lhs", torch.nanmean(rhs/lhs).item())
+
+            # print("rhs", torch.mean(rhs).item(), "precip ", torch.mean(precip).item(), "lhs = dp_waterwater ", torch.mean(lhs).item())
+            print("rhs", torch.mean(rhs).item(), "rhs with dyn", torch.mean(rhs + total_water_dyn).item(), "LHF/lv", torch.mean(LHF/Lv).item(), "P ", torch.mean(precip).item(), "LHF/Lv + P", torch.mean(LHF/Lv+precip).item())
+            print("lhs", torch.mean(lhs).item(), "lhs with dyn", torch.mean(lhs-total_water_dyn).item())
+
+            print("mean fac ", torch.nanmean((lhs) / rhs).item())
+            print("mean fac with dyn", torch.nanmean((lhs) / (rhs+total_water_dyn)).item(), "std", torch.std((lhs) / (rhs+total_water_dyn)).item())
+
+            # print("fac", lhs[100].item()/rhs[100].item(), "lhs", lhs[100].item(), "rhs", rhs[100].item(), 
+            #       "rhs1", LHF[100].item()/Lv.item(), "precip", precip[100].item(), "lfh", LHF[100].item(), "qdyn", total_water_dyn[100].item())
+            # print("fac with dyn",(lhs[100].item() -total_water_dyn[100].item()  ) /rhs[100].item() )
+            # if precip[100].item()>1e-8:
+            #     print("fac without LHF", lhs[100].item()/(-precip[100]).item())
         # print( "sp", sp[100].item(), "thick[30]", thick[100,30], "thick2", thick2[100,30])
         # diff = torch.mean(lhs - rhs)
         diff = lhs - rhs
+        # print("diff mean", torch.mean(diff).item(), "diff2 mean", torch.mean(rhs-lhs).item())
         return diff 
     return wc
+
 
 # def water_conservation(pred_lev, pred_sfc):
 
@@ -259,7 +276,7 @@ def get_hybrid_loss(_lambda):
         return my_hybrid_loss(mse, energy, _lambda)
     return hybrid_loss
 
-def CRPS(y, y_sfc, y_pred, y_sfc_pred, beta=1, return_low_var_inds=False):
+def CRPS(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, return_low_var_inds=False):
     """
     Calculate Continuous Ranked Probability Score.
 
@@ -291,16 +308,23 @@ def CRPS(y, y_sfc, y_pred, y_sfc_pred, beta=1, return_low_var_inds=False):
     #     y = torch.reshape(y, (batch_size_new, 1, seq_size*feature_size))
     #     # print("shape ypred", y_pred.shape, "y true", y.shape)
     # else:
-        
-    batch_size,seq_size,feature_size = y.shape
-    ens_size = y_pred.shape[0] // batch_size           # seq_size*feature_size
-    y_pred = torch.reshape(y_pred, (ens_size, batch_size, -1))
-    # NEW: ADD SFC
-    y_sfc_pred = torch.reshape(y_sfc_pred, (ens_size, batch_size, -1))
+    # y: ntime*nbatch,      nseq, ny 
+    # yp: ntime*nbatch*nens, nseq, ny 
+    ns,seq_size,feature_size = y.shape
+    batch_size = ns // timesteps
+    ens_size = y_pred.shape[0] // (timesteps*batch_size)          
+    # y_pred = torch.reshape(y_pred, (ens_size, batch_size, -1))
+    y_pred = torch.reshape(y_pred, (timesteps, ens_size, batch_size, seq_size*feature_size))
+    y_pred = torch.transpose(y_pred, 1, 2) # time, batch, ens, seq_size*feature_size))
+    y_pred = torch.reshape(y_pred, (timesteps*batch_size, ens_size, seq_size*feature_size))
+
+    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps, ens_size, batch_size, -1))
+    y_sfc_pred = torch.transpose(y_sfc_pred, 1, 2) # time, batch, ens, nx_sfc))
+    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps*batch_size, ens_size, -1))
     y_pred = torch.cat((y_pred, y_sfc_pred), axis=-1)
-    y_pred = torch.transpose(y_pred, 0, 1) # batch_size, ens_size, nlev*ny
-    y_sfc = torch.reshape(y_sfc,(batch_size,1,-1))
-    y = torch.reshape(y, (batch_size, 1, -1))
+
+    y = torch.reshape(y, (timesteps*batch_size, 1, seq_size*feature_size))
+    y_sfc = torch.reshape(y_sfc, (timesteps*batch_size, 1, -1))
     y = torch.cat((y, y_sfc),axis=-1)
 
     # cdist
@@ -337,6 +361,6 @@ def CRPS(y, y_sfc, y_pred, y_sfc_pred, beta=1, return_low_var_inds=False):
         return CRPS, MAE, ens_var
 
 def get_CRPS(beta): 
-    def customCRPS(y_true, y_true_sfc, y_pred, y_pred_sfc):
-        return CRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, beta)
+    def customCRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps):
+        return CRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, beta)
     return customCRPS
