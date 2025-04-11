@@ -742,45 +742,45 @@ class LSTM_autoreg_torchscript(nn.Module):
             # rad predicts everything except PRECSC, PRECC
             out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
             
-        # if self.diagnose_precip: 
-        dT_precip = out[:,:,5]
-        dqv_precip = out[:,:,6]
-        dqn_precip = out[:,:,7]
-        
-        dT_precip = -self.relu(dT_precip) # force negative
-        dqv_precip = self.relu(dqv_precip) # force positive
-        dqn_precip = -self.relu(dqn_precip) # force negative
-        
-        #  out: ['ptend_t', 'ptend_q0001', 'ptend_qn', 'ptend_u', 'ptend_v']
-        out[:,:,0] = out[:,:,0] + dT_precip 
-        out[:,:,1] = out[:,:,1] + dqv_precip
-        out[:,:,2] = out[:,:,2] + dqn_precip
-        out = out[:,:,0:5]
-        
-        # reverse norm
-        dqv_precip      = dqv_precip / self.yscale_lev[:,1]
-        dqn_precip      = dqn_precip / self.yscale_lev[:,2]
+        if self.diagnose_precip: 
+          dT_precip = out[:,:,5]
+          dqv_precip = out[:,:,6]
+          dqn_precip = out[:,:,7]
+          
+          dT_precip = -self.relu(dT_precip) # force negative
+          dqv_precip = self.relu(dqv_precip) # force positive
+          dqn_precip = -self.relu(dqn_precip) # force negative
+          
+          #  out: ['ptend_t', 'ptend_q0001', 'ptend_qn', 'ptend_u', 'ptend_v']
+          out[:,:,0] = out[:,:,0] + dT_precip 
+          out[:,:,1] = out[:,:,1] + dqv_precip
+          out[:,:,2] = out[:,:,2] + dqn_precip
+          out = out[:,:,0:5]
+          
+          # reverse norm
+          dqv_precip      = dqv_precip / self.yscale_lev[:,1]
+          dqn_precip      = dqn_precip / self.yscale_lev[:,2]
 
-        one_over_grav = torch.tensor(0.1020408163) # 1/9.8
-        thick= one_over_grav*(torch.reshape(sp,(-1,1)) * (self.hybi[1:61].view(1,-1)-self.hybi[0:60].view(1,-1)) 
-                        + torch.tensor(100000)*(self.hyai[1:61].view(1,-1)-self.hyai[0:60].view(1,-1)))
-        # print("shape sp", sp.shape, "shape thick", thick.shape)
-        precc = thick*(dqv_precip + dqn_precip)
-        precc = -torch.sum(precc,1).unsqueeze(1)
-        # temp_sfc_before = inputs_main[:,-1,0]
-        # temp_sfc = temp_sfc  + (out[:,-1,0]/self.yscale_lev[-1,0])*1200
-        temp_sfc = (inputs_main[:,-1,0:1]*self.xdiv_lev[-1,0:1]) + self.xmean_lev[-1,0:1]
-        snowfrac = self.temperature_scaling_precip(temp_sfc)
-        precsc = snowfrac*precc
-        # apply norm
-        # print("dTp", torch.sum(dT_precip,1)[1].item(), "dqv", torch.sum(dqv_precip,1)[1].item(), "dqn_precip", torch.sum(dqn_precip,1)[1].item() )
-        # print("precc 1", precc[1].item(), "precsc", precsc[1].item())
+          one_over_grav = torch.tensor(0.1020408163) # 1/9.8
+          thick= one_over_grav*(torch.reshape(sp,(-1,1)) * (self.hybi[1:61].view(1,-1)-self.hybi[0:60].view(1,-1)) 
+                          + torch.tensor(100000)*(self.hyai[1:61].view(1,-1)-self.hyai[0:60].view(1,-1)))
+          # print("shape sp", sp.shape, "shape thick", thick.shape)
+          precc = thick*(dqv_precip + dqn_precip)
+          precc = -torch.sum(precc,1).unsqueeze(1)
+          # temp_sfc_before = inputs_main[:,-1,0]
+          # temp_sfc = temp_sfc  + (out[:,-1,0]/self.yscale_lev[-1,0])*1200
+          temp_sfc = (inputs_main[:,-1,0:1]*self.xdiv_lev[-1,0:1]) + self.xmean_lev[-1,0:1]
+          snowfrac = self.temperature_scaling_precip(temp_sfc)
+          precsc = snowfrac*precc
+          # apply norm
+          # print("dTp", torch.sum(dT_precip,1)[1].item(), "dqv", torch.sum(dqv_precip,1)[1].item(), "dqn_precip", torch.sum(dqn_precip,1)[1].item() )
+          # print("precc 1", precc[1].item(), "precsc", precsc[1].item())
 
-        precsc  = precsc * self.yscale_sca[2]
-        precc   = precc * self.yscale_sca[3]
-        # print("normed precc 1", precc[1].item(), "precsc", precsc[1].item())
+          precsc  = precsc * self.yscale_sca[2]
+          precc   = precc * self.yscale_sca[3]
+          # print("normed precc 1", precc[1].item(), "precsc", precsc[1].item())
 
-        out_sfc =  torch.cat((out_sfc[:,0:2], precsc, precc, out_sfc[:,2:]),dim=1)
+          out_sfc =  torch.cat((out_sfc[:,0:2], precsc, precc, out_sfc[:,2:]),dim=1)
 
         # else:
         out_sfc = self.relu(out_sfc)
