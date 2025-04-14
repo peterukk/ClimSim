@@ -207,7 +207,7 @@ def main(cfg: DictConfig):
         nx = nx + 1
         
     # if use_mp_constraint:
-    if cfg.mp_mode>1:
+    if cfg.mp_mode>0:
         ny_pp = ny # The 6 original outputs will be after postprocessing
         ny = ny - 1 # The model itself only has 5 outputs (total cloud water)
     else:

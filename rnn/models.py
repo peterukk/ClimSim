@@ -431,14 +431,6 @@ class LSTM_autoreg_torchscript(nn.Module):
             else:
                 self.rnn2 = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
 
-        # if self.add_stochastic_layer:
-        #     nx_srnn = self.nh_rnn2
-        #     nh_srnn = self.nh_rnn2
-        #     nx_srnn = self.nh_mem
-        #     nh_srnn = self.nh_mem         
-        #     # self.rnn_stochastic = StochasticGRUCell(nx_srnn, self.nh_rnn2)  # (input_size, hidden_size)
-        #     self.rnn_stochastic = MyStochasticGRULayer(nx_srnn, nh_srnn)  # (input_size, hidden_size)
-            
         if self.concat: 
             nh_rnn = self.nh_rnn1 + self.nh_rnn2
         else:
@@ -467,18 +459,6 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.mlp_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_rad)
             print("nx rnn1", self.nx_rnn1, "nh rnn1", self.nh_rnn1)
 
-    # def reset_states(self):
-    #     self.rnn1_mem = None
-
-    # def detach_states(self):
-    #     self.rnn1_mem = self.rnn1_mem.detach()
-   
-    # def get_states(self):
-    #     return self.rnn1_mem.detach()
-
-    # def set_states(self, states):
-    #     self.rnn1_mem = states 
-        
     def temperature_scaling(self, T_raw):
         # T_denorm = T = T*(self.xmax_lev[:,0] - self.xmin_lev[:,0]) + self.xmean_lev[:,0]
         # T_denorm = T*(self.xcoeff_lev[2,:,0] - self.xcoeff_lev[1,:,0]) + self.xcoeff_lev[0,:,0]
