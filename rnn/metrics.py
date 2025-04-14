@@ -248,10 +248,31 @@ def get_water_conservation(hyai, hybi):
         return diff 
     return wc
 
+def get_dprec_ddlwp(hyai, hybi):
+    def metric(pred_lev, pred_sfc, true_lev, true_sfc, sp):
+        # precip = (pred_sfc[:,2] + pred_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
+        precip_pred = (pred_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
+        precip_true = (true_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
 
-# def water_conservation(pred_lev, pred_sfc):
+        one_over_grav = torch.tensor(0.1020408163) # 1/9.8
+        thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
+            + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
+        
+        water_pred = pred_lev[:,:,1] + pred_lev[:,:,2] +  pred_lev[:,:,3]
+        lwp_pred = torch.sum(thick*(water_pred),1)
+        
+        water_true = true_lev[:,:,1] + true_lev[:,:,2] +  true_lev[:,:,3]
+        lwp_true = torch.sum(thick*(water_true),1)
+        
+        dprec_dlwp_pred = precip_pred / lwp_pred
+        dprec_dlwp_pred = torch.sqrt(torch.sqrt(torch.sqrt(dprec_dlwp_pred)))
+        dprec_dlwp_true = precip_true / lwp_true
+        dprec_dlwp_true = torch.sqrt(torch.sqrt(torch.sqrt(dprec_dlwp_true)))
+        
+        diff = torch.nanmean(torch.abs(dprec_dlwp_true - dprec_dlwp_pred))
 
-
+        return diff 
+    return metric
 
 
 # def loss_con(y_true_norm, y_pred_norm, y_true, y_pred, sp, _lambda):

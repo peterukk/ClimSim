@@ -7,7 +7,6 @@ val_data_fname: data_v4_rnn_nonorm_year8_nocompress_chunk3.h5
 tr_data_dir: "/local/scratch/ukkonenp/"
 val_data_dir: "/local/scratch/ukkonenp/"
 
-
 # cache option: during the first epoch, as the data is loaded it is put in shared (RAM) memory, 
 # from which it is loaded in subsequent epochs
 # this allows to use multiple workers and fast RAM memory without copying the data to each worker, 
@@ -15,31 +14,33 @@ val_data_dir: "/local/scratch/ukkonenp/"
 # to put the data in memory assuming multiple workers and prefetching is used
 cache: false
 val_cache: false 
-num_workers: 6
-chunksize_train: 42
+num_workers: 4
+chunksize_train: 24
 chunksize_val: 14
 
 autoregressive: true
-mp_mode: 1
+mp_mode: 2
 input_norm_per_level: true
 output_norm_per_level: true
 new_nolev_scaling: false
 # loss_fn_type: mse
 loss_fn_type: huber
 use_energy_loss: false
-# _lambda: 1.0e-05
-_lambda: 5.0e-06
+# w_hcon: 1.0e-05
+w_hcon: 5.0e-06
 # input_norm_per_level: false
 # output_norm_per_level: false
 use_water_loss: false
-_alpha: 2.0e7
+w_wcon: 3.0e7
+use_bias_loss: false
+w_bias: 1.0e5
 output_prune: true
 qinput_prune: true
 rh_prune: true
 remove_past_sfc_inputs: true
 v4_to_v5_inputs: false
 include_prev_inputs: false
-include_prev_outputs: true
+include_prev_outputs: false
 snowhice_fix: true
 
 nh_mem: 16
@@ -50,7 +51,7 @@ nneur:
 add_pres: true
 add_refpres: false
 add_stochastic_layer: false
-use_initial_mlp: false
+use_initial_mlp: true
 use_intermediate_mlp: true
 memory: Hidden
 model_type: LSTM
@@ -61,22 +62,22 @@ save_model: true
 use_wandb: true
 num_epochs: 30
 lr: 0.001
+timestepped_optimizer: false
 mp_autocast: true
 use_scaler: true
 shuffle_data: false
 timestep_scheduling: true
-timestepped_optimizer: false
 optimizer: soap
 #optimizer: adamwschedulefree
 rollout_schedule:
 - 1
 - 2
 - 2
-- 2
+- 3
+- 3
 - 3
 - 3
 - 4
 - 4
-- 5
-- 5
-
+- 4
+swap_true_mem_with_pred_epoch: 0
