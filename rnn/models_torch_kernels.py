@@ -16,7 +16,7 @@ import numpy as np
 import numbers
 import warnings
 from collections import namedtuple
-from typing import List, Tuple, Final
+from typing import List, Tuple, Final, Optional
 import torch.jit as jit
 from torch import Tensor
 
@@ -76,7 +76,7 @@ class MyStochasticGRU(nn.Module):
             # print(i)
             x = x_seq[i]
             # print("x shape", x.shape, "hidden shape", hidden.shape)
-            inp = torch.cat((x,hidden), axis=1)
+            inp = torch.cat((x,hidden), dim=1)
             mean_ = self.encoder_mlp_mean(inp)
             logvar_ = self.encoder_mlp_sigma(inp)
             
@@ -150,10 +150,10 @@ class MyStochasticGRULayer(jit.ScriptModule):
     def forward(
         self, input_seq: Tensor, hidden: Tensor) -> Tensor: #Tuple[Tensor, Tensor]:
         
-        nlev, batch_size, nx = input_seq.shape
+        nseq, batch_size, nx = input_seq.shape
 
         # epss = torch.randn_like(input_seq)
-        epss = torch.randn((nlev, batch_size, self.hidden_size),device=input_seq.device)
+        epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device)
         epss = epss.unbind(0)
         
         inputs = input_seq.unbind(0)
@@ -234,10 +234,10 @@ class MyStochasticGRULayer2(jit.ScriptModule):
     def forward(
         self, input_seq: Tensor, hidden: Tensor) -> Tensor: #Tuple[Tensor, Tensor]:
         
-        nlev, batch_size, nx = input_seq.shape
+        nseq, batch_size, nx = input_seq.shape
 
         # epss = torch.randn_like(input_seq)
-        epss = torch.randn((nlev, batch_size, self.hidden_size),device=input_seq.device)
+        epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device)
         epss = epss.unbind(0)
         
         inputs = input_seq.unbind(0)
@@ -312,8 +312,8 @@ class MyStochasticLSTMLayer(jit.ScriptModule):
     def forward(
         self, input_seq: Tensor, state: Tuple[Tensor, Tensor]
     ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
-        nlev, batch_size, nx = input_seq.shape
-        epss = torch.randn((nlev, batch_size, self.hidden_size),device=input_seq.device)
+        nseq, batch_size, nx = input_seq.shape
+        epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device)
         epss = epss.unbind(0)
         inputs = input_seq.unbind(0)
         outputs = torch.jit.annotate(List[Tensor], [])
@@ -365,19 +365,19 @@ class MyStochasticLSTMLayer(jit.ScriptModule):
     
 class GLU(nn.Module):
     """ The static nonlinearity used in the S4 paper"""
-    def __init__(self,  nlay, nneur, layernorm=True, dropout=0, expand_factor=2):
+    def __init__(self,  nseq, nneur, layernorm=True, dropout=0, expand_factor=2):
         super(GLU, self).__init__()
         self.activation = nn.GELU()
-        self.nlay = nlay
+        self.nseq = nseq
         self.nneur = nneur
         self.layernorm = layernorm
         self.expand_factor=expand_factor
 
         if self.layernorm:
-            self.normalization = nn.LayerNorm((self.nlay,self.nneur))
+            self.normalization = nn.LayerNorm((self.nseq,self.nneur))
 
         if self.layernorm:
-            self.normalization = nn.LayerNorm((self.nlay,self.nneur))
+            self.normalization = nn.LayerNorm((self.nseq,self.nneur))
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.output_linear = nn.Sequential(
             nn.Linear(nneur, self.expand_factor * nneur),#nn.Conv1d(config.d_model, 2 * config.d_model, kernel_size=1),
@@ -462,6 +462,9 @@ class QRNNLayer(nn.Module):
     
 
 class QRNNLayer_noncausal(nn.Module):
+    fastconv: Final[bool]
+    use_padding: Final[bool]
+    
     def __init__(self, input_size: int, hidden_size: int, kernel_size: int, 
                  mode: str = "f",  pad="same"):
         super(QRNNLayer_noncausal, self).__init__()
@@ -472,7 +475,7 @@ class QRNNLayer_noncausal(nn.Module):
         self.mode = mode
         
         self.fastconv = False
-
+        # print("QRNN nx", input_size, "nh", hidden_size)
         # self.pad = nn.ConstantPad1d((self.kernel_size-1, 0), value=0.0)
         # pad = (0,1)
         if type(pad) == tuple:
@@ -489,12 +492,13 @@ class QRNNLayer_noncausal(nn.Module):
             self.z_conv = nn.Conv1d(input_size, hidden_size, kernel_size, padding=pad)
             self.f_conv = nn.Conv1d(input_size, hidden_size, kernel_size, padding=pad)
             
-        if self.mode == "fo" or self.mode == "ifo":
-            self.o_conv = nn.Conv1d(input_size, hidden_size, kernel_size, padding=pad)
+        # if self.mode == "fo" or self.mode == "ifo":
+        #     self.o_conv = nn.Conv1d(input_size, hidden_size, kernel_size, padding=pad)
 
-        if self.mode == "ifo":
-            self.i_conv = nn.Conv1d(input_size, hidden_size, kernel_size, padding=pad)
+        # if self.mode == "ifo":
+        #     self.i_conv = nn.Conv1d(input_size, hidden_size, kernel_size, padding=pad)
             
+        self.logsigmoid = nn.LogSigmoid()
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -504,16 +508,17 @@ class QRNNLayer_noncausal(nn.Module):
             
     # @jit.script_method
     @torch.compile
-    def forward(self, inputs, init_state):
+    def forward(self, inputs:Tensor, init_state:Optional[Tuple[Tensor, Tensor]]):
         # inputs = shape: [batch x timesteps x features]
         batch, timesteps, _ = inputs.shape
-        
+        # print("qrn inputs shape 0", inputs.shape)
+
         # Apply convolutions
         # if init_state is None:
         #     inputs = inputs.transpose(1, 2)
         # else:
         #     init_state = torch.unsqueeze(init_state,1)
-        #     inputs = torch.cat((init_state, inputs), axis=1)
+        #     inputs = torch.cat((init_state, inputs), dim=1)
         #     inputs = inputs.transpose(1, 2)
         inputs = inputs.transpose(1, 2)
         
@@ -524,30 +529,31 @@ class QRNNLayer_noncausal(nn.Module):
         if self.fastconv:
             inputs = inputs.to(torch.bfloat16)
         
+        # print("qrn inputs shape", inputs.shape)
         raw_f = self.f_conv(inputs).transpose(1, 2)
         raw_z = self.z_conv(inputs).transpose(1, 2)
         
         if init_state is not None:
             init_state1 = torch.unsqueeze(init_state[0],1)
             init_state2 = torch.unsqueeze(init_state[1],1)
-            raw_f = torch.cat((init_state1, raw_f), axis=1)
-            raw_z = torch.cat((init_state2, raw_z), axis=1)
+            raw_f = torch.cat((init_state1, raw_f), dim=1)
+            raw_z = torch.cat((init_state2, raw_z), dim=1)
             
             
         # print("shape raw_f", raw_f.shape)
         
-        if self.mode == "ifo":
-            raw_i = self.i_conv(inputs).transpose(1, 2)
-            log_one_minus_f = F.logsigmoid(raw_i)
-        else:
-            log_one_minus_f = F.logsigmoid(-raw_f)
+        # if self.mode == "ifo":
+        #     raw_i = self.i_conv(inputs).transpose(1, 2)
+        #     log_one_minus_f = self.logsigmoid(raw_i)
+        # else:
+        log_one_minus_f = self.logsigmoid(-raw_f)
         
         # Get log values of activations
         if self.fastconv:
             raw_z = raw_z.to(torch.float32)
             raw_f = raw_f.to(torch.float32)
-        log_z = F.logsigmoid(raw_z)  # Use sigmoid activation
-        log_f = F.logsigmoid(raw_f)
+        log_z = self.logsigmoid(raw_z)  # Use sigmoid activation
+        log_f = self.logsigmoid(raw_f)
     
         # Precalculate recurrent gate values by reverse cumsum
         # recurrent_gates = log_f[:, 1:, :]
@@ -569,9 +575,9 @@ class QRNNLayer_noncausal(nn.Module):
         hidden = torch.exp(log_hidden - recurrent_gates)
 
         # Optionally multiply by output gate
-        if self.mode == "fo" or self.mode == "ifo":
-            o = torch.sigmoid(self.o_conv(inputs)).transpose(1, 2)
-            hidden = hidden * o
+        # if self.mode == "fo" or self.mode == "ifo":
+        #     o = torch.sigmoid(self.o_conv(inputs)).transpose(1, 2)
+        #     hidden = hidden * o
         
         return hidden
     

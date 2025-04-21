@@ -31,7 +31,7 @@ device = torch.device("cuda" if cuda else "cpu")
 print(device)
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from models import  MyRNN, LSTM_autoreg_torchscript, LSTM_torchscript, SRNN_autoreg_torchscript, LSTM_autoreg_torchscript_radflux
+from models import  MyRNN, LSTM_autoreg_torchscript, LSTM_torchscript, SRNN_autoreg_torchscript, LSTM_autoreg_torchscript_radflux, SpaceStateModel_autoreg
 from utils import generator_xy, BatchSampler
 # from metrics import get_energy_metric, get_hybrid_loss, my_mse_flatten
 import metrics as metrics
@@ -198,11 +198,6 @@ def main(cfg: DictConfig):
     else:
         skip_first_index=False
 
-    if cfg.swap_true_mem_with_pred_epoch>0:
-        if cfg.include_prev_inputs or cfg.add_refpres:
-            raise NotImplementedError()
-
-        
     if cfg.add_refpres:
         nx = nx + 1
         
@@ -409,14 +404,22 @@ def main(cfg: DictConfig):
                     use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem)#,
     else:
-        print("using SSM")
-        # model = SpaceStateModel(hyam, hybm, 
-        #             out_scale = yscale_lev,
-        #             out_sfc_scale = yscale_sca,  
-        #             nlev=60, nx = nx, nx_sfc=nx_sfc, 
-        #             ny = ny, ny_sfc=ny_sfc, 
-        #             nneur = cfg.nneur, model_type = cfg.model_type, 
-        #             use_initial_mlp = cfg.use_initial_mlp, add_pres=cfg.add_pres,  concat=cfg.concat)
+      print("using SSM")
+      model = SpaceStateModel_autoreg(hyam,hybm,hyai,hybi,
+                    out_scale = yscale_lev,
+                    out_sfc_scale = yscale_sca, 
+                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                    device=device,
+                    nx = nx, nx_sfc=nx_sfc, 
+                    ny = ny, ny_sfc=ny_sfc, 
+                    nneur=cfg.nneur, 
+                    model_type=cfg.model_type,
+                    use_initial_mlp = cfg.use_initial_mlp,
+                    use_intermediate_mlp = cfg.use_intermediate_mlp,
+                    add_pres = cfg.add_pres,
+                    output_prune = cfg.output_prune,
+                    nh_mem = cfg.nh_mem)#,
     
     model = model.to(device)
     
@@ -807,8 +810,7 @@ def main(cfg: DictConfig):
                             x_lay_raw = []; yto_lay = []; yto_sfc = []
                             x_sfc = []
                             rnn1_mem = rnn1_mem.detach()
-                            if cfg.swap_true_mem_with_pred_epoch>0:
-                                prev_pred = prev_pred.detach()
+
                             
                     t_comp += time.time() - tcomp0
                     # # print statistics 
@@ -931,6 +933,18 @@ def main(cfg: DictConfig):
     
     tsteps_old = 1
     new_lr = cfg.lr
+    
+    # model = model.to("cpu")
+    # torch.save({
+    #             'epoch': 0,
+    #             'model_state_dict': model.state_dict(),
+    #             'optimizer_state_dict': optimizer.state_dict(),
+    #             'val_loss': 0,
+    #             }, SAVE_PATH)  
+    # scripted_model = torch . jit . script ( model )
+    # scripted_model = scripted_model.eval()
+    # scripted_model.save(save_file_torch)
+    
     for epoch in range(cfg.num_epochs):
         t0 = time.time()
         
