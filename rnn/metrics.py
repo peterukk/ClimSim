@@ -160,13 +160,64 @@ def get_metrics_flatten(weights):
         return metrics_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=weights)
     return my_loss_flatten 
 
-def energy_metric(yto, ypo, sp, hyai,hybi):
+def mse(y_true, y_pred):
+    mse = torch.mean(torch.square(y_pred- y_true))
+    return mse
+
+# def energy_metric(yto, ypo, sp, hyai,hybi):
     
-    cp = torch.tensor(1004.0)
-    Lv = torch.tensor(2.5104e6)
-    Lf = torch.tensor(3.34e5)
-    one_over_grav = torch.tensor(0.1020408163) # 1/9.8
-    if len(yto.shape)==3:
+#     cp = torch.tensor(1004.0)
+#     Lv = torch.tensor(2.5104e6)
+#     Lf = torch.tensor(3.34e5)
+#     one_over_grav = torch.tensor(0.1020408163) # 1/9.8
+#     if len(yto.shape)==3:
+#         thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
+#                              + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
+    
+#         dT_pred = ypo[:,:,0]
+#         dq_pred = ypo[:,:,1] 
+        
+#         dT_true = yto[:,:,0]
+#         dq_true = yto[:,:,1]
+        
+#         dql_pred = ypo[:,:,2] 
+#         dql_true = yto[:,:,2] 
+        
+#         energy=torch.mean(torch.square(torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),1)
+#                                 -      torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),1)))
+#     else: 
+#         # time dimension included
+#                                        #      batch,time,1     (1,1,30)
+#         thick= one_over_grav *(sp * (hybi[1:61].view(1,1,-1)-hybi[0:60].view(1,1,-1)) 
+#              + torch.tensor(100000)*(hyai[1:61].view(1,1,-1)-hyai[0:60].view(1,1,-1)))
+#         dT_pred = ypo[:,:,:,0]
+#         dq_pred = ypo[:,:,:,1] 
+        
+#         dT_true = yto[:,:,:,0]
+#         dq_true = yto[:,:,:,1] 
+        
+#         dql_pred = ypo[:,:,:,2] 
+#         dql_true = yto[:,:,:,2] 
+        
+#         energy=torch.mean(torch.square(torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),2)
+#                                 -      torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),2)))
+#     return energy
+
+# def get_energy_metric(hyai, hybi):
+#     def energy(y_true, y_pred, sp):
+#         return energy_metric(y_true, y_pred, sp, hyai, hybi)
+#     return energy
+
+
+
+def get_energy_metric(hyai, hybi):
+    def em(yto, ypo, sp, timesteps):
+        #  y: (batch*timesteps, lev, ny)
+        cp = torch.tensor(1004.0)
+        Lv = torch.tensor(2.5104e6)
+        Lf = torch.tensor(3.34e5)
+        one_over_grav = torch.tensor(0.1020408163) # 1/9.8
+        
         thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
                              + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
     
@@ -178,38 +229,24 @@ def energy_metric(yto, ypo, sp, hyai,hybi):
         
         dql_pred = ypo[:,:,2] 
         dql_true = yto[:,:,2] 
+            
+        energy_pred = torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),1)
+        energy_true = torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),1)
+        # (batch)
         
-        energy=torch.mean(torch.square(torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),1)
-                                -      torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),1)))
-    else: 
-        # time dimension included
-                                       #      batch,time,1     (1,1,30)
-        thick= one_over_grav *(sp * (hybi[1:61].view(1,1,-1)-hybi[0:60].view(1,1,-1)) 
-             + torch.tensor(100000)*(hyai[1:61].view(1,1,-1)-hyai[0:60].view(1,1,-1)))
-        dT_pred = ypo[:,:,:,0]
-        dq_pred = ypo[:,:,:,1] 
+        energy_pred = torch.reshape(energy_pred,(timesteps, -1))
+        energy_pred = torch.mean(energy_pred,dim=0)
         
-        dT_true = yto[:,:,:,0]
-        dq_true = yto[:,:,:,1] 
-        
-        dql_pred = ypo[:,:,:,2] 
-        dql_true = yto[:,:,:,2] 
-        
-        energy=torch.mean(torch.square(torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),2)
-                                -      torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),2)))
-    return energy
+        energy_true = torch.reshape(energy_true,(timesteps, -1))
+        energy_true = torch.mean(energy_true,dim=0)
 
-def get_energy_metric(hyai, hybi):
-    def energy(y_true, y_pred, sp):
-        return energy_metric(y_true, y_pred, sp, hyai, hybi)
-    return energy
-
-def mse(y_true, y_pred):
-    mse = torch.mean(torch.square(y_pred- y_true))
-    return mse
+        energy_mse=torch.mean(torch.square(energy_pred - energy_true))
+        return energy_mse 
+    
+    return em
     
 def get_water_conservation(hyai, hybi):
-    def wc(pred_lev, pred_sfc, sp, LHF, xlay, printdebug=False): #, xlay, printdebug=False):
+    def wc(pred_lev, pred_sfc, sp, LHF, xlay, timesteps, printdebug=False): #, xlay, printdebug=False):
         Lv = torch.tensor(2.5104e6)
         # precip = (pred_sfc[:,2] + pred_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
         precip = (pred_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
@@ -224,17 +261,26 @@ def get_water_conservation(hyai, hybi):
         dp_water = thick*(qv + ql + qi)
         lhs = torch.sum(dp_water,1)
         rhs = LHF / Lv - precip
+        # (batch)
+        rhs = torch.reshape(rhs,(timesteps, -1))
+        lhs = torch.reshape(lhs,(timesteps, -1))
+        rhs = torch.mean(rhs,dim=0)
+        lhs = torch.mean(lhs,dim=0)
+
         if printdebug: 
             total_water_dyn = torch.sum(thick*xlay[:,:,7],1)
+            total_water_dyn = torch.reshape(total_water_dyn,(timesteps, -1))
+            total_water_dyn = torch.mean(total_water_dyn,dim=0)
+
             # print("mean fac2", torch.mean(lhs[precip>0.0] / precip[precip>0.0]).item(), "std fac", torch.std(lhs[precip>0.0]/precip[precip>0.0]).item())
             # print("fac precip / lhs", torch.nanmean(precip/lhs).item(), "fac rhs / lhs", torch.nanmean(rhs/lhs).item())
 
             # print("rhs", torch.mean(rhs).item(), "precip ", torch.mean(precip).item(), "lhs = dp_waterwater ", torch.mean(lhs).item())
-            print("rhs", torch.mean(rhs).item(), "rhs with dyn", torch.mean(rhs + total_water_dyn).item(), "LHF/lv", torch.mean(LHF/Lv).item(), "P ", torch.mean(precip).item(), "LHF/Lv + P", torch.mean(LHF/Lv+precip).item())
-            print("lhs", torch.mean(lhs).item(), "lhs with dyn", torch.mean(lhs-total_water_dyn).item())
+            # print("rhs", torch.mean(rhs).item(), "rhs with dyn", torch.mean(rhs + total_water_dyn).item()) #, "LHF/lv", torch.mean(LHF/Lv).item(), "P ", torch.mean(precip).item(), "LHF/Lv + P", torch.mean(LHF/Lv+precip).item())
+            # print("lhs", torch.mean(lhs).item(), "lhs with dyn", torch.mean(lhs-total_water_dyn).item())
 
             print("mean fac ", torch.nanmean((lhs) / rhs).item())
-            print("mean fac with dyn", torch.nanmean((lhs) / (rhs+total_water_dyn)).item(), "std", torch.std((lhs) / (rhs+total_water_dyn)).item())
+            print("mean fac with dyn", torch.nanmean((lhs) / (rhs-total_water_dyn)).item()) #, "std", torch.std((lhs) / (rhs+total_water_dyn)).item())
 
             # print("fac", lhs[100].item()/rhs[100].item(), "lhs", lhs[100].item(), "rhs", rhs[100].item(), 
             #       "rhs1", LHF[100].item()/Lv.item(), "precip", precip[100].item(), "lfh", LHF[100].item(), "qdyn", total_water_dyn[100].item())

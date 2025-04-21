@@ -696,10 +696,10 @@ def main(cfg: DictConfig):
                                 surf_pres_denorm = x_sfc[:,0:1]
                                 lhf = x_sfc[:,2] 
 
-                            h_con = metric_h_con(yto_lay, ypo_lay, surf_pres_denorm)
+                            h_con = metric_h_con(yto_lay, ypo_lay, surf_pres_denorm, timesteps)
 
-                            water_con_p     = metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw)
-                            water_con_t     = metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw) #,printdebug=True)
+                            water_con_p     = metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)
+                            water_con_t     = metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)#,printdebug=True)
                             water_con       = torch.mean(torch.square(water_con_p - water_con_t))
                             del water_con_p, water_con_t
                             
