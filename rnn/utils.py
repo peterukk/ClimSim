@@ -103,6 +103,388 @@ lbd_qn = np.array([10000000.        , 10000000.        , 10000000.        ,
 # liquid_ratio = (T_denorm - 253.16) / 20.0 
 # liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
         
+
+
+class train_or_eval_one_epoch:
+    def __init__(self, dataloader, 
+                 model, 
+                 device, dtype,
+                 cfg, 
+                 metrics_det, metric_h_con, metric_water_con, 
+                 batch_size = 384, train=True):
+        super().__init__()
+        self.loader = dataloader
+        self.batch_size = batch_size
+        self.train = train
+        self.report_freq = 800
+        self.model = model
+        self.device = device
+        self.dtype = dtype
+        self.cfg = cfg 
+        if self.cfg.use_scaler:
+            # scaler = torch.amp.GradScaler(autocast = True)
+            self.scaler = torch.amp.GradScaler(self.device.type)
+        # if self.cfg.mp_mode>0:
+        self.ny_pp = 6 # Regardless of MP constraint, 6 postprocessed output features per level
+        # Loss functions to be computed, possibly part of overall loss
+        # or just monitored
+        self.metrics_det = metrics_det
+        self.metric_h_con = metric_h_con
+        self.metric_water_con = metric_water_con
+        self.metric_R2 =  R2Score().to(self.device) 
+        # The computed values of various metrics are stored at the end
+        self.metrics = {}
+        
+        if self.cfg.add_stochastic_layer:
+            self.use_ensemble=True
+        else:
+            self.use_ensemble=False
+            
+        if self.cfg.mp_mode>0:
+            self.use_mp_constraint=True
+        else:
+            self.use_mp_constraint=False 
+                
+    def eval_one_epoch(self, lossf, optim, epoch, timesteps=1):
+        report_freq = self.report_freq
+        running_loss = 0.0; running_energy = 0.0; running_water = 0.0
+        running_var=0.0; running_bias = 0.0
+        epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0; epoch_mae = 0.0
+        epoch_R2precc = 0.0
+        epoch_hcon = 0.0; epoch_wcon = 0.0
+        epoch_ens_var = 0.0; epoch_det_skill = 0.0; epoch_spreadskill = 0.0
+        epoch_r2_lev = 0.0
+        epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
+        epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
+        epoch_bias_lev_tot = 0.0; epoch_bias_perlev= 0.0
+        epoch_mae_lev_clw = 0.0; epoch_mae_lev_cli = 0.0
+        epoch_rmse_perlev = 0.0 
+        t_comp =0 
+        t0_it = time.time()
+        j = 0; k = 0; k2=2    
+        device = self.device
+        
+        if self.cfg.optimizer == "adamwschedulefree":
+            if self.train:
+                optim.train()
+            else:
+                optim.eval()
+        
+        if self.cfg.autoregressive:
+            preds_lay = []; preds_sfc = []
+            targets_lay = []; targets_sfc = [] 
+            x_sfc = [];  x_lay_raw = []
+            yto_lay = []; yto_sfc = []
+            rnn1_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev, self.model.nh_mem, device=device)
+            loss_update_start_index = 60
+        else:
+            loss_update_start_index = 0
+            
+        for i,data in enumerate(self.loader):
+            # print("shape mem 2 {}".format(model.rnn1_mem.shape))
+            x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk  = data
+
+            # print(" x lay raw 0,50::", x_lay_raw_chk[0,50:,0])
+            x_lay_chk       = x_lay_chk.to(device)
+            x_lay_raw_chk   = x_lay_raw_chk.to(device)
+            x_sfc_chk       = x_sfc_chk.to(device)
+            targets_sfc_chk = targets_sfc_chk.to(device)
+            targets_lay_chk = targets_lay_chk.to(device)
+            
+            x_lay_chk       = torch.split(x_lay_chk, self.batch_size)
+            x_lay_raw_chk   = torch.split(x_lay_raw_chk, self.batch_size)
+            x_sfc_chk       = torch.split(x_sfc_chk, self.batch_size)
+            targets_sfc_chk = torch.split(targets_sfc_chk, self.batch_size)
+            targets_lay_chk = torch.split(targets_lay_chk, self.batch_size)
+            
+            # to speed-up IO, we loaded chk=many batches, which now need to be divided into batches
+            # each batch is one time step
+            for ichunk in range(len(x_lay_chk)):
+                x_lay0 = x_lay_chk[ichunk]
+                x_lay_raw0 = x_lay_raw_chk[ichunk]
+                x_sfc0 = x_sfc_chk[ichunk]
+                target_lay0 = targets_lay_chk[ichunk]
+                target_sfc0 = targets_sfc_chk[ichunk]
+                    
+                tcomp0= time.time()               
+                
+                with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
+                    if self.cfg.autoregressive:
+                        preds_lay0, preds_sfc0, rnn1_mem = self.model(x_lay0, x_sfc0, rnn1_mem)
+                    else:
+                        preds_lay0, preds_sfc0 = self.model(x_lay0, x_sfc0)
+
+                if self.cfg.autoregressive:
+                    # In the autoregressive training case are gathering many time steps before computing loss
+                    preds_lay.append(preds_lay0); preds_sfc.append(preds_sfc0)
+                    targets_lay.append(target_lay0); targets_sfc.append(target_sfc0)
+                    x_sfc.append(x_sfc0)
+                    x_lay_raw.append(x_lay_raw0)
+                else:
+                    preds_lay = preds_lay0; preds_sfc = preds_sfc0
+                    targets_lay = target_lay0; targets_sfc = target_sfc0
+                    x_lay_raw = x_lay_raw0
+                    x_sfc = x_sfc0
+                    
+                if (not self.cfg.autoregressive) or (self.cfg.autoregressive and (j+1) % timesteps==0):
+            
+                    if self.cfg.autoregressive:
+                        preds_lay   = torch.cat(preds_lay)
+                        preds_sfc   = torch.cat(preds_sfc)
+                        targets_lay = torch.cat(targets_lay)
+                        targets_sfc = torch.cat(targets_sfc)
+                        x_sfc       = torch.cat(x_sfc)
+                        x_lay_raw   = torch.cat(x_lay_raw)
+                        
+                    with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
+                        
+                        if self.cfg.loss_fn_type == "CRPS":
+                            loss = lossf(targets_lay, targets_sfc, preds_lay, preds_sfc, timesteps)
+                            loss, det_skill, ens_var = loss
+                        else:
+                            loss = lossf(targets_lay, targets_sfc, preds_lay, preds_sfc)
+                            huber, mse, mae = loss 
+                            if self.cfg.loss_fn_type == "huber":
+                                loss = huber
+                            else:
+                                loss = mse
+                            
+                        if self.use_ensemble:
+                            # print("preds shape", preds_lay)
+                            # use only first member from here on 
+                            preds_lay = torch.reshape(preds_lay, (timesteps, 2, self.batch_size,  self.model.nlev,  self.model.ny))
+                            preds_lay = torch.reshape(preds_lay[:,0,:,:], shape=targets_lay.shape)
+                            preds_sfc = torch.reshape(preds_sfc, (timesteps, 2, self.batch_size,  self.model.ny_sfc))
+                            preds_sfc = torch.reshape(preds_sfc[:,0,:], shape=targets_sfc.shape)
+                                          
+                        if self.use_mp_constraint:
+                            ypo_lay, ypo_sfc = self.model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
+                            with torch.no_grad(): 
+                                yto_lay, yto_sfc = self.model.pp_mp(targets_lay, targets_sfc, x_lay_raw )
+                            # ypo_lay, ypo_sfc, yto_lay, yto_sfc = model.pp_mp(preds_lay, preds_sfc, targets_lay, targets_sfc, x_lay_raw )
+                            # if i>10: print ("yto lay true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
+                            # if i>10: print ("yto lay pp-true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
+
+                        else:
+                            ypo_lay, ypo_sfc = self.model.postprocessing(preds_lay, preds_sfc)
+                            yto_lay, yto_sfc = self.model.postprocessing(targets_lay, targets_sfc)
+                            
+                        with torch.no_grad():
+                            x_sfc = x_sfc*self.model.xdiv_sca + self.model.xmean_sca 
+                            surf_pres_denorm = x_sfc[:,0:1]
+                            lhf = x_sfc[:,2] 
+
+                        # Energy conservation metric
+                        h_con           = self.metric_h_con(yto_lay, ypo_lay, surf_pres_denorm, 1)
+                        
+                        # Water conservation metric (computed over multiple timesteps since the CRM has precipitation storage not exposed to NN)
+                        water_con_p     = self.metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)
+                        water_con_t     = self.metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)#,printdebug=True)
+                        water_con       = torch.mean(torch.square(water_con_p - water_con_t))
+                        del water_con_p, water_con_t
+                        
+                        # if cfg.use_bias_loss:
+                        raw_bias_lev, raw_bias_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc )
+                        raw_bias_lev = torch.nanmean(raw_bias_lev)
+                        if self.cfg.use_bias_loss:
+                            loss = loss + self.cfg.w_bias*raw_bias_lev
+                        del raw_bias_sfc
+                            
+                        if self.cfg.use_energy_loss: 
+                            loss = loss + self.cfg.w_hcon*h_con
+
+                        if self.cfg.use_water_loss:
+                            loss = loss + self.cfg.w_wcon * water_con
+                            
+                    if self.train:
+                        if self.cfg.use_scaler:
+                            self.scaler.scale(loss).backward()
+                            self.scaler.step(optim)
+                            self.scaler.update()
+                        else:
+                            loss.backward()       
+                            optim.step()
+            
+                        optim.zero_grad()
+                        loss = loss.detach()
+                        if self.cfg.loss_fn_type == "CRPS":
+                            det_skill = det_skill.detach(); ens_var = ens_var.detach()
+                        else: 
+                            huber = huber.detach(); mse = mse.detach(); mae = mae.detach()
+                        h_con = h_con.detach() 
+                        water_con = water_con.detach()
+                        
+                    ypo_lay = ypo_lay.detach(); ypo_sfc = ypo_sfc.detach()
+                    yto_lay = yto_lay.detach(); yto_sfc = yto_sfc.detach()
+                        
+                    running_loss    += loss.item()
+                    running_energy  += h_con.item()
+                    running_water   += water_con.item()
+                    running_bias    += raw_bias_lev.item() 
+                    if self.cfg.loss_fn_type == "CRPS": running_var += ens_var.item() 
+                    #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
+                    if j>loss_update_start_index:
+                        with torch.no_grad():
+                            epoch_loss      += loss.item()
+                            if self.cfg.loss_fn_type =="CRPS":
+                                huber, mse, mae       = self.metrics_det(targets_lay, targets_sfc, preds_lay, preds_sfc)
+
+                            epoch_huber += huber.item()
+                            epoch_mse += mse.item()
+                            epoch_mae += mae.item()
+                            # epoch_mae       += metrics.mean_absolute_error(targets_lay, preds_lay)
+                        
+                            epoch_hcon  += h_con.item()
+                            epoch_wcon  += water_con.item()
+                            
+                            if self.cfg.loss_fn_type == "CRPS":
+                                epoch_ens_var += ens_var.item()
+                                epoch_det_skill += det_skill.item()
+                                epoch_spreadskill += ens_var.item() / det_skill.item()
+
+                            biases_lev, biases_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc, numpy=True)
+                            epoch_bias_lev += np.mean(biases_lev)
+                            epoch_bias_heating += biases_lev[0]
+                            epoch_bias_clw += biases_lev[2]
+                            epoch_bias_cli += biases_lev[3]
+                            epoch_bias_sfc += np.mean(biases_sfc)
+
+                            biases_nolev, biases_perlev = metrics.compute_biases(yto_lay, ypo_lay)
+                            epoch_bias_lev_tot += np.mean(biases_nolev)
+                            epoch_bias_perlev += biases_perlev
+
+                            epoch_rmse_perlev += metrics.rmse(yto_lay, ypo_lay)
+
+                            self.metric_R2.update(ypo_lay.reshape((-1,self.ny_pp)), yto_lay.reshape((-1,self.ny_pp)))
+                                   
+                            prec_pred = ypo_sfc.reshape(-1,self.model.ny_sfc)[:,3].cpu().numpy()
+                            prec_true = yto_sfc.reshape(-1,self.model.ny_sfc)[:,3].cpu().numpy()
+                            r2_np = np.corrcoef((prec_pred,prec_true))[0,1]
+                            epoch_R2precc += r2_np
+                            #print("R2 numpy", r2_np, "R2 torch", self.metric_R2_precc(ypo_sfc[:,3:4], yto_sfc[:,3:4]) )
+
+                            ypo_lay = ypo_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
+                            yto_lay = yto_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
+
+                            epoch_r2_lev += metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay)**2
+
+                            epoch_mae_lev_clw +=  np.nanmean(np.abs(ypo_lay[:,:,2] - yto_lay[:,:,2]),axis=0)
+                            epoch_mae_lev_cli +=  np.nanmean(np.abs(ypo_lay[:,:,3] - yto_lay[:,:,3]),axis=0)
+                           # if track_ks:
+                           #     if (j+1) % max(timesteps*4,12)==0:
+                           #         epoch_ks += kolmogorov_smirnov(yto,ypo).item()
+                           #         k2 += 1
+                            k += 1
+                    if self.cfg.autoregressive:
+                        preds_lay = []; preds_sfc = []
+                        targets_lay = []; targets_sfc = [] 
+                        x_lay_raw = []; yto_lay = []; yto_sfc = []
+                        x_sfc = []
+                        rnn1_mem = rnn1_mem.detach()
+
+                        
+                t_comp += time.time() - tcomp0
+                # # print statistics 
+                if j % report_freq == (report_freq-1): # print every 200 minibatches
+                    elaps = time.time() - t0_it
+                    fac = report_freq/timesteps
+                    running_loss = running_loss / fac
+                    running_energy = running_energy / fac
+                    running_water = running_water / fac
+                    running_bias = running_bias / fac
+
+                    r2raw = self.metric_R2.compute()
+
+                    #r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
+                    if self.cfg.loss_fn_type == "CRPS": 
+                        running_var = running_var / fac
+
+                        print("[{:d}, {:d}] Loss: {:.2e} var {:.2e} h-con: {:.2e}  w-con: {:.2e}  MBE: {:.2e}  R2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
+                                                        j+1, running_loss,running_var, running_energy,running_water, running_bias,r2raw, elaps, t_comp), flush=True)
+                        running_var = 0.0
+                    else:
+                        print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  MBE: {:.2e}  R2: {:.2f},  took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
+                                                        j+1, running_loss,running_energy,running_water,running_bias, r2raw, elaps, t_comp), flush=True)
+                    running_loss = 0.0
+                    running_energy = 0.0; running_water=0.0
+                    running_bias = 0.0
+                    t0_it = time.time()
+                    t_comp = 0
+                j += 1
+                
+            del x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk
+                
+        self.metrics['loss'] =  epoch_loss / k
+        self.metrics['mean_squared_error'] = epoch_mse / k
+        self.metrics['huber'] = epoch_huber / k
+
+        if self.cfg.loss_fn_type == "CRPS": 
+            self.metrics['ens_var'] =  epoch_ens_var / k
+            self.metrics['det_skill'] =  epoch_det_skill / k
+            self.metrics['spread_skill_ratio'] =  epoch_spreadskill / k
+
+        self.metrics["h_conservation"] =  epoch_hcon / k
+        self.metrics["water_conservation"] =  epoch_wcon / k
+
+        self.metrics["bias_lev"] = epoch_bias_lev / k 
+        self.metrics["bias_lev_noabs"] = epoch_bias_lev_tot / k 
+
+        self.metrics["bias_sfc"] = epoch_bias_sfc / k 
+        self.metrics["bias_heating"] = epoch_bias_heating / k 
+        self.metrics["bias_cldliq"] = epoch_bias_clw / k 
+        self.metrics["bias_cldice"] = epoch_bias_cli / k 
+
+        self.metrics["bias_perlev"] = epoch_bias_perlev / k 
+        self.metrics["rmse_perlev"] = epoch_rmse_perlev / k 
+
+        self.metrics['mean_absolute_error'] = epoch_mae / k
+        #self.metrics['ks'] =  epoch_ks / k2
+        self.metrics['R2'] = self.metric_R2.compute()
+        
+        
+        self.metrics['R2_lev'] = epoch_r2_lev / k
+        self.metrics['R2_heating'] = epoch_r2_lev[:,0].mean() / k
+        # self.metrics['R2_moistening'] =  epoch_r2_lev[:,1].mean() / k
+        R2_moistening = epoch_r2_lev[:,1].mean() / k
+        R2 = epoch_r2_lev[:,2] / k
+        R2[np.isnan(R2)] = 0.0; R2[np.isinf(R2)] = 0.0
+        # self.metrics['R2_lev_clw'] = R2
+        self.metrics['R2_clw'] = np.mean(R2)
+        R2 = epoch_r2_lev[:,3] / k
+        R2[np.isnan(R2)] = 0.0; R2[np.isinf(R2)] = 0.0
+        # self.metrics['R2_lev_cli'] = R2
+        self.metrics['R2_cli'] = np.mean(R2)
+
+        #self.metrics['R2_precc'] = self.metric_R2_precc.compute()
+        self.metrics['R2_precc'] = epoch_R2precc / k
+    
+        self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
+        self.metrics['mae_cli'] = np.nanmean(epoch_mae_lev_cli / k)
+        
+        self.metric_R2.reset() 
+        #self.metric_R2_heating.reset(); self.metric_R2_precc.reset()
+        # if self.autoregressive:
+        #     # self.model.reset_states()
+        #     # model.rnn1_mem = torch.randn_like(model.rnn1_mem)
+        #     # model.rnn1_mem = torch.randn(self.batch_size, nlev, model.nh_mem, device=device)
+        #     model.rnn1_mem = torch.zeros(self.batch_size, nlev, model.nh_mem, device=device)
+
+        datatype = "TRAIN" if self.train else "VAL"
+        print('Epoch {} {} loss: {:.2e}  MSE: {:.2e}  h-con:  {:.2e}   R2: {:.2f}  R2-dT/dt: {:.2f}   R2-dq/dt: {:.2f}   R2-precc: {:.3f}'.format(epoch+1, datatype, 
+                                                            self.metrics['loss'], 
+                                                            self.metrics['mean_squared_error'], 
+                                                            self.metrics['h_conservation'],
+                                                            self.metrics['R2'],
+                                                            self.metrics['R2_heating'],
+                                                            R2_moistening, # self.metrics['R2_moistening'],                                                              
+                                                            self.metrics['R2_precc'] ))
+        
+        del loss, h_con, water_con
+        if self.cfg.autoregressive:
+            del rnn1_mem
+        if device.type=="cuda": 
+            torch.cuda.empty_cache()
+        gc.collect()
     
 @njit(fastmath=True)    
 def v4_to_v5_inputs_numba(x_lev_b, liq_ratio):

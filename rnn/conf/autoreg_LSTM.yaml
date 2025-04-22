@@ -57,6 +57,7 @@ memory: Hidden
 model_type: LSTM
 concat: false
 separate_radiation: false
+ensemble_size: 1
 
 save_model: true
 use_wandb: true

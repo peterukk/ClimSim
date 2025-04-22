@@ -222,9 +222,9 @@ def get_energy_metric(hyai, hybi):
                              + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
     
         dT_pred = ypo[:,:,0]
-        dq_pred = ypo[:,:,1] 
-        
         dT_true = yto[:,:,0]
+
+        dq_pred = ypo[:,:,1] 
         dq_true = yto[:,:,1]
         
         dql_pred = ypo[:,:,2] 
