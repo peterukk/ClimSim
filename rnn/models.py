@@ -12,7 +12,7 @@ import torch.nn.parameter as Parameter
 # from layers_callbacks_torch import LayerPressure 
 import torch.nn.functional as F
 from models_torch_kernels import GLU
-from models_torch_kernels import MyStochasticGRU, MyStochasticGRULayer, MyStochasticLSTMLayer
+from models_torch_kernels import MyStochasticGRU, MyStochasticGRULayer, MyStochasticGRULayer2, MyStochasticGRULayer3,MyStochasticGRULayer4, MyStochasticLSTMLayer
 import numpy as np 
 from typing import Final 
 
@@ -770,15 +770,15 @@ class LSTM_autoreg_torchscript(nn.Module):
         return out, out_sfc, rnn1_mem
 
 
-class LSTM_autoreg_torchscript_addstoch(nn.Module):
+class LSTM_autoreg_torchscript_perturb(nn.Module):
     use_initial_mlp: Final[bool]
     # use_intermediate_mlp: Final[bool]
     add_pres: Final[bool]
     output_prune: Final[bool]
     use_ensemble: Final[bool]
     # use_memory: Final[bool]
-    separate_radiation: Final[bool]
-    diagnose_precip: Final[bool]
+    # separate_radiation: Final[bool]
+    # diagnose_precip: Final[bool]
 
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
@@ -789,14 +789,12 @@ class LSTM_autoreg_torchscript_addstoch(nn.Module):
                 # use_intermediate_mlp=True,
                 add_pres=False,
                 output_prune=False,
-                # use_memory=False,
-                repeat_mu=False,
+                use_memory=False,
                 separate_radiation=False,
                 use_ensemble=False,
-                diagnose_precip=False,
                 coeff_stochastic = 0.0,
                 nh_mem=16):
-        super(LSTM_autoreg_torchscript_addstoch, self).__init__()
+        super(LSTM_autoreg_torchscript_perturb, self).__init__()
         self.ny = ny 
         self.nlev = nlev 
         self.nx_sfc = nx_sfc 
@@ -814,10 +812,10 @@ class LSTM_autoreg_torchscript_addstoch(nn.Module):
         self.nh_rnn2 = self.nneur[1]
         
         self.nx_rnn3 = self.nneur[1]
-        self.nh_rnn3 = self.nneur[2]
+        self.nh_rnn3 = self.nneur[1]
 
-        self.nx_rnn4 = self.nneur[2]
-        self.nh_rnn4 = self.nneur[3]
+        self.nx_rnn4 = self.nneur[1]
+        self.nh_rnn4 = self.nneur[1]
         # self.use_memory= use_memory
         self.use_ensemble = use_ensemble
         self.ensemble_size = 2 
@@ -830,6 +828,7 @@ class LSTM_autoreg_torchscript_addstoch(nn.Module):
         self.coeff_stochastic = coeff_stochastic
         self.nonlin = nn.Tanh()
         self.relu = nn.ReLU()
+        # self.hardtanh = nn.Hardtanh(0,2.0)
 
         yscale_lev = torch.from_numpy(out_scale).to(device)
         yscale_sca = torch.from_numpy(out_sfc_scale).to(device)
@@ -873,7 +872,7 @@ class LSTM_autoreg_torchscript_addstoch(nn.Module):
         
         print("nx rnn1", self.nx_rnn1, "nh rnn1", self.nh_rnn1)
         print("nx rnn2", self.nx_rnn2, "nh rnn2", self.nh_rnn2)  
-        if self.use_third_rnn: print("nx rnn3", self.nx_rnn3, "nh rnn3", self.nh_rnn3) 
+        # if self.use_third_rnn: print("nx rnn3", self.nx_rnn3, "nh rnn3", self.nh_rnn3) 
         print("nx sfc", self.nx_sfc)
 
         if self.use_initial_mlp:
@@ -882,15 +881,16 @@ class LSTM_autoreg_torchscript_addstoch(nn.Module):
         self.mlp_surface1  = nn.Linear(self.nx_sfc, self.nh_rnn1)
         self.mlp_surface2  = nn.Linear(self.nx_sfc, self.nh_rnn1)
 
-
         self.mlp_toa1  = nn.Linear(2, self.nh_rnn2)
         self.mlp_toa2  = nn.Linear(2, self.nh_rnn2)
 
         self.rnn1   = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)  # (input_size, hidden_size)
         self.rnn2   = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
         use_bias=False
-        self.rnn3 = MyStochasticGRULayer(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias) 
-        self.rnn4 = MyStochasticGRULayer(self.nx_rnn4, self.nh_rnn4, use_bias=use_bias) 
+        # stochastic_layer = MyStochasticGRULayer
+        stochastic_layer = MyStochasticGRULayer4
+        self.rnn3 = stochastic_layer(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias) 
+        self.rnn4 = stochastic_layer(self.nx_rnn4, self.nh_rnn4, use_bias=use_bias) 
 
         # if self.concat: 
         nh_rnn = self.nh_rnn2
@@ -954,13 +954,13 @@ class LSTM_autoreg_torchscript_addstoch(nn.Module):
     
     def forward(self, inputs_main, inputs_aux, rnn1_mem):
         # if self.ensemble_size>0:
-        # if self.use_ensemble:
-        inputs_main = inputs_main.unsqueeze(0)
-        inputs_aux = inputs_aux.unsqueeze(0)
-        inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
-        inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
-        inputs_main = inputs_main.flatten(0,1)
-        inputs_aux = inputs_aux.flatten(0,1)
+        if self.use_ensemble:
+            inputs_main = inputs_main.unsqueeze(0)
+            inputs_aux = inputs_aux.unsqueeze(0)
+            inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
+            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
+            inputs_main = inputs_main.flatten(0,1)
+            inputs_aux = inputs_aux.flatten(0,1)
         # print("shape inp main", inputs_main.shape)
                     
         batch_size = inputs_main.shape[0]
@@ -1004,38 +1004,54 @@ class LSTM_autoreg_torchscript_addstoch(nn.Module):
         hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
         
         input_rnn2 = rnn1out
-        final_hidden_seq, states = self.rnn2(input_rnn2, hidden2)
+        h_final, states = self.rnn2(input_rnn2, hidden2)
 
         (last_h, last_c) = states
-        final_sfc_inp = last_h.squeeze() 
+        h_sfc = last_h.squeeze() 
+        
+        # Final steps: 
+        rnn1_mem        = self.mlp_latent(h_final)
+        out_det         = self.mlp_output(rnn1_mem)
+        if self.output_prune:
+            out_det[:,0:12,1:] = out_det[:,0:12,1:].clone().zero_()
+        # out_sfc         = self.mlp_surface_output(h_sfc)
+        # out_sfc         = self.relu(out_sfc)
         
         
         #  --------- STOCHASTIC RNN FOR PERTURBATION ----------
-        input_rnn2 = torch.transpose(rnn1out,0,1)
-        
-        final_hidden_seq = self.rnn2(input_rnn2, hidden2)
-        final_sfc_inp = final_hidden_seq[-1,:,:]
+        input_rnn3 = torch.transpose(h_final,0,1)
+        input_rnn3 = torch.flip(input_rnn3, [0])
 
-        final_hidden_seq = torch.transpose(final_hidden_seq,0,1)
+        hidden_init = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device) 
+
+        srnn_out = self.rnn3(input_rnn3, hidden_init)
+        input_rnn4 = torch.flip(srnn_out, [0])
+        
+        hidden_init = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device) 
+        
+        srnn_out2 = self.rnn4(input_rnn4, hidden_init)
+        h_sfc_perturb = srnn_out2[-1,:,:]
+        h_final_perturb = torch.transpose(srnn_out2,0,1)
+        
+        h_final = h_final + 0.01*h_final_perturb
+        h_sfc   = h_sfc + 0.01*h_sfc_perturb
+        # h_final_perturb = self.hardtanh(h_final_perturb)
+        # h_sfc_perturb = self.hardtanh(h_sfc_perturb)
+        
+        # h_final = h_final*h_final_perturb
+        # h_sfc   = h_sfc*h_sfc_perturb
+        
         #  --------- STOCHASTIC RNN FOR PERTURBATION ----------
 
         # Final steps: 
-        #   1) Intermediate reduction with MLP 
-        #   2) Flip (Save this as convective memory
-        # if self.use_intermediate_mlp: 
-        final_hidden_seq = self.mlp_latent(final_hidden_seq)
-        # if self.use_memory:
-        rnn1_mem = torch.flip(final_hidden_seq, [1])
-            
-        out = self.mlp_output(final_hidden_seq)
-
+        rnn1_mem        = self.mlp_latent(h_final)
+        out             = self.mlp_output(rnn1_mem)
         if self.output_prune:
             out[:,0:12,1:] = out[:,0:12,1:].clone().zero_()
-        
-        out_sfc = self.mlp_surface_output(final_sfc_inp)
-        out_sfc = self.relu(out_sfc)
+        out_sfc         = self.mlp_surface_output(h_sfc)
+        out_sfc         = self.relu(out_sfc)
 
-        return out, out_sfc, rnn1_mem
+        return out, out_sfc, rnn1_mem, out_det
 
 class LSTM_autoreg_torchscript_radflux(nn.Module):
     use_initial_mlp: Final[bool]
@@ -2116,16 +2132,17 @@ class LSTM_torchscript(nn.Module):
 
 
 class SpaceStateModel_autoreg(nn.Module):
-    use_initial_mlp: Final[bool]
+    # use_initial_mlp: Final[bool]
     use_intermediate_mlp: Final[bool]
     add_pres: Final[bool]
     output_prune: Final[bool]
     concat: Final[bool]
     pres_step_scale: Final[bool]
-    autoregressive: Final[bool]
+    nx_mlp0: Final[int]
+    # autoregressive: Final[bool]
     model_type: Final[str]
     use_glu_layers: Final[bool]
-    
+    reduce_dim_with_mlp: Final[bool]
     model_is_lru: Final[bool]
     model_is_mingru: Final[bool]
     model_is_s5: Final[bool]
@@ -2142,7 +2159,7 @@ class SpaceStateModel_autoreg(nn.Module):
                 device,
                 nlev=60, nx = 4, nx_sfc=3, ny = 4, ny_sfc=3, nneur=(64,64), 
                 model_type='LRU', 
-                use_initial_mlp=False, 
+                # use_initial_mlp=False, 
                 use_intermediate_mlp=True,
                 add_pres=False,
                 output_prune=False,
@@ -2164,7 +2181,7 @@ class SpaceStateModel_autoreg(nn.Module):
         self.nh_rnn1 = self.nneur[0]
         self.nh_rnn2 = self.nneur[1]
         self.ny_rnn1 = self.nh_rnn1
-        self.use_initial_mlp=use_initial_mlp
+        # self.use_initial_mlp=use_initial_mlp
         self.model_type=model_type
         self.device=device
 
@@ -2187,19 +2204,19 @@ class SpaceStateModel_autoreg(nn.Module):
             print("WARNING: this SSM type doesn't support providing the state, so the surface variables are instead added to each point in the sequence")
             
             # concatenate the vertical (sequence) inputs with tiled scalars
-            self.use_initial_mlp=True
+            # self.use_initial_mlp=True
             nx = nx + nx_sfc
-        if self.use_initial_mlp: 
-            self.nh_mlp1 = self.nh_rnn1
-            self.nx_rnn1 = self.nh_rnn1
-        else:
-            self.nx_rnn1 = nx
+        # if self.use_initial_mlp: 
+        # self.nh_mlp1 = self.nh_rnn1
+        self.nx_rnn1 = self.nh_rnn1
+        # else:
+        #     self.nx_rnn1 = nx
         self.use_intermediate_mlp = False
         # if memory == 'None':
         #     print("Building non-autoregressive SSM, but may be stateful")
         #     self.autoregressive = False
         # elif memory == 'Hidden':
-        self.autoregressive = True
+        # self.autoregressive = True
         print("Building autoregressive SSM that feeds a hidden memory at t0,z0 to SSM1 at t1,z0")
         self.rnn1_mem = None
         # self.rnn2_mem = None
@@ -2212,55 +2229,59 @@ class SpaceStateModel_autoreg(nn.Module):
         glu_expand_factor = 2
         # if model_type in ['S5','GSS','QRNN','Mamba','GateLoop','SRU','LRU']:
         if model_type in ['S5','GSS','QRNN','Mamba','GateLoop','SRU','SRU_2D','LRU']:
-            self.use_initial_mlp = True
-            self.use_intermediate_mlp = True; self.nh_mem = self.nh_rnn2
+            # self.use_initial_mlp = True
+            self.use_intermediate_mlp = True
+            # self.nh_mem = self.nh_rnn2
             self.nx_rnn1 = self.nh_rnn1 
             self.nx_rnn2 = self.nh_rnn2
-            if self.autoregressive and model_type != 'SRU_2D':
-                # This is a bit tricky with these SSMs as they expect 
-                # num_inputs = num_hidden. Therefore we need MLPs that halve 
-                # the size of both inputs and the final hidden variable, e.g.
-                # SSM = 128 neurons, Xlay = 64 neurons, Xhidden = 64 neurons,
-                # X = concat(Xlay,Xhidden)
-                # Similarly, to feed the latent variable to RNN2, we would need an MLP before it
-                # that halves the size of  the output from RNN1
-                #    mlp1      concat(mlp1,hfin=64)     RNN1(128)     MLP2     concat(mlp2,hfin=64)      RNN2(128)     mlpfin
-                # nx ----> 64 ---------------------> 128 -------> 128 ---> 64 ---------------------> 128 --------> 128 ----->  64
-                #   OR let second SSMs hidden size be bigger
-                #    mlp1      concat(mlp1,hfin=64)     RNN1(128)      concat(hfin=64)           RNN2(192)     mlpfin
-                # nx ----> 64 ---------------------> 128 -------> 128 ---------------------> 192 --------> 192 ----->  64  
-                # or Dont bother making RNN2 autoregressive?
-                # mlp1        concat(hfin=128)          RNN1(256)     GLU      RNN2(128)    GLU      RNN3
-                # nx ---> 128 ---------------------> 256 -------> 256 ---> 128 -------> 128 ---> 128 --->  128
+            # if self.autoregressive and model_type != 'SRU_2D':
+            # This is a bit tricky with these SSMs as they expect 
+            # num_inputs = num_hidden. Therefore we need MLPs that halve 
+            # the size of both inputs and the final hidden variable, e.g.
+            # SSM = 128 neurons, Xlay = 64 neurons, Xhidden = 64 neurons,
+            # X = concat(Xlay,Xhidden)
+            # Similarly, to feed the latent variable to RNN2, we would need an MLP before it
+            # that halves the size of  the output from RNN1
+            #    mlp1      concat(mlp1,hfin=64)     RNN1(128)     MLP2     concat(mlp2,hfin=64)      RNN2(128)     mlpfin
+            # nx ----> 64 ---------------------> 128 -------> 128 ---> 64 ---------------------> 128 --------> 128 ----->  64
+            #   OR let second SSMs hidden size be bigger
+            #    mlp1      concat(mlp1,hfin=64)     RNN1(128)      concat(hfin=64)           RNN2(192)     mlpfin
+            # nx ----> 64 ---------------------> 128 -------> 128 ---------------------> 192 --------> 192 ----->  64  
+            # or Dont bother making RNN2 autoregressive?
+            # mlp1        concat(hfin=128)          RNN1(256)     GLU      RNN2(128)    GLU      RNN3
+            # nx ---> 128 ---------------------> 256 -------> 256 ---> 128 -------> 128 ---> 128 --->  128
 
-                # self.nh_mem = self.nh_rnn1//2
-                # self.ny_rnn1 = self.nh_rnn1//2
-                # self.nh_mlp1  = self.nh_rnn1//2 
-                # self.nx_rnn2 = self.nh_rnn2
-                # glu_expand_factor = 1
-                #                  mlp            RNN
-                #  concat(nx,16)  ---> 128  ---> 
-                self.ny_rnn1 = self.nh_rnn1
-                self.nh_mlp1  = self.nh_rnn1
-                self.nx_rnn2 = self.nh_rnn2
-                glu_expand_factor = 2
+            # self.nh_mem = self.nh_rnn1//2
+            # self.ny_rnn1 = self.nh_rnn1//2
+            # self.nh_mlp1  = self.nh_rnn1//2 
+            # self.nx_rnn2 = self.nh_rnn2
+            # glu_expand_factor = 1
+            #                  mlp            RNN
+            #  concat(nx,16)  ---> 128  ---> 
+            self.ny_rnn1 = self.nh_rnn1
+            # self.nh_mlp1  = self.nh_rnn1
+            self.nx_rnn2 = self.nh_rnn2
+            glu_expand_factor = 2
 
         else:
             raise NotImplementedError() # need mlp here too for custom nh_mem
 
             self.nx_rnn2 = self.nh_rnn1
-            if self.autoregressive:
-                self.nx_rnn1 = self.nx_rnn1 + self.nh_mem 
-                # self.nx_rnn2 = self.nh_rnn1 + self.nh_mem 
+            # if self.autoregressive:
+            self.nx_rnn1 = self.nx_rnn1 + self.nh_mem 
+            # self.nx_rnn2 = self.nh_rnn1 + self.nh_mem 
 
-        if self.use_initial_mlp:
+        # if self.use_initial_mlp:
             # self.mlp_initial = nn.Linear(nx, self.nh_mlp1 )
-            self.mlp_initial = nn.Linear(self.nh_mem + nx, self.nh_rnn1 )
+        self.nx_mlp0 = self.nh_mem + nx 
+        print("nx_mlp0", self.nx_mlp0, "nx", nx, "nh_rnn1", self.nh_rnn1)
+        print("initial mLP dims:", self.nx_mlp0, self.nh_rnn1)
+        self.mlp_initial = nn.Linear(self.nx_mlp0, self.nh_rnn1 )
 
         print("nx rnn1", self.nx_rnn1, "nh rnn1", self.nh_rnn1, "ny rnn1", self.ny_rnn1)
         print("nx rnn2", self.nx_rnn2, "nh rnn2", self.nh_rnn2)  
-        if self.autoregressive: 
-            print("nh_memory", self.nh_mem)
+        # if self.autoregressive: 
+        print("nh_memory", self.nh_mem)
         self.concat = concat
 
         self.mlp_surface1  = nn.Linear(nx_sfc, self.nh_rnn1)
@@ -2381,20 +2402,22 @@ class SpaceStateModel_autoreg(nn.Module):
 
             # self.SeqLayer15 = GLU(nlev=self.nlev,nneur=self.nneur[0],layernorm=glu_layernorm)
         else:
-            if self.autoregressive and model_type in ['S5','GSS','QRNN','Mamba','GateLoop','SRU','SRU_2D''LRU']:
-                   self.reduce_dim_with_mlp=True
-                   self.reduce_dim_mlp = nn.Linear(self.nh_rnn1, self.nx_rnn2)
-
+            if model_type in ['S5','GSS','QRNN','Mamba','GateLoop','SRU','SRU_2D''LRU']:
+                self.reduce_dim_with_mlp=True
+                self.reduce_dim_mlp = nn.Linear(self.nh_rnn1, self.nx_rnn2)
+                print("Reduce MLP dims", self.nh_rnn1, self.nx_rnn2)
         if self.concat:
             nx_last = self.ny_rnn1 + self.nh_rnn2
         else:
             nx_last = self.nh_rnn2
             
         if self.use_intermediate_mlp:
+            print("intermediate MLP dims", nx_last, self.nh_mem)
             self.mlp_latent = nn.Linear(nx_last, self.nh_mem)
             nx_last = self.nh_mem
 
         self.mlp_output        = nn.Linear(nx_last, self.ny)
+        print("MLP surface dims", nneur[-1], self.ny_sfc)
         self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc)
         self.relu = nn.ReLU()
         self.tanh = nn.Tanh() 
@@ -2465,24 +2488,23 @@ class SpaceStateModel_autoreg(nn.Module):
             inputs_main = torch.cat((inputs_main,inputs_aux_tiled), dim=2)
         else:
             init_inputs = inputs_aux
-                
             init_states = self.mlp_surface1(init_inputs)
             # init_states = nn.Softsign()(init_states)
             init_states = self.tanh(init_states)
             # print("shape init states" , init_states.shape)
         # print("shape inp main inp", inputs_main.shape)
 
-        if self.autoregressive and not self.model_is_sru2d:# "SRU_2D":
-            inputs_main = torch.cat((inputs_main,rnn1_mem), dim=2)
+        # if self.autoregressive and not self.model_is_sru2d:# "SRU_2D":
+        inputs_main = torch.cat((inputs_main,rnn1_mem), dim=2)
+        # print("shape inp main inp", inputs_main.shape)
 
-        if self.use_initial_mlp:
-            # print("shape inp main", inputs_main.shape)
-            rnn1_input = self.mlp_initial(inputs_main)
-            # print("shape rnn1_input", rnn1_input.shape)
+        # if self.use_initial_mlp:
+        rnn1_input = self.mlp_initial(inputs_main)
+        # print("shape rnn1_input", rnn1_input.shape)
 
-            rnn1_input = self.tanh(rnn1_input)
-        else:
-            rnn1_input = inputs_main
+        rnn1_input = self.tanh(rnn1_input)
+        # else:
+        #     rnn1_input = inputs_main
         # print("shape rnn1 inp", rnn1_input.shape)
 
         # if self.autoregressive and self.model_type != "SRU_2D":
@@ -2577,15 +2599,18 @@ class SpaceStateModel_autoreg(nn.Module):
         else:
             outs = out2
             
+        out_sfc = self.mlp_surface_output(outs[:,-1])
+
+            
         if self.use_intermediate_mlp:
             outs = self.mlp_latent(outs)
             
-        if self.autoregressive:
+        # if self.autoregressive:
         
-            rnn1_mem = torch.flip(outs, [1])
+        rnn1_mem = torch.flip(outs, [1])
 
 
-        out_sfc = self.mlp_surface_output(outs[:,-1])
+        # out_sfc = self.mlp_surface_output(outs[:,-1])
         out_sfc = self.relu(out_sfc)
         
         outs = self.mlp_output(outs)

@@ -210,7 +210,11 @@ class train_or_eval_one_epoch:
                 
                 with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
                     if self.cfg.autoregressive:
-                        preds_lay0, preds_sfc0, rnn1_mem = self.model(x_lay0, x_sfc0, rnn1_mem)
+                        outs = self.model(x_lay0, x_sfc0, rnn1_mem)
+                        if self.cfg.add_stochastic_layer:
+                            preds_lay0, preds_sfc0, rnn1_mem, dummy = outs
+                        else:
+                            preds_lay0, preds_sfc0, rnn1_mem = outs
                     else:
                         preds_lay0, preds_sfc0 = self.model(x_lay0, x_sfc0)
 

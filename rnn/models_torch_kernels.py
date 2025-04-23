@@ -21,6 +21,46 @@ import torch.jit as jit
 from torch import Tensor
 
 
+class SRU(nn.Module):
+    """ Simple Recurrent Unit https://arxiv.org/pdf/1709.02755.pdf """
+
+    def __init__(self, input_size, hidden_size, activation=nn.Sigmoid()):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        
+        self.linear_transform = nn.Linear(input_size, hidden_size, bias=False)
+        self.gate = nn.Linear(input_size, 2 * hidden_size)
+        self.activation = activation
+
+        self.gate_ln = nn.LayerNorm(2 * hidden_size)
+        self.act_ln = nn.LayerNorm(hidden_size)
+        
+    @torch.compile
+    def forward(self, x, c):
+        if c is None:
+            c = torch.zeros((x.shape[0], self.hidden_size), dtype=x.dtype, device=x.device)
+
+        x_tilde = self.linear_transform(x)
+        # gate = F.sigmoid(self.gate_ln(self.gate(x)))
+        gate = nn.Sigmoid()(self.gate_ln(self.gate(x)))
+
+        f = gate[:, :, :self.hidden_size]
+        r = gate[:, :, self.hidden_size:]
+        new_data = (1 - f) * x_tilde
+
+        cell_states = []
+        for t in range(x.size(1)):
+            # Every timestep
+            c = f[:, t] * c + new_data[:, t]
+            cell_states.append(c)
+
+        all_c = torch.stack(cell_states, dim=1)
+        h = r * self.activation(self.act_ln(all_c)) + (1 - r) * x
+        # h = r * self.activation()(self.act_ln(all_c)) + (1 - r) * x
+
+        return h, c
+    
 class MyStochasticGRU(nn.Module):
 
     """
@@ -368,6 +408,90 @@ class MyStochasticGRULayer3(jit.ScriptModule):
 
         return torch.stack(outputs)
 
+
+class MyStochasticGRULayer4(jit.ScriptModule):
+    use_bias: Final[bool]
+
+    def __init__(self, input_size, hidden_size, dtype=torch.float32, use_bias=False):
+        super().__init__()
+        # self.cell = cell(*cell_args)
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.weight_ih = Parameter(torch.randn((input_size, 3 * hidden_size),dtype=dtype))
+        # self.weight_hh = Parameter(torch.randn((hidden_size, 3 * hidden_size),dtype=dtype))
+        self.weight_zh = Parameter(torch.randn((hidden_size, 3 * hidden_size),dtype=dtype))
+
+        self.use_bias = use_bias
+        if self.use_bias:
+            self.bias_ih = Parameter(torch.randn((3 * hidden_size),dtype=dtype))
+            # self.bias_hh = Parameter(torch.randn((3 * hidden_size),dtype=dtype))
+            self.bias_zh = Parameter(torch.randn((3 * hidden_size),dtype=dtype))
+
+        self.weight_encoder =  Parameter(torch.randn((input_size + hidden_size, 2*hidden_size),dtype=dtype))
+        # self.weight_encoder_sigma =  Parameter(torch.randn((input_size + hidden_size, hidden_size),dtype=dtype))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        std = 1.0 / math.sqrt(self.hidden_size)
+        for w in self.parameters():
+            w.data.uniform_(-std, std)
+            
+    # @torch.jit.script          
+    @jit.script_method
+    # @torch.compile
+    def forward(
+        self, input_seq: Tensor, hidden: Tensor) -> Tensor: #Tuple[Tensor, Tensor]:
+        
+        nseq, batch_size, nx = input_seq.shape
+
+        # epss = torch.randn_like(input_seq)
+        epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device)
+        epss = epss.unbind(0)
+        
+        inputs = input_seq.unbind(0)
+
+
+        outputs = torch.jit.annotate(List[Tensor], [])
+        
+        
+        for i in range(len(input_seq)):
+            x = inputs[i]
+            eps = epss[i]
+            
+            # print("shape x", x.shape, "shape hid", hidden.shape)
+            inp = torch.cat((x,hidden), dim=1)
+            predicted_distribution = torch.mm(inp, self.weight_encoder) 
+            mean_, logvar_ = predicted_distribution.chunk(2,1)
+            
+            # eps = torch.randn_like(mean_)
+            z = mean_ + eps * torch.exp(0.5*logvar_)
+            
+            if self.use_bias:
+                x_results = torch.mm(x, self.weight_ih) + self.bias_ih
+                # h_results = torch.mm(hidden, self.weight_hh)  + self.bias_hh
+                z_results = torch.mm(z, self.weight_zh)  + self.bias_zh
+            else:
+                x_results = torch.mm(x, self.weight_ih) 
+                # h_results = torch.mm(hidden, self.weight_hh) 
+                z_results = torch.mm(z, self.weight_zh) 
+
+            i_r, i_z, i_n = x_results.chunk(3, 1)
+            # h_r, h_z, h_n = h_results.chunk(3, 1)
+            z_r, z_z, z_n = z_results.chunk(3, 1)
+
+            r = torch.sigmoid(i_r + z_r)
+            z = torch.sigmoid(i_z + z_z)
+            n = torch.tanh(i_n + r * z_n)
+                
+            # hidden =  n - torch.mul(n, z) + torch.mul(z, hidden)
+            hidden = n + torch.mul(z, (hidden - n))
+            # hidden = newgate + inputgate * (hidden - newgate)
+
+            outputs += [hidden]
+
+        return torch.stack(outputs)
+    
 class MyStochasticLSTMLayer(jit.ScriptModule):
     def __init__(self, input_size, hidden_size, dtype=torch.float32):
         super().__init__()
