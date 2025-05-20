@@ -571,9 +571,13 @@ def main(cfg: DictConfig):
     if cfg.lr_scheduler=="OneCycleLR":
       max_lr = 3*cfg.lr
       print("Using OneCycleLR with max_lr={} steps_per_epoch={}".format(max_lr, train_data.ntimesteps))
-      lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, total_steps=None, epochs=cfg.num_epochs, steps_per_epoch=train_data.ntimesteps)
+      lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, 
+                                                         div_factor=max_lr/cfg.lr,
+                                                         final_div_factor=100,
+                                                         epochs=cfg.num_epochs, steps_per_epoch=train_data.ntimesteps)
     elif cfg.lr_scheduler=="None":
       print("not using a LR scheduler")
+      lr_scheduler=None
     else:
       raise NotImplementedError()
 
@@ -687,7 +691,7 @@ def main(cfg: DictConfig):
 
         tsteps_old = timesteps
 
-        train_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps)
+        train_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps, lr_scheduler)
 
         if train_runner.loader.dataset.cache:
             train_runner.loader.dataset.cache_loaded = True
@@ -814,7 +818,7 @@ def main(cfg: DictConfig):
         print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
         # if epoch == 6:
         if cfg.lr_scheduler != "None":
-          lr_scheduler.step()
+          # lr_scheduler.step()
           # # debugging purpose
           print("last LR was", lr_scheduler.get_last_lr()) # will print last learning rate.
           

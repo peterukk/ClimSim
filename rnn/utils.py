@@ -113,7 +113,7 @@ class train_or_eval_one_epoch:
                  device, dtype,
                  cfg, 
                  metrics_det, metric_h_con, metric_water_con, 
-                 batch_size = 384, train=True):
+                 batch_size = 384, train=True,):
         super().__init__()
         self.loader = dataloader
         self.batch_size = batch_size
@@ -147,7 +147,7 @@ class train_or_eval_one_epoch:
         else:
             self.use_mp_constraint=False 
                 
-    def eval_one_epoch(self, lossf, optim, epoch, timesteps=1):
+    def eval_one_epoch(self, lossf, optim, epoch, timesteps=1, lr_scheduler=None):
         report_freq = self.report_freq
         running_loss = 0.0; running_energy = 0.0; running_water = 0.0
         running_var=0.0; running_bias = 0.0
@@ -313,7 +313,7 @@ class train_or_eval_one_epoch:
                         else:
                             loss.backward()       
                             optim.step()
-            
+   
                         optim.zero_grad()
                         loss = loss.detach()
                         if self.cfg.loss_fn_type == "CRPS":
@@ -322,7 +322,9 @@ class train_or_eval_one_epoch:
                             huber = huber.detach(); mse = mse.detach(); mae = mae.detach()
                         h_con = h_con.detach() 
                         water_con = water_con.detach()
-                        
+                        if lr_scheduler is not None:
+                            lr_scheduler.step()
+                          
                     ypo_lay = ypo_lay.detach(); ypo_sfc = ypo_sfc.detach()
                     yto_lay = yto_lay.detach(); yto_sfc = yto_sfc.detach()
                         
