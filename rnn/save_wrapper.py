@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np 
 from typing import Final 
-from models import RNN_autoreg, MyRNN, LSTM_autoreg_torchscript
+# from models import RNN_autoreg, MyRNN, LSTM_autoreg_torchscript
 import h5py
 from utils import apply_input_norm_numba, cloud_exp_norm_numba, apply_output_norm_numba
 import matplotlib.pyplot as plt
@@ -110,98 +110,148 @@ lbd_qc  =  np.loadtxt(fpath_lbd_qc, delimiter=",", dtype=np.float32)
 lbd_qi  =  np.loadtxt(fpath_lbd_qi, delimiter=",", dtype=np.float32)
 
 
-model = LSTM_autoreg_torchscript(hyam,hybm,
-            out_scale = yscale_lev,
-            out_sfc_scale = yscale_sca, 
-            nx = nx, nx_sfc=nx_sfc, 
-            ny = ny, ny_sfc=ny_sfc, 
-            nneur=nneur, 
-            use_initial_mlp = use_initial_mlp,
-            use_intermediate_mlp=use_intermediate_mlp,
-            add_pres=add_pres,
-            use_memory=use_memory)
+# model = LSTM_autoreg_torchscript(hyam,hybm,
+#             out_scale = yscale_lev,
+#             out_sfc_scale = yscale_sca, 
+#             nx = nx, nx_sfc=nx_sfc, 
+#             ny = ny, ny_sfc=ny_sfc, 
+#             nneur=nneur, 
+#             use_initial_mlp = use_initial_mlp,
+#             use_intermediate_mlp=use_intermediate_mlp,
+#             add_pres=add_pres,
+#             use_memory=use_memory)
 
-from torchinfo import summary
-infostr = summary(model)
-num_params = infostr.total_params
-print(infostr)
+# from torchinfo import summary
+# infostr = summary(model)
+# num_params = infostr.total_params
+# print(infostr)
 
-checkpoint = torch.load(model_path, weights_only=True)
-model.load_state_dict(checkpoint['model_state_dict'])
-# optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-
-class NewModel(nn.Module):
+# checkpoint = torch.load(model_path, weights_only=True)
+# model.load_state_dict(checkpoint['model_state_dict'])
+# # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+class NewModel_constraint(nn.Module):
+    qinput_prune: Final[bool]
+    snowhice_fix: Final[bool]
+    v5_input: Final[bool]
+    mp_constraint: Final[bool]
+    is_stochastic: Final[bool]
+    return_det: Final[bool]
+    
     def __init__(self, original_model, 
-                 xmean_lev, xmean_sca, 
-                 xdiv_lev, xdiv_sca,
-                 yscale_lev, yscale_sca, 
-                 # lbd_qn, 
-                 lbd_qc, lbd_qi):
+                 lbd_qc, lbd_qi, lbd_qn,
+                 qinput_prune, snowhice_fix, v5_input, mp_constraint, 
+                 is_stochastic, return_det):
         
-        super(NewModel, self).__init__()
+        super(NewModel_constraint, self).__init__()
         self.original_model = original_model
-        self.xmean_lev  = torch.tensor(xmean_lev, dtype=torch.float32)
-        self.xmean_sca  = torch.tensor(xmean_sca, dtype=torch.float32)
-        self.xdiv_lev   = torch.tensor(xdiv_lev, dtype=torch.float32)
-        self.xdiv_sca   = torch.tensor(xdiv_sca, dtype=torch.float32)
-        self.yscale_lev = torch.tensor(yscale_lev, dtype=torch.float32)
-        self.yscale_sca   = torch.tensor(yscale_sca, dtype=torch.float32)
-        # self.lbd_qn     = torch.tensor(lbd_qn, dtype=torch.float32)
         self.lbd_qc     = torch.tensor(lbd_qc, dtype=torch.float32)
         self.lbd_qi     = torch.tensor(lbd_qi, dtype=torch.float32)
+        self.lbd_qn     = torch.tensor(lbd_qn, dtype=torch.float32)
 
-    # def temperature_scaling(self, T_raw):
-    #     # T_denorm = T = T*(self.xmax_lev[:,0] - self.xmin_lev[:,0]) + self.xmean_lev[:,0]
-    #     # T_denorm = T*(self.xcoeff_lev[2,:,0] - self.xcoeff_lev[1,:,0]) + self.xcoeff_lev[0,:,0]
-    #     # liquid_ratio = (T_raw - 253.16) / 20.0 
-    #     liquid_ratio = (T_raw - 253.16) * 0.05 
-    #     liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
-    #     return liquid_ratio
-    
-    # def preprocessing(self, x_main, x_sfc):
-    #     # convert v4 input array to v5 input array:
-    #     # ['state_t',
-    #     # 'state_rh',
-    #     # 'state_q0002' = qliq   -->  qn 
-    #     # 'state_q0003' = qice   --> liquid ratio
-    #     x_main[:,:,2]   =  x_main[:,:,2] +  x_main[:,:,3]  
-    #     x_main[:,:,3]   = self.temperature_scaling(x_main[:,:,0])      
-
-    #     #                            mean     max - min
-    #     x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
-    #     x_sfc =  (x_sfc  - self.xmean_sca)/(self.xdiv_sca)
-    #     x_main[:,:,2] = 1 - torch.exp(-x_main[:,:,2] * self.lbd_qn)
-    #     x_main = torch.where(torch.isnan(x_main), torch.tensor(0.0, device=x_main.device), x_main)
-    #     x_sfc  = torch.where(torch.isinf(x_sfc),  torch.tensor(0.0, device=x_sfc.device),  x_sfc)
-    #     return x_main, x_sfc 
+        self.hardtanh = nn.Hardtanh(0.0, 1.0)
+        self.qinput_prune = qinput_prune
+        self.snowhice_fix = snowhice_fix
+        self.v5_input = v5_input
+        self.mp_constraint = mp_constraint  
+        self.is_stochastic = is_stochastic
+        self.return_det = return_det
+        
+        self.xmean_lev      = self.original_model.xmean_lev.to("cpu")
+        self.xdiv_lev       = self.original_model.xdiv_lev.to("cpu")
+        self.xmean_sca      = self.original_model.xmean_sca.to("cpu")
+        self.xdiv_sca       = self.original_model.xdiv_sca.to("cpu")
+        self.yscale_lev     = self.original_model.yscale_lev.to("cpu")
+        self.yscale_sca     = self.original_model.yscale_sca.to("cpu")
 
     def preprocessing(self, x_main0, x_sfc0):
         # v4 input array
         x_main = x_main0.clone()
         x_sfc = x_sfc0.clone()
-
-        x_main[:,:,2] = 1 - torch.exp(-x_main[:,:,2] * self.lbd_qc)
-        x_main[:,:,3] = 1 - torch.exp(-x_main[:,:,3] * self.lbd_qi)   
-
-        #                            mean     max - min
-        x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
-        x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
         
+        # for i in range(x_main.shape[-1]):
+        #     print("i", i, "min max", np.min(x_main[:,:,i]), np.max(x_main[:,:,i]))
+        # for i in range(x_sfc.shape[-1]):
+        #     print("i", i, "min max sfc", np.min(x_sfc[:,i]), np.max(x_sfc[:,i]))
+        if self.snowhice_fix:
+            x_sfc = torch.where(torch.ge(x_sfc,1e10), torch.tensor(-1.0), x_sfc)
+            
+        if self.v5_input:
+            # v5 inputs
+            qn   = x_main[:,:,2]  + x_main[:,:,3]
+            if self.qinput_prune:
+                qn[:,0:15] = 0.0
+            qn = 1 - torch.exp(-qn * self.lbd_qn)
+            x_main[:,:,2] = qn
+            liq_frac_constrained  = self.temperature_scaling(x_main[:,:,0])
+            x_main[:,:,3] = liq_frac_constrained
+
+            #                            mean     max - min
+            # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+            # x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+            x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+            x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+            
+            # if self.qinput_prune:
+            #     x_main[:,0:15,2] = 0.0
+                
+        else:
+            # v4 inputs
+            x_main[:,:,2] = 1 - torch.exp(-x_main[:,:,2] * self.lbd_qc)
+            x_main[:,:,3] = 1 - torch.exp(-x_main[:,:,3] * self.lbd_qi)   
+            
+            #                            mean     max - min
+            # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+            # x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+            x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+            x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+            
+            if self.qinput_prune:
+                x_main[:,0:15,2:3] = 0.0
+        # clip RH 
+        x_main[:,:,1] = torch.clamp(x_main[:,:,1], 0, 1.2)
+
         x_main = torch.where(torch.isnan(x_main), torch.tensor(0.0, device=x_main.device), x_main)
-        # x_sfc  = torch.where(torch.isinf(x_sfc),  torch.tensor(0.0, device=x_sfc.device),  x_sfc)
+        x_main = torch.where(torch.isinf(x_main), torch.tensor(0.0, device=x_main.device), x_main)
         return x_main, x_sfc 
     
-    def postprocessing(self, out_lev, out_sfc):
-        out_lev[:,0:12,1:] = 0
-        out_lev      = out_lev / self.yscale_lev
-        out_sfc     = out_sfc / self.yscale_sca
-        # concatenate  
-        # out =  torch.cat((out_lev.flatten(start_dim=1),out_sfc),dim=1)
-
-        return out_lev, out_sfc
     
+    def temperature_scaling(self, T_raw):
+        # T_denorm = T = T*(self.xmax_lev[:,0] - self.xmin_lev[:,0]) + self.xmean_lev[:,0]
+        # T_denorm = T*(self.xcoeff_lev[2,:,0] - self.xcoeff_lev[1,:,0]) + self.xcoeff_lev[0,:,0]
+        # liquid_ratio = (T_raw - 253.16) / 20.0 
+        liquid_ratio = (T_raw - 253.16) * 0.05 
+        # liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
+        liquid_ratio = self.hardtanh(liquid_ratio)
 
+        return liquid_ratio
+    
+    def mp_postprocessing(self, T_before, qn_before, qliq_before, qice_before,
+                          out_lev, out_sfc):
+        T_new           = T_before  + out_lev[:,:,0:1]*1200
+        # print("T_new min", T_new.min(), "max", T_new.max())
+        
+        liq_frac_constrained    = self.temperature_scaling(T_new)
+        # liq_frac_constrained    = self.original_model.temperature_scaling(T_new)
+
+        # #                            dqn
+        qn_new      = qn_before + out_lev[:,:,2:3]*1200  
+        qliq_new    = liq_frac_constrained*qn_new
+        qice_new    = (1-liq_frac_constrained)*qn_new
+        dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
+        dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
+        
+        batch_size = out_lev.shape[0] 
+        # (nb, nlev, ny) --> (nb, ny, nlev)
+        out_lev = torch.transpose(out_lev, 1, 2).reshape(batch_size,300)
+
+        yout = torch.zeros((batch_size,368), device=T_before.device)
+        yout[:,0:120] = out_lev[:,0:120]
+        yout[:,120:180] = torch.reshape(dqliq, (batch_size, 60))
+        yout[:,180:240] = torch.reshape(dqice, (batch_size, 60))
+        yout[:,240:360] = out_lev[:,180:360]
+        yout[:,360:368] = out_sfc
+        return yout
+    
     def forward(self, x_main, x_sfc):
         # x_denorm = x_main.clone()
         
@@ -214,118 +264,88 @@ class NewModel(nn.Module):
         # print("xmain 0", torch.sum(x_main[200,:,:]))
 
         x_main, x_sfc = self.preprocessing(x_main, x_sfc)
-        # print("shape xsfc 2", x_sfc.shape)
-        # print("xmain ", torch.sum(x_main[200,:,:]), "min", x_main.min(), "max", x_main.max())
-        # print("x_sfc ", torch.sum(x_sfc[200,:]))
 
+        if self.is_stochastic:
+            out_lev, out_sfc, out_lev_det = self.original_model(x_main, x_sfc)
+            out_lev_det      = out_lev_det / self.yscale_lev
 
-        # outlev = torch.zeros((1000,36,3))
-        # print("dqn raw0", outlev[200,35,0:1])
+        else:
+            out_lev, out_sfc = self.original_model(x_main, x_sfc)
 
-        # outlev, outsfc = self.original_model(x_main, x_sfc)
-        out_lev, out_sfc = self.original_model(x_main, x_sfc)
-
-        
-        # out_lev, out_sfc = self.original_model.pp_mp(outlev, outsfc, x_denorm)
+        out_lev      = out_lev / self.yscale_lev
+        out_sfc      = out_sfc / self.yscale_sca
+                
+        if self.mp_constraint:
+            yout = self.mp_postprocessing(T_before, qn_before, qliq_before, qice_before, 
+                                  out_lev, out_sfc)
             
-        # out_lev, out_sfc = self.postprocessing(outlev, outsfc)
-        # out_lev      = outlev / self.original_model.yscale_lev
-        # out_sfc      = outsfc / self.original_model.yscale_sca
-        out_lev      = out_lev / self.original_model.yscale_lev
-        out_sfc      = out_sfc / self.original_model.yscale_sca
-        
-        # # print("shape x denorm", x_denorm.shape, "T", T_before.shape)
-        T_new           = T_before  + out_lev[:,:,0:1]*1200
-        # print("T_new min", T_new.min(), "max", T_new.max())
-        
-        # # liq_frac_constrained    = self.temperature_scaling(T_new)
-        liq_frac_constrained    = self.original_model.temperature_scaling(T_new)
-
-
-        # #                            dqn
-        qn_new      = qn_before + out_lev[:,:,2:3]*1200  
-        qliq_new    = liq_frac_constrained*qn_new
-        qice_new    = (1-liq_frac_constrained)*qn_new
-        dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
-        dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
-        
-        # print("Tbef {:.2f}   T {:.2f}  dt {:.2e}  liqfrac {:.2f}   dqn {:.2e}  qbef {:.2e}  qnew {:.2e}  dqliq {:.2e}  dqice {:.2e} ".format( 
-        #                                                 # x_denorm[200,35,4].item(),
-        #                                                 T_before[200,35].item(), 
-        #                                                 T_new[200,35].item(), 
-        #                                                 (out_lev[200,35,0:1]*1200).item(),
-        #                                                 liq_frac_constrained[200,35].item(), 
-        #                                                 (out_lev[200,35,2]*1200).item(), 
-        #                                                 qn_before[200,35].item(),
-        #                                                 qn_new[200,35].item(),
-        #                                                 dqliq[200,35].item(),
-        #                                                 dqice[200,35].item()))
- 
-        # out_lev     = torch.cat((out_lev[:,:,0:2], dqliq, dqice, out_lev[:,:,3:]),dim=2)
-        # return out_lev, out_sfc, outlev, outsfc
-        # return out_lev, out_sfc
-
-
-        # out_lev = torch.transpose(out_lev, 1, 2) # (nb,nlev,ny) --> (nb, ny, nlev)
-
-        # print("shape 1, ", out_lev[:,0:2].shape, "dq", dqliq.shape)
-        # out_lev = torch.cat((out_lev[:,0:2], dqliq.reshape(-1,1,60), dqice.reshape(-1,1,60), out_lev[:,3:]),dim=1)
-        
-        # out =  torch.cat((out_lev.flatten(start_dim=1),out_sfc),dim=1)
-        
-        batch_size = out_lev.shape[0] 
-        out_lev = torch.transpose(out_lev, 1, 2).reshape(batch_size,300)
-
-        yout = torch.zeros((batch_size,368))
-        yout[:,0:120] = out_lev[:,0:120]
-        yout[:,120:180] = torch.reshape(dqliq, (batch_size, 60))
-        yout[:,180:240] = torch.reshape(dqice, (batch_size, 60))
-        yout[:,240:360] = out_lev[:,180:360]
-        yout[:,360:368] = out_sfc
-        return yout 
+            if self.is_stochastic and self.return_det:
+                yout_det = self.mp_postprocessing(T_before, qn_before, qliq_before, qice_before, 
+                                      out_lev_det, out_sfc)
+            
+        else:
+            batch_size = out_lev.shape[0] 
+            out_lev = torch.transpose(out_lev, 1, 2).reshape(batch_size,360)
+            yout = torch.zeros((batch_size,368), device=x_main.device)
+            yout[:,0:360] = out_lev
+            yout[:,360:368] = out_sfc
+                      
+        yout = torch.where(torch.isnan(yout), torch.tensor(0.0, device=x_main.device), yout)
+        if self.is_stochastic and self.return_det:
+            yout_det = torch.where(torch.isnan(yout_det), torch.tensor(0.0, device=x_main.device), yout_det)
+            return yout, yout_det 
+        else:
+            return yout
     
-# def utils_preprocess(x_lev, x_sfc, y_lev, y_sfc):
-#     x_lev_b = np.copy(x_lev)
-#     x_sfc_b = np.copy(x_sfc)
-#     y_lev_b = np.copy(y_lev)
-#     y_sfc_b = np.copy(y_sfc)
-    
-#     x_lev_b_denorm = np.copy(x_lev_b[:,:,0:4])
-#     cloud_exp_norm_numba(x_lev_b)
-#     apply_input_norm_numba(x_lev_b, xmean_lev, xdiv_lev)  
-#     x_sfc_b = (x_sfc_b - xmean_sca0 ) / (xdiv_sca0)
-    
-#     x_lev_b[np.isnan(x_lev_b)] = 0
-#     x_lev_b[np.isinf(x_lev_b)] = 0 
-    
-#     y_lev_b[:,:,2] = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
-#     y_lev_b = np.delete(y_lev_b, 3, axis=2) 
-    
-#     apply_output_norm_numba(y_lev_b, yscale_lev)
-#     y_sfc_b  = y_sfc_b * yscale_sca    
+model_path_script = "saved_models/LSTM-None_lr0.0004.neur144-144_xv4_yv5_num49430_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, is_stochastic, return_det = True, True, False, True, False, False
 
-#     x_sfc_b = np.delete(x_sfc_b,sfc_vars_remove,axis=1)
-#     print("orig minmax x", x_lev_b.min(), x_lev_b.max())
-    
-#     x_lev_b_denorm = torch.from_numpy(x_lev_b_denorm)
+model_path_script = "saved_models/LSTM-None_lr0.0004.neur144-144_xv4_yv5_num91940_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, is_stochastic, return_det = True, True, False, True, False, False
 
-#     x_lev_b = torch.from_numpy(x_lev_b)
-#     x_sfc_b = torch.from_numpy(x_sfc_b)
-#     y_lev_b = torch.from_numpy(y_lev_b)
-#     y_sfc_b = torch.from_numpy(y_sfc_b)
-#     return x_lev_b, x_sfc_b, y_lev_b, y_sfc_b, x_lev_b_denorm
+model_path_script = "saved_models/LSTM-None_lr0.0004.neur160-160_xv4_yv5_num22056_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, is_stochastic, return_det = True, True, False, True, False, False
+
+model_path_script = "saved_models/LSTM-None_lr0.0004.neur144-144_xv4_yv5_num3150_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, is_stochastic, return_det = True, True, False, True, False, False
 
 
-new_model = NewModel(model, xmean_lev, xmean_sca, 
-                    xdiv_lev, xdiv_sca,
-                    yscale_lev, yscale_sca, 
-                    lbd_qc, lbd_qi)
 
-NewModel.device = "cpu"
+existing_wrapper=True
+
+# new_model = NewModel(model, xmean_lev, xmean_sca, 
+#                     xdiv_lev, xdiv_sca,
+#                     yscale_lev, yscale_sca, 
+#                     lbd_qc, lbd_qi)
+
+# NewModel.device = "cpu"
+# device = torch.device("cpu")
+
+# scripted_model = torch.jit.script(new_model)
+# scripted_model = scripted_model.eval()
+
+# if existing_wrapper:
+model = torch.jit.load(model_path_script)
+
+new_model = NewModel_constraint(model, lbd_qc, lbd_qi, lbd_qn, 
+                                qinput_prune, snowhice_fix, v5_input, mp_constraint, 
+                                is_stochastic, return_det)
+
 device = torch.device("cpu")
+new_model = new_model.to(device)
 
 scripted_model = torch.jit.script(new_model)
 scripted_model = scripted_model.eval()
+
+
+# save_file_torch = "v4_rnn-memory_wrapper_constrained_huber_160.pt"
+# save_file_torch = "v4_rnn-memory_wrapper_constrained_huber_160.pt"
+# save_file_torch = "wrappers/v4_rnn-memory_wrapper_constrained_huber_energy_num26608_160.pt"  
+save_file_torch = "wrappers/" + model_path_script.split("/")[1].split("_script.pt")[0] + ".pt"
+print("saving to ", save_file_torch)
+# 
+scripted_model.save(save_file_torch)
+f
 
 
 

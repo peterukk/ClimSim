@@ -32,7 +32,7 @@ print(device)
 
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from models import  MyRNN, LSTM_autoreg_torchscript, LSTM_torchscript, SRNN_autoreg_torchscript, LSTM_autoreg_torchscript_radflux, SpaceStateModel_autoreg
+from models import  *
 from utils import train_or_eval_one_epoch, generator_xy, BatchSampler
 # from metrics import get_energy_metric, get_hybrid_loss, my_mse_flatten
 import metrics as metrics
@@ -320,14 +320,15 @@ def main(cfg: DictConfig):
     xcoeffs = np.float32(xcoeff_lev), np.float32(xcoeff_sca)
     
     
-    if cfg.add_stochastic_layer:
+    # if cfg.add_stochastic_layer:
+    if cfg.ensemble_size>1:
         use_ensemble = True 
-        cfg.ensemble_size = 2
+        # cfg.ensemble_size = 2
         if cfg.loss_fn_type != "CRPS":
             raise NotImplementedError("To train stochastic RNN, use CRPS loss")
     else:
         use_ensemble = False
-        cfg.ensemble_size = 1
+        # cfg.ensemble_size = 1
         
     print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
     if len(cfg.nneur)==3:
@@ -355,6 +356,7 @@ def main(cfg: DictConfig):
                         add_stochastic_layer = cfg.add_stochastic_layer, 
                         output_prune = cfg.output_prune,
                         use_memory = cfg.autoregressive,
+                        # repeat_mu = cfg.repeat_mu,
                         separate_radiation = cfg.separate_radiation,
                         use_ensemble = use_ensemble,
                         diagnose_precip = diagnose_precip,
@@ -363,9 +365,12 @@ def main(cfg: DictConfig):
                         nh_mem = cfg.nh_mem)#,
                         #ensemble_size = ensemble_size)
         else:
-            model = LSTM_torchscript(hyam,hybm,
+            model = LSTM_torchscript(hyam,hybm,hyai,hybi,
                         out_scale = yscale_lev,
                         out_sfc_scale = yscale_sca, 
+                        xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+                        xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                        device=device,
                         nx = nx, nx_sfc=nx_sfc, 
                         ny = ny, ny_sfc=ny_sfc, 
                         nneur = cfg.nneur, 
@@ -406,6 +411,29 @@ def main(cfg: DictConfig):
                     use_memory = cfg.autoregressive,
                     use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem)#,
+    elif cfg.model_type=="LSTM_sepmp":
+        model = LSTM_autoreg_torchscript_mp(hyam,hybm,hyai,hybi,
+                        out_scale = yscale_lev,
+                        out_sfc_scale = yscale_sca, 
+                        xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+                        xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                        device=device,
+                        nx = nx, nx_sfc=nx_sfc, 
+                        ny = ny, ny_sfc=ny_sfc, 
+                        nneur=cfg.nneur, 
+                        use_initial_mlp = cfg.use_initial_mlp,
+                        use_intermediate_mlp = cfg.use_intermediate_mlp,
+                        add_pres = cfg.add_pres,
+                        add_stochastic_layer = cfg.add_stochastic_layer, 
+                        output_prune = cfg.output_prune,
+                        use_memory = cfg.autoregressive,
+                        # separate_radiation = cfg.separate_radiation,
+                        use_ensemble = use_ensemble,
+                        # diagnose_precip = diagnose_precip,
+                        # use_third_rnn = use_third_rnn,
+                        concat = cfg.concat,
+                        nh_mem = cfg.nh_mem)#,
+                        #ensemble_size = ensemble_size)               
     else:
       print("using SSM")
       model = SpaceStateModel_autoreg(hyam,hybm,hyai,hybi,
@@ -433,8 +461,11 @@ def main(cfg: DictConfig):
     #     # scaler = torch.amp.GradScaler(autocast = True)
     #     scaler = torch.amp.GradScaler(device.type)
             
-    batch_size_tr = nloc
-    
+    if cfg.autoregressive:
+        batch_size_tr = nloc
+    else:
+        batch_size_tr = cfg.batch_size_tr
+
     # To improve IO, which is a bottleneck, increase the batch size by a factor of chunk_factor and 
     # load this many batches at once. These chk then need to be manually split into batches 
     # within the data iteration loop   
@@ -461,7 +492,8 @@ def main(cfg: DictConfig):
     
     train_data = generator_xy(tr_data_path, cache = cfg.cache, nloc = nloc, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
-                    v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
+                    v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune,  
+                    input_norm_per_level=cfg.input_norm_per_level,
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
                     include_prev_inputs=cfg.include_prev_inputs, include_prev_outputs=cfg.include_prev_outputs,
                     ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
@@ -481,6 +513,7 @@ def main(cfg: DictConfig):
     val_data = generator_xy(val_data_path, cache=cfg.val_cache, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
+                    input_norm_per_level=cfg.input_norm_per_level,
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
                     include_prev_inputs=cfg.include_prev_inputs, include_prev_outputs=cfg.include_prev_outputs,
                     ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
@@ -495,9 +528,12 @@ def main(cfg: DictConfig):
                               batch_size=None, batch_sampler=None, 
                               prefetch_factor = prefetch_factor, 
                               pin_memory=pin, persistent_workers=persistent)
-    
-    nloc_val = batch_size_val = val_data.nloc
-    
+    if cfg.autoregressive:
+        nloc_val = batch_size_val = val_data.nloc
+    else:
+        nloc_val = val_data.nloc
+        batch_size_val = cfg.batch_size_val 
+
     metric_h_con = metrics.get_energy_metric(hyai, hybi)
     metric_water_con = metrics.get_water_conservation(hyai, hybi)
 
@@ -531,6 +567,19 @@ def main(cfg: DictConfig):
     else:
         raise NotImplementedError()
   
+#   https://docs.pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.OneCycleLR.html
+    if cfg.lr_scheduler=="OneCycleLR":
+      max_lr = 3*cfg.lr
+      print("Using OneCycleLR with max_lr={} steps_per_epoch={}".format(max_lr, train_data.ntimesteps))
+      lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, total_steps=None, epochs=cfg.num_epochs, steps_per_epoch=train_data.ntimesteps)
+    elif cfg.lr_scheduler=="None":
+      print("not using a LR scheduler")
+    else:
+      raise NotImplementedError()
+
+    # lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optimizer, gamma=cfg.learning_rate_decay_factor,last_epoch=-1)
+
+
     timewindow_default = 1
     rollout_schedule = cfg.rollout_schedule #timestep_schedule[0:10].tolist()
     timestep_schedule = np.arange(1000)
@@ -687,6 +736,13 @@ def main(cfg: DictConfig):
             # MODEL CHECKPOINT IF VALIDATION LOSS IMPROVED
             # if cfg.save_model and val_loss < best_val_loss:
             if cfg.save_model and val_loss > best_val_loss:
+                #SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_ep{}_val{:.4f}.pt'.format(cfg.model_type,
+                #                                                                 cfg.memory, cfg.lr, 
+                #                                                                 cfg.nneur[0], cfg.nneur[1], 
+                #                                                                 inpstr, outpstr,
+                #                                                                 model_num, epoch, val_loss)
+                #save_file_torch = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script.pt"
+
                 print("New best validation result obtained, saving model to", SAVE_PATH)
                 if cfg.loss_fn_type == "CRPS":
                     model.use_ensemble=False
@@ -756,7 +812,12 @@ def main(cfg: DictConfig):
 
         print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timesteps))
         print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
-    
+        # if epoch == 6:
+        if cfg.lr_scheduler != "None":
+          lr_scheduler.step()
+          # # debugging purpose
+          print("last LR was", lr_scheduler.get_last_lr()) # will print last learning rate.
+          
     if cfg.use_wandb:
         wandb.finish()
 

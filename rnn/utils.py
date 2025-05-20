@@ -20,7 +20,7 @@ import time
 from metrics import corrcoeff_pairs_batchfirst 
 import matplotlib
 import matplotlib.pyplot as plt
-lbd_qi = np.array([10000000.        , 10000000.        , 10000000.        ,
+lbd_qi_lev = np.array([10000000.        , 10000000.        , 10000000.        ,
        10000000.        , 10000000.        , 10000000.        ,
        10000000.        , 10000000.        , 10000000.        ,
        10000000.        , 10000000.        ,  7556905.1099813 ,
@@ -40,9 +40,9 @@ lbd_qi = np.array([10000000.        , 10000000.        , 10000000.        ,
           98174.89731264,   100348.81479455,   102750.86508174,
          105013.71207426,   106732.83687405,   107593.00387448,
          108022.91061398,   109634.8552567 ,   112259.85403167], dtype=np.float32)
+lbd_qi_mean = np.repeat(np.float32(2291547.5),60)
 
-
-lbd_qc = np.array([10000000.        , 10000000.        , 10000000.        ,
+lbd_qc_lev = np.array([10000000.        , 10000000.        , 10000000.        ,
        10000000.        , 10000000.        , 10000000.        ,
        10000000.        , 10000000.        , 10000000.        ,
        10000000.        , 10000000.        , 10000000.        ,
@@ -62,8 +62,9 @@ lbd_qc = np.array([10000000.        , 10000000.        , 10000000.        ,
           34631.09245739,    37847.88977875,    42878.24049123,
           50560.90175672,    61294.98389768,    72912.41450047,
           80998.32102651,    88376.7321416 ,   135468.13760583], dtype=np.float32)
+lbd_qc_mean = np.repeat(np.float32(4496518.0),60)
 
-lbd_qn = np.array([10000000.        , 10000000.        , 10000000.        ,
+lbd_qn_lev = np.array([10000000.        , 10000000.        , 10000000.        ,
        10000000.        , 10000000.        , 10000000.        ,
        10000000.        , 10000000.        , 10000000.        ,
        10000000.        , 10000000.        ,  7556905.1099813 ,
@@ -83,6 +84,7 @@ lbd_qn = np.array([10000000.        , 10000000.        , 10000000.        ,
           31360.65252559,    34174.61235695,    38452.69084769,
           44777.29680978,    53238.52542881,    61797.74325549,
           66939.83519617,    70867.57480034,    94733.63482142], dtype=np.float32) 
+lbd_qn_mean = np.repeat(np.float32(2268406.8),60)
 
 
 # qliq = 1 - np.exp(-xlev[:,:,2] * lbd_qc)
@@ -135,7 +137,7 @@ class train_or_eval_one_epoch:
         # The computed values of various metrics are stored at the end
         self.metrics = {}
         
-        if self.cfg.add_stochastic_layer:
+        if self.cfg.ensemble_size>1:
             self.use_ensemble=True
         else:
             self.use_ensemble=False
@@ -182,7 +184,9 @@ class train_or_eval_one_epoch:
             
         for i,data in enumerate(self.loader):
             # print("shape mem 2 {}".format(model.rnn1_mem.shape))
-            x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk  = data
+            x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk  = data 
+            
+            # print("shape x lay", x_lay_chk.shape)
 
             # print(" x lay raw 0,50::", x_lay_raw_chk[0,50:,0])
             x_lay_chk       = x_lay_chk.to(device)
@@ -205,7 +209,8 @@ class train_or_eval_one_epoch:
                 x_sfc0 = x_sfc_chk[ichunk]
                 target_lay0 = targets_lay_chk[ichunk]
                 target_sfc0 = targets_sfc_chk[ichunk]
-                    
+                # print("shape xlay 0", x_lay0.shape)
+
                 tcomp0= time.time()               
                 
                 with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
@@ -256,9 +261,9 @@ class train_or_eval_one_epoch:
                         if self.use_ensemble:
                             # print("preds shape", preds_lay)
                             # use only first member from here on 
-                            preds_lay = torch.reshape(preds_lay, (timesteps, 2, self.batch_size,  self.model.nlev,  self.model.ny))
+                            preds_lay = torch.reshape(preds_lay, (timesteps, self.cfg.ensemble_size, self.batch_size,  self.model.nlev,  self.model.ny))
                             preds_lay = torch.reshape(preds_lay[:,0,:,:], shape=targets_lay.shape)
-                            preds_sfc = torch.reshape(preds_sfc, (timesteps, 2, self.batch_size,  self.model.ny_sfc))
+                            preds_sfc = torch.reshape(preds_sfc, (timesteps, self.cfg.ensemble_size, self.batch_size,  self.model.ny_sfc))
                             preds_sfc = torch.reshape(preds_sfc[:,0,:], shape=targets_sfc.shape)
                                           
                         if self.use_mp_constraint:
@@ -491,7 +496,7 @@ class train_or_eval_one_epoch:
         gc.collect()
     
 @njit(fastmath=True)    
-def v4_to_v5_inputs_numba(x_lev_b, liq_ratio):
+def v4_to_v5_inputs_numba(x_lev_b, liq_ratio, lbd_qn):
     (ns,nlev,nx) = x_lev_b.shape
     for ii in range(ns):
         for jj in range(nlev):
@@ -501,7 +506,7 @@ def v4_to_v5_inputs_numba(x_lev_b, liq_ratio):
             x_lev_b[ii,jj,3] = liq_ratio[ii,jj]
             
 @njit(fastmath=True)    
-def cloud_exp_norm_numba(x_lev_b):
+def cloud_exp_norm_numba(x_lev_b, lbd_qc, lbd_qi):
     (ns,nlev,nx) = x_lev_b.shape
     for ii in range(ns):
         for jj in range(nlev):
@@ -545,6 +550,8 @@ class generator_xy(torch.utils.data.Dataset):
                  xcoeffs_ref=None,
                  ycoeffs_ref=None,
                  v4_to_v5_inputs=False,
+                 cloud_exp_norm=True,
+                 input_norm_per_level=True,
                  remove_past_sfc_inputs=False,
                  qinput_prune=False,
                  rh_prune=False,
@@ -563,7 +570,8 @@ class generator_xy(torch.utils.data.Dataset):
         self.cache = cache
         self.use_numba = True
         self.nloc = nloc
-        self.cloud_exp_norm = True
+        # self.cloud_exp_norm = True
+        self.cloud_exp_norm = cloud_exp_norm
         self.remove_past_sfc_inputs = remove_past_sfc_inputs
         self.mp_mode = mp_mode
         self.no_multiprocessing=no_multiprocessing
@@ -579,6 +587,15 @@ class generator_xy(torch.utils.data.Dataset):
             self.use_mp_constraint = False    
         
         self.v4_to_v5_inputs    = v4_to_v5_inputs
+        if input_norm_per_level:
+            self.lbd_qc = lbd_qc_lev
+            self.lbd_qi = lbd_qi_lev
+            self.lbd_qn = lbd_qn_lev
+        else:
+            self.lbd_qc = lbd_qc_mean
+            self.lbd_qi = lbd_qi_mean
+            self.lbd_qn = lbd_qn_mean
+
         if xcoeffs_ref is None:
             # self.v4_to_v5_inputs    = False
             self.reverse_input_norm = False
@@ -898,15 +915,15 @@ class generator_xy(torch.utils.data.Dataset):
                 x_lev_b[:,:,2] = qn
                 x_lev_b[:,:,3] = liq_frac_constrained
                 if self.cloud_exp_norm:
-                    x_lev_b[:,:,2] = 1 - np.exp(-x_lev_b[:,:,2] * lbd_qn)
+                    x_lev_b[:,:,2] = 1 - np.exp(-x_lev_b[:,:,2] * self.lbd_qn)
 
         else:
             if self.cloud_exp_norm:
                 if self.use_numba:
-                    cloud_exp_norm_numba(x_lev_b)
+                    cloud_exp_norm_numba(x_lev_b, self.lbd_qc, self.lbd_qi)
                 else:
-                    x_lev_b[:,:,2] = 1 - np.exp(-x_lev_b[:,:,2] * lbd_qc)
-                    x_lev_b[:,:,3] = 1 - np.exp(-x_lev_b[:,:,3] * lbd_qi)
+                    x_lev_b[:,:,2] = 1 - np.exp(-x_lev_b[:,:,2] * self.lbd_qc)
+                    x_lev_b[:,:,3] = 1 - np.exp(-x_lev_b[:,:,3] * self.lbd_qi)
                     # print("min max liq", x_lev_b[:,:,2].min(), x_lev_b[:,:,2].max() )
                     # print("min max ice", x_lev_b[:,:,3].min(), x_lev_b[:,:,3].max() )
             if self.qinput_prune:
@@ -920,6 +937,7 @@ class generator_xy(torch.utils.data.Dataset):
         # t0_it = time.time()
 
         if self.apply_new_input_scaling:
+        
             if self.use_numba:
                 apply_input_norm_numba(x_lev_b, self.xcoeff_lev[0], self.xcoeff_lev[1])  
             else:

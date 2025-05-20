@@ -27,7 +27,7 @@ new_nolev_scaling: false
 loss_fn_type: huber
 use_energy_loss: true
 # w_hcon: 1.0e-05
-w_hcon: 5.0e-06
+w_hcon: 3.0e-06
 # input_norm_per_level: false
 # output_norm_per_level: false
 use_water_loss: true
@@ -45,8 +45,8 @@ snowhice_fix: true
 
 nh_mem: 16
 nneur:
-- 144
-- 144
+- 160
+- 160
 
 add_pres: true
 add_refpres: false
@@ -57,9 +57,7 @@ memory: Hidden
 model_type: LSTM
 concat: false
 separate_radiation: false
-ensemble_size: 1
-crps_start_epoch: 0 
-beta: 1.0 
+ensemble_size: 1 
 
 lr_scheduler: None
 save_model: true
@@ -74,14 +72,14 @@ timestep_scheduling: true
 optimizer: soap
 #optimizer: adamwschedulefree
 rollout_schedule:
-- 1
-- 1
 - 2
 - 2
 - 3
 - 3
-- 3
 - 4
 - 4
-- 4
+- 5
+- 5
+- 6
+- 6
 swap_true_mem_with_pred_epoch: 0
