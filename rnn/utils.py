@@ -160,7 +160,7 @@ class train_or_eval_one_epoch:
         epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
         epoch_bias_lev_tot = 0.0; epoch_bias_perlev= 0.0
         epoch_mae_lev_clw = 0.0; epoch_mae_lev_cli = 0.0
-        epoch_rmse_perlev = 0.0 
+        epoch_rmse_perlev = 0.0; epoch_prec_std_frac = 0.0
         t_comp =0 
         t0_it = time.time()
         j = 0; k = 0; k2=2    
@@ -216,7 +216,7 @@ class train_or_eval_one_epoch:
                 with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
                     if self.cfg.autoregressive:
                         outs = self.model(x_lay0, x_sfc0, rnn1_mem)
-                        if self.cfg.add_stochastic_layer:
+                        if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb":
                             preds_lay0, preds_sfc0, rnn1_mem, dummy = outs
                         else:
                             preds_lay0, preds_sfc0, rnn1_mem = outs
@@ -284,7 +284,7 @@ class train_or_eval_one_epoch:
                             lhf = x_sfc[:,2] 
 
                         # Energy conservation metric
-                        h_con           = self.metric_h_con(yto_lay, ypo_lay, surf_pres_denorm, 1)
+                        h_con           = self.metric_h_con(yto_lay, ypo_lay, surf_pres_denorm, 1) #timesteps)
                         
                         # Water conservation metric (computed over multiple timesteps since the CRM has precipitation storage not exposed to NN)
                         water_con_p     = self.metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)
@@ -298,6 +298,8 @@ class train_or_eval_one_epoch:
                         if self.cfg.use_bias_loss:
                             loss = loss + self.cfg.w_bias*raw_bias_lev
                         del raw_bias_sfc
+
+                        # if epoch>4:
                             
                         if self.cfg.use_energy_loss: 
                             loss = loss + self.cfg.w_hcon*h_con
@@ -307,11 +309,11 @@ class train_or_eval_one_epoch:
                             
                     if self.train:
                         if self.cfg.use_scaler:
-                            self.scaler.scale(loss).backward()
+                            self.scaler.scale(loss).backward(retain_graph=True)
                             self.scaler.step(optim)
                             self.scaler.update()
                         else:
-                            loss.backward()       
+                            loss.backward(retain_graph=True)       
                             optim.step()
    
                         optim.zero_grad()
@@ -322,7 +324,7 @@ class train_or_eval_one_epoch:
                             huber = huber.detach(); mse = mse.detach(); mae = mae.detach()
                         h_con = h_con.detach() 
                         water_con = water_con.detach()
-                        if lr_scheduler is not None:
+                        if self.cfg.lr_scheduler=="OneCycleLR":
                             lr_scheduler.step()
                           
                     ypo_lay = ypo_lay.detach(); ypo_sfc = ypo_sfc.detach()
@@ -372,6 +374,9 @@ class train_or_eval_one_epoch:
                             prec_true = yto_sfc.reshape(-1,self.model.ny_sfc)[:,3].cpu().numpy()
                             r2_np = np.corrcoef((prec_pred,prec_true))[0,1]
                             epoch_R2precc += r2_np
+                            epoch_prec_std_frac += prec_pred.std()/prec_true.std()
+                            # epoch_prec_perc_frac += np.percentile(prec_pred,99.9)/np.percentile(prec_true,99.9)
+
                             #print("R2 numpy", r2_np, "R2 torch", self.metric_R2_precc(ypo_sfc[:,3:4], yto_sfc[:,3:4]) )
 
                             ypo_lay = ypo_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
@@ -392,7 +397,7 @@ class train_or_eval_one_epoch:
                         x_lay_raw = []; yto_lay = []; yto_sfc = []
                         x_sfc = []
                         rnn1_mem = rnn1_mem.detach()
-
+                        # rnn1_mem.requires_grad=True
                         
                 t_comp += time.time() - tcomp0
                 # # print statistics 
@@ -468,7 +473,7 @@ class train_or_eval_one_epoch:
 
         #self.metrics['R2_precc'] = self.metric_R2_precc.compute()
         self.metrics['R2_precc'] = epoch_R2precc / k
-    
+        self.metrics['prec_std_frac'] = epoch_prec_std_frac / k 
         self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
         self.metrics['mae_cli'] = np.nanmean(epoch_mae_lev_cli / k)
         

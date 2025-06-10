@@ -355,7 +355,6 @@ def main(cfg: DictConfig):
                         add_pres = cfg.add_pres,
                         add_stochastic_layer = cfg.add_stochastic_layer, 
                         output_prune = cfg.output_prune,
-                        use_memory = cfg.autoregressive,
                         # repeat_mu = cfg.repeat_mu,
                         separate_radiation = cfg.separate_radiation,
                         use_ensemble = use_ensemble,
@@ -378,7 +377,7 @@ def main(cfg: DictConfig):
                         use_intermediate_mlp = cfg.use_intermediate_mlp,
                         add_pres = cfg.add_pres, output_prune = cfg.output_prune)
     elif cfg.model_type=="SRNN":
-        model = SRNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
+        model = stochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
                     out_sfc_scale = yscale_sca, 
                     xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
@@ -394,6 +393,23 @@ def main(cfg: DictConfig):
                     use_memory = cfg.autoregressive,
                     use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem)#,
+    elif cfg.model_type=="partiallystochasticRNN":
+        model = halfstochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
+                    out_scale = yscale_lev,
+                    out_sfc_scale = yscale_sca, 
+                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                    device=device,
+                    nx = nx, nx_sfc=nx_sfc, 
+                    ny = ny, ny_sfc=ny_sfc, 
+                    nneur=cfg.nneur, 
+                    use_initial_mlp = cfg.use_initial_mlp,
+                    use_intermediate_mlp = cfg.use_intermediate_mlp,
+                    add_pres = cfg.add_pres,
+                    output_prune = cfg.output_prune,
+                    use_ensemble = use_ensemble,
+                    nh_mem = cfg.nh_mem,
+                    diagnose_precip = diagnose_precip)#,
     elif cfg.model_type=="radflux":
         model = LSTM_autoreg_torchscript_radflux(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
@@ -456,6 +472,11 @@ def main(cfg: DictConfig):
     
     infostr = summary(model)
     num_params = infostr.total_params
+    
+    if cfg.model_file_checkpoint != "None":
+        print("Loading existing model checkpoint from {}".format(cfg.model_file_checkpoint))
+        checkpoint = torch.load("saved_models/"+cfg.model_file_checkpoint, weights_only=True)
+        model.load_state_dict(checkpoint['model_state_dict'])
     
     # if cfg.use_scaler:
     #     # scaler = torch.amp.GradScaler(autocast = True)
@@ -566,22 +587,6 @@ def main(cfg: DictConfig):
         optimizer = SOAP(model.parameters(), lr = cfg.lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
     else:
         raise NotImplementedError()
-  
-#   https://docs.pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.OneCycleLR.html
-    if cfg.lr_scheduler=="OneCycleLR":
-      max_lr = 3*cfg.lr
-      print("Using OneCycleLR with max_lr={} steps_per_epoch={}".format(max_lr, train_data.ntimesteps))
-      lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, 
-                                                         div_factor=max_lr/cfg.lr,
-                                                         final_div_factor=100,
-                                                         epochs=cfg.num_epochs, steps_per_epoch=train_data.ntimesteps)
-    elif cfg.lr_scheduler=="None":
-      print("not using a LR scheduler")
-      lr_scheduler=None
-    else:
-      raise NotImplementedError()
-
-    # lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optimizer, gamma=cfg.learning_rate_decay_factor,last_epoch=-1)
 
 
     timewindow_default = 1
@@ -589,6 +594,29 @@ def main(cfg: DictConfig):
     timestep_schedule = np.arange(1000)
     timestep_schedule[0:len(rollout_schedule)] = rollout_schedule
     timestep_schedule[len(rollout_schedule):] = rollout_schedule[len(rollout_schedule)-1]
+
+  
+#   https://docs.pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.OneCycleLR.html
+    if cfg.lr_scheduler=="OneCycleLR":
+      #max_lr = 5*cfg.lr
+      max_lr = 4*cfg.lr
+      # max_lr = 3*cfg.lr
+      steps_per_epoch = int(2*train_data.ntimesteps // timestep_schedule.mean())
+      print("Using OneCycleLR with max_lr={} steps_per_epoch={}".format(max_lr, steps_per_epoch))
+      lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, 
+                                                         div_factor=max_lr/cfg.lr,
+                                                         final_div_factor=10,
+                                                         epochs=30, steps_per_epoch= steps_per_epoch)
+    elif cfg.lr_scheduler=="StepLR":
+      print("Using StepLR with gamma={}".format(cfg.lr_gamma))
+      lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=cfg.lr_gamma, last_epoch=-1)
+    elif cfg.lr_scheduler=="None":
+      print("not using a LR scheduler")
+      lr_scheduler=None
+    else:
+      raise NotImplementedError()
+
+    # lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optimizer, gamma=cfg.learning_rate_decay_factor,last_epoch=-1)
 
             
     from random import randrange
@@ -626,8 +654,8 @@ def main(cfg: DictConfig):
 
 
     save_file_torch = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script.pt"
-    # best_val_loss = np.inf
-    best_val_loss = 0.0
+    best_val_loss = np.inf
+    # best_val_loss = 0.0
     
     tsteps_old = 1
     new_lr = cfg.lr
@@ -693,6 +721,9 @@ def main(cfg: DictConfig):
 
         train_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps, lr_scheduler)
 
+        if cfg.lr_scheduler=="StepLR":
+            lr_scheduler.step()
+
         if train_runner.loader.dataset.cache:
             train_runner.loader.dataset.cache_loaded = True
         
@@ -734,20 +765,21 @@ def main(cfg: DictConfig):
                 logged_metrics['epoch'] = epoch
                 wandb.log(logged_metrics)
     
-            # val_loss = val_runner.metrics["loss"]
-            val_loss = val_runner.metrics["R2"]
+            val_loss = val_runner.metrics["loss"]
+            # val_loss = val_runner.metrics["R2"]
 
             # MODEL CHECKPOINT IF VALIDATION LOSS IMPROVED
+            if True:
             # if cfg.save_model and val_loss < best_val_loss:
-            if cfg.save_model and val_loss > best_val_loss:
-                #SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_ep{}_val{:.4f}.pt'.format(cfg.model_type,
-                #                                                                 cfg.memory, cfg.lr, 
-                #                                                                 cfg.nneur[0], cfg.nneur[1], 
-                #                                                                 inpstr, outpstr,
-                #                                                                 model_num, epoch, val_loss)
-                #save_file_torch = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script.pt"
-
-                print("New best validation result obtained, saving model to", SAVE_PATH)
+            # if cfg.save_model and val_loss > best_val_loss:
+                SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_ep{}_val{:.4f}.pt'.format(cfg.model_type,
+                                                                                cfg.memory, cfg.lr, 
+                                                                                cfg.nneur[0], cfg.nneur[1], 
+                                                                                inpstr, outpstr,
+                                                                                model_num, epoch, val_loss)
+                save_file_torch = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script.pt"
+                print("saving model to", SAVE_PATH)
+                # print("New best validation result obtained, saving model to", SAVE_PATH)
                 if cfg.loss_fn_type == "CRPS":
                     model.use_ensemble=False
                 model = model.to("cpu")

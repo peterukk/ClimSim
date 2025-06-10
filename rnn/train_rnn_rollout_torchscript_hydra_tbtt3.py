@@ -29,11 +29,10 @@ import torch.nn as nn
 cuda = torch.cuda.is_available() 
 device = torch.device("cuda" if cuda else "cpu")
 print(device)
-
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from models import *
-from utils import train_or_eval_one_epoch, generator_xy, BatchSampler
+from models import  MyRNN, LSTM_autoreg_torchscript
+from utils import generator_xy, BatchSampler
 # from metrics import get_energy_metric, get_hybrid_loss, my_mse_flatten
 import metrics as metrics
 from torchmetrics.regression import R2Score
@@ -53,9 +52,7 @@ def main(cfg: DictConfig):
 
     #torch.set_float32_matmul_precision("medium")
     #torch.backends.cuda.matmul.allow_tf32 = True    
-    # torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    print("Allow TF32:", torch.backends.cuda.matmul.allow_tf32)
-    
+
     print('RAM memory % used:', psutil.virtual_memory()[2], flush=True)
     # Getting usage of virtual_memory in GB ( 4th field)
     print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
@@ -63,10 +60,8 @@ def main(cfg: DictConfig):
     # cfg = OmegaConf.load("conf/autoreg_LSTM.yaml")
     
     # mp_mode = 0   # regular 6 outputs
-    # mp_mode = 1   # 5 outputs, pred qn, liq_ratio diagnosed from temperature (mp_constraint)
-    # mp_mode = 2   # same as mode=1, but predict only total precipitation PRECC,
-                    # and again diagnose snow based on temperature
-                    
+    # mp_mode = 1   # 5 outputs, pred qn, liq_ratio diagnosed (mp_constraint)
+    # mp_mode = 2   # 6 outputs, pred qn and liq_ratio
     if cfg.mp_mode>0:
         use_mp_constraint=True
     else:
@@ -170,6 +165,7 @@ def main(cfg: DictConfig):
     #'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
     
     hf.close()
+    print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
     
     if cfg.v4_to_v5_inputs:
         vars_2D_inp.remove('state_q0002') # liq
@@ -182,43 +178,7 @@ def main(cfg: DictConfig):
         vars_2D_outp.remove('ptend_q0003')
         vars_2D_outp.insert(2,"ptend_qn")
     
-    if cfg.include_prev_outputs:
-        if not cfg.output_norm_per_level:
-            raise NotImplementedError("Only level-specific norm coefficients saved for previous tendency outputs")
-
-        vars_2D_inp.append('state_t_prvphy')
-        vars_2D_inp.append('state_q0001_prvphy')
-        vars_2D_inp.append('state_q0002_prvphy')
-        vars_2D_inp.append('state_q0003_prvphy')
-        vars_2D_inp.append('state_u_prvphy')
-        nx = nx + 5
     
-    if cfg.include_prev_inputs:
-        nx = nx + 6 
-
-    if cfg.include_prev_inputs or cfg.include_prev_outputs:
-        skip_first_index=True 
-    else:
-        skip_first_index=False
-
-    if cfg.add_refpres:
-        nx = nx + 1
-        
-    # if use_mp_constraint:
-    if cfg.mp_mode>0:
-        ny_pp = ny # The 6 original outputs will be after postprocessing
-        ny = ny - 1 # The model itself only has 5 outputs (total cloud water)
-    else:
-        ny_pp = ny 
-        
-    if cfg.mp_mode==2:
-        diagnose_precip = True
-    else:
-        diagnose_precip = False
-        
-
-    print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
-
     yscale_sca = output_scale[vars_1D_outp].to_dataarray(dim='features', name='outputs_sca').transpose().values
 
     if cfg.output_norm_per_level:
@@ -267,6 +227,12 @@ def main(cfg: DictConfig):
 
     weights=None 
     
+    if cfg.mp_mode==2:
+        liq_frac_scale = np.ones(nlev,dtype=np.float32).reshape(nlev,1)
+        liq_frac_scale[:] = 2.4
+        yscale_lev = np.concatenate((yscale_lev[:,0:3], liq_frac_scale, yscale_lev[:,3:]), axis=1)
+    
+            
     ycoeffs = (yscale_lev, yscale_sca)
     print("Y coeff shapes:", yscale_lev.shape, yscale_sca.shape)
     
@@ -288,6 +254,7 @@ def main(cfg: DictConfig):
         xmean_lev = np.concatenate((xmean_lev, xmean_lev[:,0:6]), axis=1)
         xdiv_lev =  np.concatenate((xdiv_lev, xdiv_lev[:,0:6]), axis=1)
                  
+    
     if cfg.add_refpres:
         xmean_lev = np.concatenate((xmean_lev, np.zeros(nlev).reshape(nlev,1)), axis=1)
         xdiv_lev =  np.concatenate((xdiv_lev, np.ones(nlev).reshape(nlev,1)), axis=1)
@@ -319,15 +286,29 @@ def main(cfg: DictConfig):
     xcoeff_lev = np.stack((xmean_lev, xdiv_lev))
     xcoeffs = np.float32(xcoeff_lev), np.float32(xcoeff_sca)
     
+    if cfg.include_prev_inputs:
+        nx = nx + 6 
+        
+    if cfg.add_refpres:
+        nx = nx + 1
+        
+    # if use_mp_constraint:
+    if cfg.mp_mode==1:
+        ny_pp = ny # The 6 original outputs will be after postprocessing
+        ny = ny - 1 # The model itself only has 5 outputs (total cloud water)
+    else:
+        ny_pp = ny 
+    # ny_pp = ny 
+    
     
     if cfg.add_stochastic_layer:
         use_ensemble = True 
-        # cfg.ensemble_size = 2
+        ensemble_size = 2
         if cfg.loss_fn_type != "CRPS":
             raise NotImplementedError("To train stochastic RNN, use CRPS loss")
     else:
         use_ensemble = False
-        # cfg.ensemble_size = 1
+        ensemble_size = 1
         
     print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
     if len(cfg.nneur)==3:
@@ -338,10 +319,8 @@ def main(cfg: DictConfig):
       raise NotImplementedError()
 
 
-    # if cfg.model_type=="LSTM":
-    if cfg.model_type=="LSTM_autoreg_torchscript_perturb":
-        # if cfg.autoregressive:
-        model_det = LSTM_autoreg_torchscript(hyam,hybm,hyai,hybi,
+    if cfg.model_type=="LSTM":
+        model = LSTM_autoreg_torchscript(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
                     out_sfc_scale = yscale_sca, 
                     xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
@@ -353,89 +332,28 @@ def main(cfg: DictConfig):
                     use_initial_mlp = cfg.use_initial_mlp,
                     use_intermediate_mlp = cfg.use_intermediate_mlp,
                     add_pres = cfg.add_pres,
-                    add_stochastic_layer = False, 
+                    add_stochastic_layer = cfg.add_stochastic_layer, 
                     output_prune = cfg.output_prune,
+                    use_memory = cfg.autoregressive,
                     separate_radiation = cfg.separate_radiation,
                     use_ensemble = use_ensemble,
-                    diagnose_precip = diagnose_precip,
                     use_third_rnn = use_third_rnn,
                     concat = cfg.concat,
                     nh_mem = cfg.nh_mem)#,
-                        #ensemble_size = ensemble_size)
+                    #ensemble_size = ensemble_size)
+        
     else:
         raise NotImplementedError()
+  
     
-    model_det = model_det.to(device)
-    print([n for n, _ in model_det.named_children()])
+    model = model.to(device)
     
-        
-    # model_path_det = "saved_models/LSTM-Hidden_lr0.001.neur160-160_xv4_yv5_num33706.pt"
-    # model_type,memory = "LSTM","Hidden"
-    print(summary(model_det))
-    # model_path_det = "models_torch/" + model_det_name
-    
-    checkpoint = torch.load(cfg.model_path_det, weights_only=True)
-    model_det.load_state_dict(checkpoint['model_state_dict'])
-    
-    model =  LSTM_autoreg_torchscript_perturb(hyam,hybm,hyai,hybi,
-                                  out_scale = yscale_lev,
-                                  out_sfc_scale = yscale_sca, 
-                                  xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                                  xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                                  device=device,
-                                  nx = nx, nx_sfc=nx_sfc, 
-                                  ny = ny, ny_sfc=ny_sfc, 
-                                  nneur=cfg.nneur, 
-                                  use_initial_mlp=cfg.use_initial_mlp, 
-                                  # use_intermediate_mlp=True,
-                                  add_pres = cfg.add_pres,
-                                  output_prune = cfg.output_prune,
-                                  use_ensemble=True,
-                                  ensemble_size=cfg.ensemble_size,
-                                  # coeff_stochastic = 0.0,
-                                  nh_mem=cfg.nh_mem)
-    
-    # cfg.model_type = "LSTM_autoreg_torchscript_perturb"
-    
-    # model.mlp_surface1.requires_grad = False
-    # model.mlp_surface2.requires_grad = False
-    # model.rnn1.requires_grad = False
-    # model.rnn2.requires_grad = False
-            
-    # model.mlp_surface1.weight.data  = model_det.mlp_surface1.weight.data.clone()
-    # model.mlp_surface2.weight.data  = model_det.mlp_surface2.weight.data.clone()
-    # model.rnn1.weight.data          = model_det.rnn1.weight.data.clone()
-    # model.rnn2.weight.data          = model_det.rnn2.weight.data.clone()
-    
-    layer_names_freeze = ["mlp_initial", "mlp_surface1", "mlp_surface2", "mlp_toa1", 
-                    "mlp_toa2", "rnn1", "rnn2", "mlp_latent", "mlp_output", "mlp_surface_output"]
-    # layer_names_freeze = ["mlp_initial", "mlp_surface1", "mlp_surface2", "mlp_toa1", 
-    #                "mlp_toa2", "rnn1", "rnn2", "mlp_latent"]
-    
-    for layer_name in layer_names_freeze:
-    # for layer_name in ["mlp_output","mlp_surface1", "mlp_surface2", "rnn1", "rnn2"]:
-
-        layer_ref = getattr(model_det, layer_name)
-        getattr(model, layer_name).load_state_dict(layer_ref.state_dict())
-        
-        for param in getattr(model, layer_name).parameters(): 
-            param.requires_grad = False
-            # print(param.requires_grad)
-            
-    # for layer_name in layer_names_freeze: #["mlp_output", "mlp_surface_output"]:
-    #     layer_ref = getattr(model_det, layer_name)
-    #     getattr(model, layer_name).load_state_dict(layer_ref.state_dict())
-        
-
     infostr = summary(model)
     num_params = infostr.total_params
     
-    model = model.to(device)
-
-    
-    # if cfg.use_scaler:
-    #     # scaler = torch.amp.GradScaler(autocast = True)
-    #     scaler = torch.amp.GradScaler(device.type)
+    if cfg.use_scaler:
+        # scaler = torch.amp.GradScaler(autocast = True)
+        scaler = torch.amp.GradScaler(device.type)
             
     batch_size_tr = nloc
     
@@ -444,6 +362,16 @@ def main(cfg: DictConfig):
     # within the data iteration loop   
     pin = False
     persistent=False
+    
+    # if type(tr_data_path)==list:  
+    #     num_files = len(tr_data_path)
+    #     batch_size_tr = num_files*batch_size_tr 
+    #     chunk_size_tr = cfg.chunksiz // num_files
+    # else:
+    # num_files = 1
+    # chunk size in number of batches
+    # 720 = 10 days (3 time steps in an hour, 72 in a day)
+    # chunk_size_tr = cfg.chunksize_train
     
     if cfg.num_workers==0:
         no_multiprocessing=True
@@ -456,14 +384,12 @@ def main(cfg: DictConfig):
     train_data = generator_xy(tr_data_path, cache = cfg.cache, nloc = nloc, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
-                    qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
-                    include_prev_inputs=cfg.include_prev_inputs, include_prev_outputs=cfg.include_prev_outputs,
+                    qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, include_prev_inputs=cfg.include_prev_inputs,
                     ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
     
     train_batch_sampler = BatchSampler(cfg.chunksize_train, # samples per chunk 
                                        # num_samples=train_data.ntimesteps*nloc, shuffle=shuffle_data)
-                                       num_samples = train_data.ntimesteps, shuffle = cfg.shuffle_data, 
-                                       skip_first=skip_first_index)
+                                       num_samples = train_data.ntimesteps, shuffle = cfg.shuffle_data)
     
     train_loader = DataLoader(dataset = train_data, num_workers = cfg.num_workers, 
                               sampler = train_batch_sampler, 
@@ -475,14 +401,12 @@ def main(cfg: DictConfig):
     val_data = generator_xy(val_data_path, cache=cfg.val_cache, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
-                    qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
-                    include_prev_inputs=cfg.include_prev_inputs, include_prev_outputs=cfg.include_prev_outputs,
+                    qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, include_prev_inputs=cfg.include_prev_inputs,
                     ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
     
     val_batch_sampler = BatchSampler(cfg.chunksize_val, 
                                        # num_samples=val_data.ntimesteps*nloc_val, shuffle=shuffle_data)
-                                       num_samples=val_data.ntimesteps, shuffle = cfg.shuffle_data,
-                                       skip_first=skip_first_index)
+                                       num_samples=val_data.ntimesteps, shuffle = cfg.shuffle_data)
     
     val_loader = DataLoader(dataset=val_data, num_workers = cfg.num_workers, 
                               sampler = val_batch_sampler, 
@@ -496,18 +420,13 @@ def main(cfg: DictConfig):
     metric_water_con = metrics.get_water_conservation(hyai, hybi)
 
     # mse = metrics.get_mse_flatten(weights)
-    metrics_det = metrics.get_metrics_flatten(weights)
+    det_metrics = metrics.get_metrics_flatten(weights)
     
     if cfg.loss_fn_type == "mse":
-        loss_fn = metrics_det
+        loss_fn = det_metrics
     elif cfg.loss_fn_type == "huber":
-        loss_fn = metrics_det
+        loss_fn = det_metrics
     elif cfg.loss_fn_type == "CRPS":
-        # if cfg.crps_start_epoch>0: 
-        #     beta_initial = 500.0
-        #     loss_fn = metrics.get_CRPS(beta_initial)
-        #     print("Setting beta to", beta_initial)
-        # else:
         loss_fn = metrics.get_CRPS(cfg.beta)
     else:
         raise NotImplementedError()
@@ -551,41 +470,387 @@ def main(cfg: DictConfig):
             config=conf
         )       
     
+    class model_train_eval:
+        def __init__(self, dataloader, model, batch_size = 384, train=True):
+            super().__init__()
+            self.loader = dataloader
+            self.dtype = dtype
+            self.train = train
+            self.report_freq = 800
+            self.batch_size = batch_size
+            self.model = model 
+            # self.metric_R2 =  R2Score(num_outputs=ny_pp).to(device) 
+            self.metric_R2 =  R2Score().to(device) 
+
+            self.metrics = {}
+            
+        def eval_one_epoch(self, optim, epoch, timesteps=1):
+            report_freq = self.report_freq
+            running_loss = 0.0; running_energy = 0.0; running_water = 0.0
+            running_var=0.0
+            epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0; epoch_mae = 0.0
+            epoch_R2precc = 0.0
+            epoch_hcon = 0.0; epoch_wcon = 0.0
+            epoch_ens_var = 0.0; epoch_det_skill = 0.0; epoch_spreadskill = 0.0
+            epoch_r2_lev = 0.0
+            epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
+            epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
+            epoch_bias_lev_tot = 0.0; epoch_bias_perlev= 0.0
+            epoch_mae_lev_clw = 0.0; epoch_mae_lev_cli = 0.0
+            epoch_rmse_perlev = 0.0 
+            t_comp =0 
+            t0_it = time.time()
+            j = 0; k = 0; k2=2    
+            
+            if cfg.optimizer == "adamwschedulefree":
+                if self.train:
+                    optim.train()
+                else:
+                    optim.eval()
+            
+
+            rnn1_mem = torch.zeros(self.batch_size*ensemble_size, model.nlev, model.nh_mem, device=device)
+            states = [(None, rnn1_mem)]
+            loss_update_start_index = 60
+   
+                
+            for i,data in enumerate(self.loader):
+                # print("shape mem 2 {}".format(model.rnn1_mem.shape))
+                x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk  = data
     
-    train_runner = train_or_eval_one_epoch(train_loader, model, device, dtype, 
-                                           cfg, metrics_det, metric_h_con, metric_water_con, batch_size_tr,  train=True)
-    val_runner = train_or_eval_one_epoch(val_loader, model, device, dtype, 
-                                         cfg, metrics_det, metric_h_con, metric_water_con, batch_size_val, train=False)
+                # print(" x lay raw 0,50::", x_lay_raw_chk[0,50:,0])
+                x_lay_chk       = x_lay_chk.to(device)
+                x_lay_raw_chk   = x_lay_raw_chk.to(device)
+                x_sfc_chk       = x_sfc_chk.to(device)
+                targets_sfc_chk = targets_sfc_chk.to(device)
+                targets_lay_chk = targets_lay_chk.to(device)
+                
+                x_lay_chk       = torch.split(x_lay_chk, self.batch_size)
+                x_lay_raw_chk   = torch.split(x_lay_raw_chk, self.batch_size)
+                x_sfc_chk       = torch.split(x_sfc_chk, self.batch_size)
+                targets_sfc_chk = torch.split(targets_sfc_chk, self.batch_size)
+                targets_lay_chk = torch.split(targets_lay_chk, self.batch_size)
+                
+                # to speed-up IO, we loaded chk=many batches, which now need to be divided into batches
+                # each batch is one time step
+                for ichunk in range(len(x_lay_chk)):
+                    # print(ichunk)
+                    x_lay = x_lay_chk[ichunk]
+                    x_lay_raw = x_lay_raw_chk[ichunk]
+                    x_sfc = x_sfc_chk[ichunk]
+                    targets_lay = targets_lay_chk[ichunk]
+                    targets_sfc = targets_sfc_chk[ichunk]
+                        
+                    tcomp0= time.time()               
+                    
+                    with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=cfg.mp_autocast):
+                            
+                        rnn1_mem = states[-1][1].detach()
+                        rnn1_mem.requires_grad=True
+        
+                        preds_lay, preds_sfc, new_rnn1_mem = self.model(x_lay, x_sfc, rnn1_mem)
+                        states.append((rnn1_mem, new_rnn1_mem))
+                        
+                        # while len(states) > self.k2:
+                        while len(states) > timesteps:
+    
+                            # Delete stuff that is too old
+                            del states[0]
+                    
+                                       
+                        loss = loss_fn(targets_lay, targets_sfc, preds_lay, preds_sfc)
+                        if cfg.loss_fn_type == "CRPS":
+                            loss, det_skill, ens_var = loss 
+                        else:
+                            huber, mse, mae = loss 
+                            if cfg.loss_fn_type == "huber":
+                                loss = huber
+                            else:
+                                loss = mse
+                            
+                        if use_ensemble:
+                            # print("preds shape", preds_lay)
+                            # use only first member from here on 
+                            preds_lay = torch.reshape(preds_lay, (2, self.batch_size, nlev, ny))
+                            preds_lay = torch.reshape(preds_lay[0,:,:], shape=targets_lay.shape)
+                            preds_sfc = torch.reshape(preds_sfc, (2, self.batch_size, ny_sfc))
+                            preds_sfc = torch.reshape(preds_sfc[0,:], shape=targets_sfc.shape)
+                                          
+                        if use_mp_constraint:
+                            ypo_lay, ypo_sfc = model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
+                            with torch.no_grad(): 
+                                yto_lay, yto_sfc = model.pp_mp(targets_lay, targets_sfc, x_lay_raw )
+                        else:
+                            ypo_lay, ypo_sfc = model.postprocessing(preds_lay, preds_sfc)
+                            yto_lay, yto_sfc = model.postprocessing(targets_lay, targets_sfc)
+                            
+                        with torch.no_grad():
+                            # print("sp raw", x_sfc[100,0].item())
+                            x_sfc_denorm = x_sfc*model.xdiv_sca + model.xmean_sca 
+                            surf_pres_denorm = x_sfc_denorm[:,0:1] 
+                            # print("shape xsfc", x_sfc.shape, "sp", surf_pres_denorm[100].item())
+                            lhf = x_sfc_denorm[:,2] 
+
+                        h_con = metric_h_con(yto_lay, ypo_lay, surf_pres_denorm, 1)
+                        
+                        water_con_p     = metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, 1)
+                        # print("ypo lay ", ypo_lay[100,50:,1])
+                        # print("---- true: ----")
+                        water_con_t     = metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, 1)
+                        # print("yto lay ", yto_lay[100,50:,1])
+
+                        water_con       = torch.mean(torch.square(water_con_p - water_con_t))
+                        del water_con_p, water_con_t
+                        
+                        if cfg.use_energy_loss: 
+                            loss = loss + cfg.w_hcon*h_con
+
+                        if cfg.use_water_loss:
+                            loss = loss + cfg.w_wcon * water_con
+                            
+                    if self.train:
+                        # if cfg.use_scaler:
+                        #     scaler.scale(loss).backward(retain_graph=True)
+                        #     scaler.step(optim)
+                        #     scaler.update()
+                        # else:
+                        #     loss.backward(retain_graph=True)       
+                        #     optim.step()
+            
+                        optim.zero_grad()
+                        if cfg.use_scaler:
+                            scaler.scale(loss).backward(retain_graph=True)
+                            for i in range(timesteps-1):
+                                # if we get all the way back to the "init_state", stop
+                                if states[-i-2][0] is None:
+                                    break
+                                curr_grad = states[-i-1][0].grad
+                                states[-i-2][1].backward(curr_grad, retain_graph=True)
+                            scaler.step(optim)
+                            scaler.update()
+                        else:
+                            loss.backward(retain_graph=True)     
+                            for i in range(timesteps-1):
+                                # if we get all the way back to the "init_state", stop
+                                if states[-i-2][0] is None:
+                                    break
+                                curr_grad = states[-i-1][0].grad
+                                states[-i-2][1].backward(curr_grad, retain_graph=True)
+                            optim.step()
+                        
+                        loss = loss.detach()
+                        if cfg.loss_fn_type == "CRPS":
+                            det_skill = det_skill.detach(); ens_var = ens_var.detach()
+                        else: 
+                            huber = huber.detach(); mse = mse.detach(); mae = mae.detach()
+                        h_con = h_con.detach() 
+                        water_con = water_con.detach()
+
+                
+                        # optimizer.zero_grad()
+                        # # backprop last module (keep graph only if they ever overlap)
+                        # start = time.time()
+                        # loss.backward(retain_graph=self.retain_graph)
+                        # for i in range(self.k2-1):
+                        #     # if we get all the way back to the "init_state", stop
+                        #     if states[-i-2][0] is None:
+                        #         break
+                        #     curr_grad = states[-i-1][0].grad
+                        #     states[-i-2][1].backward(curr_grad, retain_graph=self.retain_graph)
+                        # print("bw: {}".format(time.time()-start))
+                        # optimizer.step()
+
+                    ypo_lay = ypo_lay.detach(); ypo_sfc = ypo_sfc.detach()
+                    yto_lay = yto_lay.detach(); yto_sfc = yto_sfc.detach()
+                    running_loss    += loss.item()
+                    running_energy  += h_con.item()
+                    running_water   += water_con.item()
+                    if cfg.loss_fn_type == "CRPS": running_var += ens_var.item() 
+                    #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
+                    # if j>loss_update_start_index:
+                    with torch.no_grad():
+                        epoch_loss      += loss.item()
+                        if cfg.loss_fn_type =="CRPS":
+                            huber, mse, mae       = det_metrics(targets_lay, targets_sfc, preds_lay, preds_sfc)
+
+                        epoch_huber += huber.item()
+                        epoch_mse += mse.item()
+                        epoch_mae += mae.item()
+                        # epoch_mae       += metrics.mean_absolute_error(targets_lay, preds_lay)
+                    
+                        epoch_hcon  += h_con.item()
+                        epoch_wcon  += water_con.item()
+                        
+                        if cfg.loss_fn_type == "CRPS":
+                            epoch_ens_var += ens_var.item()
+                            epoch_det_skill += det_skill.item()
+                            epoch_spreadskill += ens_var.item() / det_skill.item()
+
+                    
+                        biases_lev, biases_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc, numpy=True)
+                        epoch_bias_lev += np.mean(biases_lev)
+                        epoch_bias_heating += biases_lev[0]
+                        epoch_bias_clw += biases_lev[2]
+                        epoch_bias_cli += biases_lev[3]
+                        epoch_bias_sfc += np.mean(biases_sfc)
+
+                        biases_nolev, biases_perlev = metrics.compute_biases(yto_lay, ypo_lay)
+                        epoch_bias_lev_tot += np.mean(biases_nolev)
+                        epoch_bias_perlev += biases_perlev
+
+                        epoch_rmse_perlev += metrics.rmse(yto_lay, ypo_lay)
+
+                        self.metric_R2.update(ypo_lay.reshape((-1,ny_pp)), yto_lay.reshape((-1,ny_pp)))
+                               
+                        r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
+                        epoch_R2precc += r2_np
+                        #print("R2 numpy", r2_np, "R2 torch", self.metric_R2_precc(ypo_sfc[:,3:4], yto_sfc[:,3:4]) )
+
+                        ypo_lay = ypo_lay.reshape(-1,nlev,ny_pp).cpu().numpy()
+                        yto_lay = yto_lay.reshape(-1,nlev,ny_pp).cpu().numpy()
+
+                        epoch_r2_lev += metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay)**2
+
+                        epoch_mae_lev_clw +=  np.nanmean(np.abs(ypo_lay[:,:,2] - yto_lay[:,:,2]),axis=0)
+                        epoch_mae_lev_cli +=  np.nanmean(np.abs(ypo_lay[:,:,3] - yto_lay[:,:,3]),axis=0)
+
+                        k += 1
+
+                    # if len(states)==timesteps:
+                    #     del states[0]
+                    # print("len states 2", len(states))
+
+                    t_comp += time.time() - tcomp0
+                    # # print statistics 
+                    if j % report_freq == (report_freq-1): # print every 200 minibatches
+                        elaps = time.time() - t0_it
+                        fac = report_freq/timesteps
+                        running_loss = running_loss / fac
+                        running_energy = running_energy / fac
+                        running_water = running_water / fac
+
+                        r2raw = self.metric_R2.compute()
+    
+                        #r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
+                        if cfg.loss_fn_type == "CRPS": 
+                            running_var = running_var / fac
+
+                            print("[{:d}, {:d}] Loss: {:.2e} var {:.2e} h-con: {:.2e}  w-con: {:.2e}  runR2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
+                                                            j+1, running_loss,running_var, running_energy,running_water, r2raw, elaps, t_comp), flush=True)
+                            running_var = 0.0
+                        else:
+                            print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  runR2: {:.2f},  elapsed {:.1f}s (compute {:.1f})" .format(epoch + 1, 
+                                                            j+1, running_loss,running_energy,running_water, r2raw, elaps, t_comp), flush=True)
+                        running_loss = 0.0
+                        running_energy = 0.0; running_water=0.0
+                        t0_it = time.time()
+                        t_comp = 0
+                    j += 1
+                    
+                    # if timesteps==1:
+                    #     del preds_lay, preds_sfc, targets_lay, targets_sfc, x_sfc, x_lay_raw
+                    # else:
+                    #     print("shape bef", preds_lay.shape)
+                    #     preds_lay   = preds_lay[(timesteps-1)*self.batch_size:]
+                    #     preds_sfc   = preds_sfc[(timesteps-1)*self.batch_size:]
+                    #     targets_lay = targets_lay[(timesteps-1)*self.batch_size:]
+                    #     targets_sfc = targets_sfc[(timesteps-1)*self.batch_size:]
+                    #     x_sfc       = x_sfc[(timesteps-1)*self.batch_size:]
+                    #     x_lay_raw   = x_lay_raw[(timesteps-1)*self.batch_size:]
+                    #     print("shape after", preds_lay.shape)
+                        
+                del x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk
+                    
+            self.metrics['loss'] =  epoch_loss / k
+            self.metrics['mean_squared_error'] = epoch_mse / k
+            self.metrics['huber'] = epoch_huber / k
+
+            if cfg.loss_fn_type == "CRPS": 
+                self.metrics['ens_var'] =  epoch_ens_var / k
+                self.metrics['det_skill'] =  epoch_det_skill / k
+                self.metrics['spread_skill_ratio'] =  epoch_spreadskill / k
+
+            self.metrics["h_conservation"] =  epoch_hcon / k
+            self.metrics["water_conservation"] =  epoch_wcon / k
+
+            self.metrics["bias_lev"] = epoch_bias_lev / k 
+            self.metrics["bias_lev_noabs"] = epoch_bias_lev_tot / k 
+
+            self.metrics["bias_sfc"] = epoch_bias_sfc / k 
+            self.metrics["bias_heating"] = epoch_bias_heating / k 
+            self.metrics["bias_cldliq"] = epoch_bias_clw / k 
+            self.metrics["bias_cldice"] = epoch_bias_cli / k 
+
+            self.metrics["bias_perlev"] = epoch_bias_perlev / k 
+            self.metrics["rmse_perlev"] = epoch_rmse_perlev / k 
+
+            self.metrics['mean_absolute_error'] = epoch_mae / k
+            #self.metrics['ks'] =  epoch_ks / k2
+            self.metrics['R2'] = self.metric_R2.compute()
+            
+            
+            self.metrics['R2_lev'] = epoch_r2_lev / k
+            self.metrics['R2_heating'] = epoch_r2_lev[:,0].mean() / k
+            # self.metrics['R2_moistening'] =  epoch_r2_lev[:,1].mean() / k
+            R2_moistening = epoch_r2_lev[:,1].mean() / k
+            R2 = epoch_r2_lev[:,2] / k
+            R2[np.isnan(R2)] = 0.0; R2[np.isinf(R2)] = 0.0
+            # self.metrics['R2_lev_clw'] = R2
+            self.metrics['R2_clw'] = np.mean(R2)
+            R2 = epoch_r2_lev[:,3] / k
+            R2[np.isnan(R2)] = 0.0; R2[np.isinf(R2)] = 0.0
+            # self.metrics['R2_lev_cli'] = R2
+            self.metrics['R2_cli'] = np.mean(R2)
+
+            #self.metrics['R2_precc'] = self.metric_R2_precc.compute()
+            self.metrics['R2_precc'] = epoch_R2precc / k
+        
+            self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
+            self.metrics['mae_cli'] = np.nanmean(epoch_mae_lev_cli / k)
+            
+            self.metric_R2.reset() 
+            #self.metric_R2_heating.reset(); self.metric_R2_precc.reset()
+            # if self.autoregressive:
+            #     # self.model.reset_states()
+            #     # model.rnn1_mem = torch.randn_like(model.rnn1_mem)
+            #     # model.rnn1_mem = torch.randn(self.batch_size, nlev, model.nh_mem, device=device)
+            #     model.rnn1_mem = torch.zeros(self.batch_size, nlev, model.nh_mem, device=device)
+    
+            datatype = "TRAIN" if self.train else "VAL"
+            print('Epoch {} {} loss: {:.2e}  MSE: {:.2e}  h-con:  {:.2e}   R2: {:.2f}  R2-dT/dt: {:.2f}   R2-dq/dt: {:.2f}   R2-precc: {:.3f}'.format(epoch+1, datatype, 
+                                                                self.metrics['loss'], 
+                                                                self.metrics['mean_squared_error'], 
+                                                                self.metrics['h_conservation'],
+                                                                self.metrics['R2'],
+                                                                self.metrics['R2_heating'],
+                                                                R2_moistening, # self.metrics['R2_moistening'],                                                              
+                                                                self.metrics['R2_precc'] ))
+            
+            del loss, h_con, water_con
+            if cfg.autoregressive:
+                del rnn1_mem
+            if cuda: 
+                torch.cuda.empty_cache()
+            gc.collect()
+    
+    train_runner = model_train_eval(train_loader, model, batch_size_tr,  train=True)
+    val_runner = model_train_eval(val_loader, model, batch_size_val, train=False)
     
     inpstr = "v5" if cfg.v4_to_v5_inputs else "v4"
     outpstr = "v5" if use_mp_constraint else "v4"
-    # SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}.pt'.format(cfg.model_type,
-    #                                                                  cfg.memory, cfg.lr, 
-    #                                                                  cfg.nneur[0], cfg.nneur[1], 
-    #                                                                  inpstr, outpstr,
-    #                                                                  model_num)
+    SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}.pt'.format(cfg.model_type,
+                                                                     cfg.memory, cfg.lr, 
+                                                                     cfg.nneur[0], cfg.nneur[1], 
+                                                                     inpstr, outpstr,
+                                                                     model_num)
 
 
-    # save_file_torch = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script.pt"
+    save_file_torch = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script.pt"
     # best_val_loss = np.inf
     best_val_loss = 0.0
     
     tsteps_old = 1
     new_lr = cfg.lr
-    
-    # model.use_ensemble = False
-    # model = model.to("cpu")
-    # torch.save({
-    #             'epoch': 0,
-    #             'model_state_dict': model.state_dict(),
-    #             'optimizer_state_dict': optimizer.state_dict(),
-    #             'val_loss': 0,
-    #             }, SAVE_PATH)  
-    # scripted_model = torch . jit . script ( model )
-    # scripted_model = scripted_model.eval()
-    # scripted_model.save(save_file_torch)
-    # print("New best validation result obtained, saving model to", SAVE_PATH)
-
     for epoch in range(cfg.num_epochs):
         t0 = time.time()
         
@@ -616,25 +881,9 @@ def main(cfg: DictConfig):
             else:
                 raise NotImplementedError()
 
-        # if cfg.loss_fn_type == "CRPS" and cfg.crps_start_epoch>0 and (epoch==cfg.crps_start_epoch):
-        #     print("Decreasing beta to  ", cfg.beta, "and resetting optimizer")
-        #     loss_fn = metrics.get_CRPS(cfg.beta) 
-        #     if cfg.optimizer == "adam":
-        #         optimizer = torch.optim.Adam(model.parameters(), lr = cfg.lr)
-        #     elif cfg.optimizer == "adamw":
-        #         optimizer = torch.optim.AdamW(model.parameters(), lr = cfg.lr)
-        #     elif cfg.optimizer == "adamwschedulefree":
-        #         import schedulefree
-        #         optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=cfg.lr)
-        #     elif cfg.optimizer == "soap":
-        #         from soap import SOAP
-        #         optimizer = SOAP(model.parameters(), lr = cfg.lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
-        #     else:
-        #         raise NotImplementedError()
-
         tsteps_old = timesteps
 
-        train_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps)
+        train_runner.eval_one_epoch(optimizer, epoch, timesteps)
 
         if train_runner.loader.dataset.cache:
             train_runner.loader.dataset.cache_loaded = True
@@ -655,34 +904,9 @@ def main(cfg: DictConfig):
             logged_metrics['epoch'] = epoch
             wandb.log(logged_metrics)
         
-        
-            SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_ep{}.pt'.format(cfg.model_type,
-                                                                             cfg.memory, cfg.lr, 
-                                                                             cfg.nneur[0], cfg.nneur[1], 
-                                                                             inpstr, outpstr,
-                                                                             model_num, epoch)
-    
-    
-            save_file_torch = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script.pt"
-            print("saving model to", SAVE_PATH)
-            if cfg.loss_fn_type == "CRPS":
-                model.use_ensemble=False
-            model = model.to("cpu")
-            torch.save({
-                        'epoch': epoch,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        }, SAVE_PATH)  
-            scripted_model = torch . jit . script ( model )
-            scripted_model = scripted_model.eval()
-            scripted_model.save(save_file_torch)
-            if cfg.loss_fn_type == "CRPS":
-                model.use_ensemble=True
-            model = model.to(device)
-                
         if epoch%2:
             print("VALIDATION..")
-            val_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps)
+            val_runner.eval_one_epoch(optimizer, epoch, timesteps)
             if val_runner.loader.dataset.cache:
                 val_runner.loader.dataset.cache_loaded = True
 
@@ -729,7 +953,7 @@ def main(cfg: DictConfig):
                 R2 = val_runner.metrics["R2_lev"]
                 labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
                 ncols, nrows = 3,2
-                fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(9.5, 4.5),
+                fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(7.5, 4.5),
                                         layout="constrained")
                 j = 0
                 for irow in range(2):
@@ -747,7 +971,7 @@ def main(cfg: DictConfig):
                                                                                 inpstr, outpstr, model_num)))
                 plt.clf()
                 bias = val_runner.metrics["bias_perlev"]
-                fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
+                fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 15.5)) #layout="constrained")
                 for i in range(6):
                     axs[i].plot(np.arange(60), bias[:,i]); 
                     axs[i].set_title(labels[i])
@@ -761,7 +985,7 @@ def main(cfg: DictConfig):
 
                 plt.clf()
                 rmse = val_runner.metrics["rmse_perlev"]
-                fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
+                fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 15.5)) #layout="constrained")
                 for i in range(6):
                     axs[i].plot(np.arange(60), rmse[:,i]); 
                     axs[i].set_title(labels[i])

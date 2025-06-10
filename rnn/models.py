@@ -312,7 +312,6 @@ class LSTM_autoreg_torchscript(nn.Module):
     output_prune: Final[bool]
     # ensemble_size: Final[int]
     use_ensemble: Final[bool]
-    use_memory: Final[bool]
     separate_radiation: Final[bool]
     # predict_flux: Final[bool]
     use_third_rnn: Final[bool]
@@ -323,13 +322,12 @@ class LSTM_autoreg_torchscript(nn.Module):
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
                 device,
-                nlev=60, nx = 15, nx_sfc=24, ny = 5, ny_sfc=5, nneur=(192,192), 
+                nlev=60, nx = 15, nx_sfc=24, ny = 5, ny0=5, ny_sfc=5, nneur=(192,192), 
                 use_initial_mlp=False, 
                 use_intermediate_mlp=True,
                 add_pres=False,
                 add_stochastic_layer=False,
                 output_prune=False,
-                use_memory=False,
                 repeat_mu=False,
                 separate_radiation=False,
                 use_third_rnn=False,
@@ -342,9 +340,11 @@ class LSTM_autoreg_torchscript(nn.Module):
                 nh_mem=16):
         super(LSTM_autoreg_torchscript, self).__init__()
         self.ny = ny 
+        self.ny0 = ny  #for diagnose precip option, need to distinguish between model outputs (ny) and intermediate outputs (ny0)
         self.nlev = nlev 
         self.nx_sfc = nx_sfc 
         self.ny_sfc = ny_sfc
+        self.ny_sfc0 = ny_sfc
         self.nneur = nneur 
         self.use_initial_mlp=use_initial_mlp
         self.output_prune = output_prune
@@ -354,8 +354,8 @@ class LSTM_autoreg_torchscript(nn.Module):
         # precipitation from their vertically integrated difference
         if self.diagnose_precip:
             print("warning: diagnose precipitation is ON")
-            self.ny = self.ny + 3   # Perkins 2024: Δ_p(T), Δ_p(q), and Δ_p(c)
-            self.ny_sfc = self.ny_sfc - 2 # PRECC is computed from above using Eq 9.,
+            self.ny0 = self.ny0 + 3   # Perkins 2024: Δ_p(T), Δ_p(q), and Δ_p(c)
+            self.ny_sfc0 = self.ny_sfc0 - 2 # PRECC is computed from above using Eq 9.,
             # PRECSC is diagnosed using bottom temperature
             
         self.add_pres = add_pres
@@ -377,7 +377,6 @@ class LSTM_autoreg_torchscript(nn.Module):
         # else:
         #     raise NotImplementedError()
         self.concat=concat
-        self.use_memory= use_memory
         self.repeat_mu = repeat_mu
         if self.repeat_mu:
             nx = nx + 1
@@ -394,8 +393,8 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.nx_sfc_rad = 5
             self.nx_sfc = self.nx_sfc  - self.nx_sfc_rad
             self.ny_rad = 1
-            self.ny_sfc_rad = self.ny_sfc - 2
-            self.ny_sfc = 2
+            self.ny_sfc_rad = self.ny_sfc0 - 2
+            self.ny_sfc0 = 2
         
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
@@ -427,22 +426,16 @@ class LSTM_autoreg_torchscript(nn.Module):
         # moist physics on 50 levels, and then computes radiation on 60 levels!
         self.use_intermediate_mlp=use_intermediate_mlp
             
-        if self.use_memory:
-            if self.use_intermediate_mlp:
-                # self.nh_mem = self.nneur[1] // 4
-                # if nh_mem is None:
-                #     self.nh_mem = self.nneur[1] // 8
-                # else:
-                self.nh_mem = nh_mem
-
-            else:
-                self.nh_mem = self.nneur[1]
-            # self.rnn1_mem = None 
-            print("Building RNN that feeds its hidden memory at t0,z0 to its inputs at t1,z0")
-        else: 
-            self.nh_mem = 0
-            print("Building RNN without convective memory")
-
+        if self.use_intermediate_mlp:
+            # self.nh_mem = self.nneur[1] // 4
+            # if nh_mem is None:
+            #     self.nh_mem = self.nneur[1] // 8
+            # else:
+            self.nh_mem = nh_mem
+        else:
+            self.nh_mem = self.nneur[1]
+        # self.rnn1_mem = None 
+        print("Building RNN that feeds its hidden memory at t0,z0 to its inputs at t1,z0")
         print("Initial mlp: {}, intermediate mlp: {}".format(self.use_initial_mlp, self.use_intermediate_mlp))
  
         self.nx_rnn1 = self.nx_rnn1 + self.nh_mem
@@ -469,7 +462,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.rnn1   = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)  # (input_size, hidden_size)
             if self.add_stochastic_layer:
                 use_bias=False
-                self.rnn2 = MyStochasticGRULayer(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias)  
+                self.rnn2 = MyStochasticLSTMLayer2(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias)  
             else:
                 self.rnn2   = nn.LSTM(self.nx_rnn3, self.nh_rnn3,  batch_first=True)
         else:
@@ -480,7 +473,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)  # (input_size, hidden_size)
             if self.add_stochastic_layer:
                 use_bias=False
-                self.rnn2 = MyStochasticGRULayer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)  
+                self.rnn2 = MyStochasticLSTMLayer2(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)  
             else:
                 self.rnn2 = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
 
@@ -491,11 +484,11 @@ class LSTM_autoreg_torchscript(nn.Module):
 
         if self.use_intermediate_mlp: 
             self.mlp_latent = nn.Linear(nh_rnn, self.nh_mem)
-            self.mlp_output = nn.Linear(self.nh_mem, self.ny)
+            self.mlp_output = nn.Linear(self.nh_mem, self.ny0)
         else:
-            self.mlp_output = nn.Linear(nh_rnn, self.ny)
+            self.mlp_output = nn.Linear(nh_rnn, self.ny0)
             
-        self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc)
+        self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc0)
             
         if self.separate_radiation:
             # self.nh_rnn1_rad = self.nh_rnn1 
@@ -603,10 +596,6 @@ class LSTM_autoreg_torchscript(nn.Module):
             
         # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # if self.use_memory and self.rnn1_mem is None: 
-        #     self.rnn1_mem = torch.randn(batch_size, self.nlev, self.nh_mem,device=inputs_main.device)
-        #     # self.rnn1_mem = torch.randn((batch_size, self.nlev, self.nh_mem),dtype=self.dtype,device=device)
-
         
         if self.separate_radiation:
             # Do not use inputs -2,-3,-4 (O3, CH4, N2O) or first 10 levels
@@ -618,9 +607,9 @@ class LSTM_autoreg_torchscript(nn.Module):
             inputs_main_crm = self.mlp_initial(inputs_main_crm)
             inputs_main_crm = self.nonlin(inputs_main_crm)  
             
-        if self.use_memory:
-            # rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
-            inputs_main_crm = torch.cat((inputs_main_crm,rnn1_mem), dim=2)
+        # if self.use_memory:
+        # rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
+        inputs_main_crm = torch.cat((inputs_main_crm,rnn1_mem), dim=2)
             
         if self.use_third_rnn: # use initial downward RNN
             inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) #  pbuf_SOLIN and COSZRS
@@ -649,17 +638,6 @@ class LSTM_autoreg_torchscript(nn.Module):
         # cx = self.nonlin(cx)
         hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
 
-        # if self.use_initial_mlp:
-        #     rnn1_input = self.mlp_initial(rnn1_input)
-        #     rnn1_input = self.nonlin(rnn1_input)
-
-
-        # print("shape rnn1 inp", rnn1_input.shape, "shape rnn1mem", self.rnn1_mem.shape)     
-        # if self.use_memory:
-        #     # rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
-        #     rnn1_input = torch.cat((rnn1_input,rnn1_mem), dim=2)
-
-
         rnn1out, states = self.rnn1(rnn1_input, hidden)
         
         # if self.predict_flux:
@@ -669,41 +647,34 @@ class LSTM_autoreg_torchscript(nn.Module):
 
         if self.use_third_rnn:
           hx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)  # (batch, hidden_size)
-          if not self.add_stochastic_layer:
-              cx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)
+          cx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)
         else: 
           inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
           hx2 = self.mlp_toa1(inputs_toa)
-          if not self.add_stochastic_layer: 
-              cx2 = self.mlp_toa2(inputs_toa)
+          cx2 = self.mlp_toa2(inputs_toa)
         
+
         if self.add_stochastic_layer:
-            hidden2 = hx2
-        else:
-            hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
-        
-        if self.add_stochastic_layer and not self.use_third_rnn:
             input_rnn2 = torch.transpose(rnn1out,0,1)
-            
-            rnn2out = self.rnn2(input_rnn2, hidden2)
-            final_sfc_inp = rnn2out[-1,:,:]
-
-            rnn2out = torch.transpose(rnn2out,0,1)
-
+            hidden2 = (hx2, cx2)
         else:
             input_rnn2 = rnn1out
-            if self.add_stochastic_layer and self.use_third_rnn:
-              z, states = self.rnn2(input_rnn2, hidden2)
-              # SPPT
-            #   z = F.hardtanh(z, 0.0, 2.0)
-            #   rnn2out = z*rnn1out
-              rnn2out = rnn1out + 0.01*z 
-            else:
-                
-              rnn2out, states = self.rnn2(input_rnn2, hidden2)
+            hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
 
-            (last_h, last_c) = states
-            final_sfc_inp = last_h.squeeze() 
+        if self.add_stochastic_layer and self.use_third_rnn:
+          rnn2out, states = self.rnn2(input_rnn2, hidden2)
+          # SPPT
+        #   z = F.hardtanh(z, 0.0, 2.0)
+        #   rnn2out = z*rnn1out
+          # rnn2out = rnn1out + 0.01*z 
+        #   rnn2out = z
+          rnn2out = torch.transpose(rnn2out,0,1)
+
+        else:
+          rnn2out, states = self.rnn2(input_rnn2, hidden2)
+
+        (last_h, last_c) = states
+        final_sfc_inp = last_h.squeeze() 
             
         if self.concat:
             rnn2out = torch.cat((rnn1out, rnn2out), dim=2)
@@ -711,17 +682,12 @@ class LSTM_autoreg_torchscript(nn.Module):
         if self.use_intermediate_mlp: 
             rnn2out = self.mlp_latent(rnn2out)
           
-        if self.use_memory:
-            # self.rnn1_mem = torch.flip(rnn2out, [1])
-            # if self.predict_flux:
-            #     rnn1_mem = torch.flip(rnn2out[:,1:,:], [1])
-            # else:
-            #     rnn1_mem = torch.flip(rnn2out, [1])
-            if self.use_third_rnn:
-                rnn1_mem = rnn2out
-            else:
-                # rnn1_mem = torch.flip(rnn2out, [1])
-                rnn1_mem = rnn2out
+        # if self.use_memory:
+        if self.use_third_rnn:
+            rnn1_mem = rnn2out
+        else:
+            # rnn1_mem = torch.flip(rnn2out, [1])
+            rnn1_mem = rnn2out
 
         out = self.mlp_output(rnn2out)
 
@@ -857,10 +823,12 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
                 coeff_stochastic = 0.0,
                 nh_mem=16):
         super(LSTM_autoreg_torchscript_mp, self).__init__()
+        self.ny0 = ny 
         self.ny = ny 
         self.nlev = nlev 
         self.nx_sfc = nx_sfc 
         self.ny_sfc = ny_sfc
+        self.ny_sfc0 = ny_sfc
         self.nneur = nneur 
         self.use_initial_mlp=use_initial_mlp
         self.output_prune = output_prune
@@ -871,7 +839,7 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
         # if self.diagnose_precip:
         print("warning: diagnose precipitation is ON")
         # self.ny = self.ny + 3   # Perkins 2024: Δ_p(T), Δ_p(q), and Δ_p(c)
-        self.ny_sfc = self.ny_sfc - 2 # PRECC is computed from above using Eq 9.,
+        self.ny_sfc0 = self.ny_sfc0 - 2 # PRECC is computed from above using Eq 9.,
         # PRECSC is diagnosed using bottom temperature
             
         self.add_pres = add_pres
@@ -882,6 +850,7 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
         self.nh_rnn1 = self.nneur[0]
         self.nx_rnn2 = self.nneur[0]
         self.nh_rnn2 = self.nneur[1]
+        self.nh_rnn3 = self.nneur[2]
 
         self.concat=concat
         self.use_memory= use_memory
@@ -924,7 +893,6 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
                 #     self.nh_mem = self.nneur[1] // 8
                 # else:
                 self.nh_mem = nh_mem
-
             else:
                 self.nh_mem = self.nneur[1]
             # self.rnn1_mem = None 
@@ -932,12 +900,12 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
         else: 
             self.nh_mem = 0
             print("Building RNN without convective memory")
+            raise NotImplementedError() # need mlp here too for custom nh_mem
 
         print("Initial mlp: {}, intermediate mlp: {}".format(self.use_initial_mlp, self.use_intermediate_mlp))
  
         self.nx_rnn1 = self.nx_rnn1 + self.nh_mem
         self.nh_rnn1 = self.nneur[0]
-        
         print("nx rnn1", self.nx_rnn1, "nh rnn1", self.nh_rnn1)
         print("nx rnn2", self.nx_rnn2, "nh rnn2", self.nh_rnn2)  
         # if self.use_third_rnn: print("nx rnn3", self.nx_rnn3, "nh rnn3", self.nh_rnn3) 
@@ -952,12 +920,18 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
         self.mlp_toa1  = nn.Linear(2, self.nh_rnn2)
         self.mlp_toa2  = nn.Linear(2, self.nh_rnn2)
 
-        self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)  # (input_size, hidden_size)
+        # self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)  # (input_size, hidden_size)
         if self.add_stochastic_layer:
             use_bias=False
-            self.rnn2 = MyStochasticGRULayer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)  
+            batch_first=False
+            # self.rnn2 = MyStochasticLSTMLayer2(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)  
+            self.rnn1      = MyStochasticLSTMLayer2(self.nx_rnn1, self.nh_rnn1,  use_bias=use_bias)  # (input_size, hidden_size)
         else:
-            self.rnn2 = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
+            self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)  # (input_size, hidden_size)
+            # self.rnn2 = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
+            batch_first=False 
+
+        self.rnn2 = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=batch_first)
 
         if self.concat: 
             nh_rnn = self.nh_rnn1 + self.nh_rnn2
@@ -966,14 +940,17 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
 
         if self.use_intermediate_mlp: 
             self.mlp_latent = nn.Linear(nh_rnn, self.nh_mem)
-            self.mlp_output = nn.Linear(self.nh_mem, self.ny)
+            self.mlp_output = nn.Linear(self.nh_mem, self.ny0)
         else:
-            self.mlp_output = nn.Linear(nh_rnn, self.ny)
+            self.mlp_output = nn.Linear(nh_rnn, self.ny0)
             
-        self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc)
+        self.mlp_surface_output = nn.Linear(self.nneur[1], self.ny_sfc0)
             
-        self.mlp_output_mp = nn.Linear(nh_rnn, 5)
-        self.rnn_mp = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
+        self.mlp_output_mp = nn.Linear(self.nneur[2], 5)
+        if self.add_stochastic_layer:
+          self.rnn_mp = MyStochasticLSTMLayer2(self.nx_rnn2, self.nneur[2],  use_bias=use_bias)
+        else:
+          self.rnn_mp = nn.LSTM(self.nx_rnn2, self.nneur[2],  batch_first=True)
 
     def temperature_scaling(self, T_raw):
         # T_denorm = T = T*(self.xmax_lev[:,0] - self.xmin_lev[:,0]) + self.xmean_lev[:,0]
@@ -1047,18 +1024,6 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
             pres  = self.preslay(sp)
             inputs_main = torch.cat((inputs_main,pres),dim=2)
 
-
-        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # if self.use_memory and self.rnn1_mem is None: 
-        #     self.rnn1_mem = torch.randn(batch_size, self.nlev, self.nh_mem,device=inputs_main.device)
-        #     # self.rnn1_mem = torch.randn((batch_size, self.nlev, self.nh_mem),dtype=self.dtype,device=device)
-
-        
-        # if self.separate_radiation:
-        #     # Do not use inputs -2,-3,-4 (O3, CH4, N2O) or first 10 levels
-        #     inputs_main_crm = torch.cat((inputs_main[:,10:,0:-4], inputs_main[:,10:,-1:]),dim=2)
-        # else:
         inputs_main_crm = inputs_main
             
         if self.use_initial_mlp:
@@ -1069,9 +1034,13 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
             # rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
             inputs_main_crm = torch.cat((inputs_main_crm,rnn1_mem), dim=2)
 
-        # TOA is first in memory, so to start at the surface we need to go backwards
-        rnn1_input = torch.flip(inputs_main_crm, [1])
-    
+        if self.add_stochastic_layer:
+          inputs_main_crm = torch.transpose(inputs_main_crm,0,1)
+          rnn1_input = torch.flip(inputs_main_crm, [0])
+        else:
+          # TOA is first in memory, so to start at the surface we need to go backwards
+          rnn1_input = torch.flip(inputs_main_crm, [1])
+      
         # The input (a vertical sequence) is concatenated with the
         # output of the RNN from the previous time step 
 
@@ -1083,79 +1052,68 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
         hx = self.nonlin(hx)
         cx = self.mlp_surface2(inputs_sfc)
         cx = self.nonlin(cx)
-        hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
 
-        # if self.use_initial_mlp:
-        #     rnn1_input = self.mlp_initial(rnn1_input)
-        #     rnn1_input = self.nonlin(rnn1_input)
-
-
-        # print("shape rnn1 inp", rnn1_input.shape, "shape rnn1mem", self.rnn1_mem.shape)     
-        # if self.use_memory:
-        #     # rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
-        #     rnn1_input = torch.cat((rnn1_input,rnn1_mem), dim=2)
-
+        if self.add_stochastic_layer:
+          hidden = (hx, cx)
+        else:
+          hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
 
         rnn1out, states = self.rnn1(rnn1_input, hidden)
-        
-        # if self.predict_flux:
-        #     rnn1out = torch.cat((torch.unsqueeze(hx,1),rnn1out),dim=1)
 
-        rnn1out = torch.flip(rnn1out, [1])
+        if self.add_stochastic_layer:
+          rnn1out = torch.flip(rnn1out, [0])
+        else:
+          rnn1out = torch.flip(rnn1out, [1])
 
         inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
         hx2 = self.mlp_toa1(inputs_toa)
-        if not self.add_stochastic_layer: 
-            cx2 = self.mlp_toa2(inputs_toa)
+        cx2 = self.mlp_toa2(inputs_toa)
         
-        if self.add_stochastic_layer:
-            hidden2 = hx2
-        else:
-            hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
-        
-        if self.add_stochastic_layer:
-            input_rnn2 = torch.transpose(rnn1out,0,1)
-            
-            rnn2out = self.rnn2(input_rnn2, hidden2)
-            final_sfc_inp = rnn2out[-1,:,:]
+        hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
+        input_rnn2 = rnn1out
+        rnn2out, states = self.rnn2(input_rnn2, hidden2)
 
-            rnn2out = torch.transpose(rnn2out,0,1)
-
-        else:
-            input_rnn2 = rnn1out
-            rnn2out, states = self.rnn2(input_rnn2, hidden2)
-
-            (last_h, last_c) = states
-            final_sfc_inp = last_h.squeeze() 
+        (last_h, last_c) = states
+        final_sfc_inp = last_h.squeeze() 
             
         if self.concat:
-            rnn2out = torch.cat((rnn1out, rnn2out), dim=2)
-        
+          rnn2out = torch.cat((rnn1out, rnn2out), dim=2)
+      
         if self.use_intermediate_mlp: 
-            rnn2out = self.mlp_latent(rnn2out)
-          
-        if self.use_memory:
-            # rnn1_mem = torch.flip(rnn2out, [1])
-            rnn1_mem = rnn2out
+          rnn1_mem = self.mlp_latent(rnn2out)
+        else:
+          rnn1_mem = rnn2out 
 
-        out = self.mlp_output(rnn2out)
+        # if self.use_memory:
+        # rnn1_mem = torch.flip(rnn2out, [1])
+        if self.add_stochastic_layer:
+          rnn1_mem =  torch.transpose(rnn1_mem,0,1)
+        else:
+          rnn1_mem = rnn1_mem
+
+        out = self.mlp_output(rnn1_mem)
 
         # if self.output_prune and (not self.separate_radiation):
         if self.output_prune:
             # Only temperature tendency is computed for the top 10 levels
-            # if self.separate_radiation:
-            #     out[:,0:12,:] = out[:,0:12,:].clone().zero_()
-            # else:
             out[:,0:12,1:] = out[:,0:12,1:].clone().zero_()
         
         out_sfc = self.mlp_surface_output(final_sfc_inp)
-        
-            
+         
         # if self.diagnose_precip: 
         # --------- MICROPHYSICS
-        rnn_out_microphysics, states = self.rnn_mp(input_rnn2, hidden2)
+        input_rnn3 = rnn2out
+        # input_rnn3 = rnn1out
+        hx3 = torch.randn((batch_size, self.nh_rnn3),device=rnn2out.device)  # (batch, hidden_size)
+        cx3 = torch.randn((batch_size, self.nh_rnn3),device=rnn2out.device)
+        if self.add_stochastic_layer:
+          hidden3 = (hx3, cx3)
+        else:
+          hidden3 = (torch.unsqueeze(hx3,0), torch.unsqueeze(cx3,0))
+        rnn_out_microphysics, states = self.rnn_mp(input_rnn3, hidden3)
         out_microphysics = self.mlp_output_mp(rnn_out_microphysics)
-
+        if self.add_stochastic_layer:
+          out_microphysics =  torch.transpose(out_microphysics,0,1)
 
         dT_precip = out_microphysics[:,:,0]
         dqv_precip = out_microphysics[:,:,1]
@@ -1183,9 +1141,14 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
                         + torch.tensor(100000)*(self.hyai[1:61].view(1,-1)-self.hyai[0:60].view(1,-1)))
         # print("shape sp", sp.shape, "shape thick", thick.shape)
         precc = thick*(dqv_precip + dqn_precip)
-        precc = -torch.sum(precc,1).unsqueeze(1)
         # temp_sfc_before = inputs_main[:,-1,0]
         # temp_sfc = temp_sfc  + (out[:,-1,0]/self.yscale_lev[-1,0])*1200
+        # if self.add_stochastic_layer:
+        #   precc = -torch.sum(precc,0).unsqueeze(1)
+        #   temp_sfc = (inputs_main[-1:,:,0:1]*self.xdiv_lev[-1,0:1]) + self.xmean_lev[-1,0:1]
+        #   print("shape sp", sp.shape, "shape thick", thick.shape, "precc", precc.shape, "tempsfc", temp_sfc.shape)
+        # else:
+        precc = -torch.sum(precc,1).unsqueeze(1)
         temp_sfc = (inputs_main[:,-1,0:1]*self.xdiv_lev[-1,0:1]) + self.xmean_lev[-1,0:1]
         snowfrac = self.temperature_scaling_precip(temp_sfc)
         precsc = snowfrac*precc
@@ -1283,26 +1246,9 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         self.register_buffer('xdiv_sca', xdiv_sca)
         self.register_buffer('hyai', hyai)
         self.register_buffer('hybi', hybi)
-        # in ClimSim config of E3SM, the CRM physics first computes 
-        # moist physics on 50 levels, and then computes radiation on 60 levels!
-        # self.use_intermediate_mlp=use_intermediate_mlp
         self.use_intermediate_mlp = True
-        # if self.use_memory:
-        # if self.use_intermediate_mlp:
-        # self.nh_mem = self.nneur[1] // 4
-        # if nh_mem is None:
-        #     self.nh_mem = self.nneur[1] // 8
-        # else:
         self.nh_mem = nh_mem
-
-        # else:
-        #     self.nh_mem = self.nneur[1]
-        # self.rnn1_mem = None 
         print("Building RNN that feeds its hidden memory at t0,z0 to its inputs at t1,z0")
-        # else: 
-        #     self.nh_mem = 0
-        #     print("Building RNN without convective memory")
-
         print("Initial mlp: {}, intermediate mlp: {}".format(self.use_initial_mlp, self.use_intermediate_mlp))
  
         self.nx_rnn1 = self.nx_rnn1 + self.nh_mem
@@ -1327,6 +1273,8 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         use_bias=False
         # stochastic_layer = MyStochasticGRULayer
         stochastic_layer = MyStochasticGRULayer5
+        # stochastic_layer = MyStochasticLSTMLayer2
+
         self.rnn3 = stochastic_layer(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias) 
         # self.rnn4 = stochastic_layer(self.nx_rnn4, self.nh_rnn4, use_bias=use_bias) 
 
@@ -1430,7 +1378,7 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         hx = self.mlp_surface1(inputs_sfc)
         hx = self.nonlin(hx)
         cx = self.mlp_surface2(inputs_sfc)
-        cx = self.nonlin(cx)
+        # cx = self.nonlin(cx)
         hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
 
         rnn1out, states = self.rnn1(rnn1_input, hidden)
@@ -1460,16 +1408,16 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         input_rnn3 = torch.transpose(h_final,0,1)
         # input_rnn3 = torch.flip(input_rnn3, [0])
 
-        hidden_init = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device) 
-        srnn_out = self.rnn3(input_rnn3, hidden_init)
-        srnn_out2 = srnn_out 
+        hx = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device) 
+        cx = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device) 
+
+        srnn_out = self.rnn3(input_rnn3, hx)
+        h_sfc_perturb = srnn_out[-1,:,:]
+
+        # srnn_out, state = self.rnn3(input_rnn3, (hx,cx))
+        # h_sfc_perturb, dummy = state
         
-        # input_rnn4 = torch.flip(srnn_out, [0])
-        # hidden_init = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device) 
-        # srnn_out2 = self.rnn4(input_rnn4, hidden_init)
-        
-        h_sfc_perturb = srnn_out2[-1,:,:]
-        h_final_perturb = torch.transpose(srnn_out2,0,1)
+        h_final_perturb = torch.transpose(srnn_out,0,1)
         
         h_final = h_final + 0.01*h_final_perturb
         h_sfc   = h_sfc + 0.01*h_sfc_perturb
@@ -1955,18 +1903,17 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         self.mlp_surface    = nn.Linear(self.nx_sfc, self.nh_rnn1)
         self.mlp_toa        = nn.Linear(2, self.nh_rnn2)
         
-        use_bias=True
+        use_bias=False
         if self.use_lstm:
-            self.rnn1      = MyStochasticLSTMLayer(self.nx_rnn1, self.nh_rnn1) 
-            self.rnn2      = MyStochasticLSTMLayer(self.nx_rnn2, self.nh_rnn2)
+            self.rnn1      = MyStochasticLSTMLayer2(self.nx_rnn1, self.nh_rnn1, use_bias=use_bias) 
+            self.rnn2      = MyStochasticLSTMLayer2(self.nx_rnn2, self.nh_rnn2,use_bias=use_bias)
             self.mlp_surface2    = nn.Linear(self.nx_sfc, self.nh_rnn1)
             self.mlp_toa2        = nn.Linear(2, self.nh_rnn2)
         else:
-            self.rnn1      = MyStochasticGRULayer(self.nx_rnn1, self.nh_rnn1, use_bias=use_bias) 
-            self.rnn2      = MyStochasticGRULayer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)
-
-             
-        
+            # srnn_layer = MyStochasticGRULayer
+            srnn_layer = MyStochasticGRULayer5
+            self.rnn1      = srnn_layer(self.nx_rnn1, self.nh_rnn1, use_bias=use_bias) 
+            self.rnn2      = srnn_layer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)        
 
         nh_rnn = self.nh_rnn2
 
@@ -1976,8 +1923,10 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         else:
             self.mlp_output = nn.Linear(nh_rnn, self.ny)
             
-        self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc)
-      
+        # self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc)
+        self.mlp_surface_output_mu = nn.Linear(nneur[-1], self.ny_sfc)
+        self.mlp_surface_output_sigma = nn.Linear(nneur[-1], self.ny_sfc)
+
         
     def temperature_scaling(self, T_raw):
         liquid_ratio = (T_raw - 253.16) * 0.05 
@@ -2081,9 +2030,257 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         if self.use_intermediate_mlp: 
             rnn2out = self.mlp_latent(rnn2out)
           
-        if self.use_memory:
-            rnn1_mem = torch.flip(rnn2out, [1])
+        # if self.use_memory:
+        #     rnn1_mem = torch.flip(rnn2out, [1])
+        rnn1_mem = rnn2out
+      
+        out = self.mlp_output(rnn2out)
+
+        if self.output_prune:
+            # Only temperature tendency is computed for the top 10 levels
+            # if self.separate_radiation:
+            #     out[:,0:12,:] = out[:,0:12,:].clone().zero_()
+            # else:
+            out[:,0:12,1:] = out[:,0:12,1:].clone().zero_()
+        
+        # out_sfc = self.mlp_surface_output(last_hidden)
+        sfc_mean_ = self.mlp_surface_output_mu(last_hidden)
+        sfc_logvar_ = self.mlp_surface_output_sigma(last_hidden)
+        
+        eps = torch.randn_like(sfc_mean_)
+        sigma = torch.exp(0.5*sfc_logvar_)
+        out_sfc = sfc_mean_ + eps * sigma
+
+        out_sfc = self.relu(out_sfc)
+
+        return out, out_sfc, rnn1_mem
+    
+
+class halfstochastic_RNN_autoreg_torchscript(nn.Module):
+    use_initial_mlp: Final[bool]
+    use_intermediate_mlp: Final[bool]
+    add_pres: Final[bool]
+    output_prune: Final[bool]
+    use_ensemble: Final[bool]
+    separate_radiation: Final[bool]
+    use_lstm: Final[bool]
+    diagnose_precip: Final[bool]
+    def __init__(self, hyam, hybm,  hyai, hybi,
+                out_scale, out_sfc_scale, 
+                xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
+                device,
+                nlev=60, nx = 4, nx_sfc=3, ny = 4, ny_sfc=3, nneur=(64,64), 
+                use_initial_mlp=False, 
+                use_intermediate_mlp=True,
+                add_pres=False,
+                output_prune=False,
+                use_ensemble=True,
+                use_lstm=True,
+                nh_mem=64,
+                diagnose_precip=False):
+
+                
+        super(halfstochastic_RNN_autoreg_torchscript, self).__init__()
+        self.ny = ny 
+        self.ny0 = ny 
+        self.nlev = nlev 
+        self.nx_sfc = nx_sfc 
+        self.ny_sfc = ny_sfc
+        self.ny_sfc0 = ny_sfc
+        self.nneur = nneur 
+        self.use_initial_mlp=use_initial_mlp
+        self.output_prune = output_prune
+        self.add_pres = add_pres
+        if self.add_pres:
+            self.preslay = LayerPressure(hyam,hybm)
+            nx = nx +1
+        self.nx = nx
+        self.diagnose_precip = diagnose_precip
+        # If diagnose_precip is True, use method from Perkins 2024 to predict
+        # autoconversion and evaporation tendencies separately, and diagnose
+        # precipitation from their vertically integrated difference
+        if self.diagnose_precip:
+            print("warning: diagnose precipitation is ON")
+            self.ny0 = self.ny0 + 3   # Perkins 2024: Δ_p(T), Δ_p(q), and Δ_p(c)
+            self.ny_sfc0 = self.ny_sfc0 - 2 # PRECC is computed from above using Eq 9.,
+            # PRECSC is diagnosed using bottom temperature
+        self.nh_rnn1 = self.nneur[0]
+        self.nx_rnn2 = self.nneur[0]
+        self.nh_rnn2 = self.nneur[1]
+        self.use_ensemble = use_ensemble
+        if self.use_initial_mlp:
+            self.nx_rnn1 = self.nneur[0]
+        else:
+            self.nx_rnn1 = nx
             
+        self.nonlin = nn.Tanh()
+        self.relu = nn.ReLU()
+        self.use_lstm=use_lstm
+
+        yscale_lev = torch.from_numpy(out_scale).to(device)
+        yscale_sca = torch.from_numpy(out_sfc_scale).to(device)
+        xmean_lev  = torch.from_numpy(xmean_lev).to(device)
+        xmean_sca  = torch.from_numpy(xmean_sca).to(device)
+        xdiv_lev   = torch.from_numpy(xdiv_lev).to(device)
+        xdiv_sca   = torch.from_numpy(xdiv_sca).to(device)
+        
+        self.register_buffer('yscale_lev', yscale_lev)
+        self.register_buffer('yscale_sca', yscale_sca)
+        self.register_buffer('xmean_lev', xmean_lev)
+        self.register_buffer('xmean_sca', xmean_sca)
+        self.register_buffer('xdiv_lev', xdiv_lev)
+        self.register_buffer('xdiv_sca', xdiv_sca)
+        self.register_buffer('hyai', hyai)
+        self.register_buffer('hybi', hybi)
+        self.use_intermediate_mlp=use_intermediate_mlp
+            
+        if self.use_intermediate_mlp:
+            self.nh_mem = nh_mem
+        else:
+            self.nh_mem = self.nneur[1]
+        print("Building det + stochastic RNN that feeds its hidden memory at t0,z0 to its inputs at t1,z0")
+ 
+        print("Initial mlp: {}, intermediate mlp: {}".format(self.use_initial_mlp, self.use_intermediate_mlp))
+ 
+        self.nx_rnn1 = self.nx_rnn1 + self.nh_mem
+        self.nh_rnn1 = self.nneur[0]
+        
+        print("nx rnn1", self.nx_rnn1, "nh rnn1", self.nh_rnn1)
+        print("nx rnn2", self.nx_rnn2, "nh rnn2", self.nh_rnn2)  
+        print("nx sfc", self.nx_sfc)
+
+        if self.use_initial_mlp:
+            print("use initial mpl on, nx {} nh {}".format(nx,self.nneur[0]))
+            self.mlp_initial = nn.Linear(nx, self.nneur[0])
+
+        self.mlp_surface    = nn.Linear(self.nx_sfc, self.nh_rnn1)
+        self.mlp_toa        = nn.Linear(2, self.nh_rnn2)
+        
+        use_bias=False
+        self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=False) 
+        if self.use_lstm:
+            self.rnn2      = MyStochasticLSTMLayer2(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)
+            self.mlp_surface2    = nn.Linear(self.nx_sfc, self.nh_rnn1)
+            self.mlp_toa2        = nn.Linear(2, self.nh_rnn2)
+        else:
+            raise NotImplementedError() # need mlp here too for custom nh_mem
+            # srnn_layer = MyStochasticGRULayer
+            srnn_layer = MyStochasticGRULayer5
+            self.rnn2      = srnn_layer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)        
+
+        nh_rnn = self.nh_rnn2
+
+        if self.use_intermediate_mlp: 
+            self.mlp_latent = nn.Linear(nh_rnn, self.nh_mem)
+            self.mlp_output = nn.Linear(self.nh_mem, self.ny0)
+        else:
+            self.mlp_output = nn.Linear(nh_rnn, self.ny0)
+            
+        self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc0)
+      
+        
+    def temperature_scaling(self, T_raw):
+        liquid_ratio = (T_raw - 253.16) * 0.05 
+        liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
+        return liquid_ratio
+
+    def temperature_scaling_precip(self, temp_surface):
+        snow_frac = (283.3 - temp_surface) /  14.6
+        snow_frac = F.hardtanh(snow_frac, 0.0, 1.0)
+        return snow_frac 
+    
+    def postprocessing(self, out, out_sfc):
+        out             = out / self.yscale_lev
+        out_sfc         = out_sfc / self.yscale_sca
+        return out, out_sfc
+        
+    def pp_mp(self, out, out_sfc, x_denorm):
+        out_denorm      = out / self.yscale_lev
+        out_sfc_denorm  = out_sfc / self.yscale_sca
+
+        T_before        = x_denorm[:,:,0:1]
+        qliq_before     = x_denorm[:,:,2:3]
+        qice_before     = x_denorm[:,:,3:4]   
+        qn_before       = qliq_before + qice_before 
+
+        # print("shape x denorm", x_denorm.shape, "T", T_before.shape)
+        T_new           = T_before  + out_denorm[:,:,0:1]*1200
+
+        # T_new           = T_before  + out_denorm[:,:,0:1]*1200
+        liq_frac_constrained    = self.temperature_scaling(T_new)
+
+        #                            dqn
+        qn_new      = qn_before + out_denorm[:,:,2:3]*1200  
+        qliq_new    = liq_frac_constrained*qn_new
+        qice_new    = (1-liq_frac_constrained)*qn_new
+        dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
+        dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
+        out_denorm  = torch.cat((out_denorm[:,:,0:2], dqliq, dqice, out_denorm[:,:,3:]),dim=2)
+        
+        
+        return out_denorm, out_sfc_denorm
+    
+    def forward(self, inputs_main, inputs_aux, rnn1_mem):
+        if self.use_ensemble:
+            inputs_main = inputs_main.unsqueeze(0)
+            inputs_aux = inputs_aux.unsqueeze(0)
+            # inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
+            # inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
+            inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
+            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
+            inputs_main = inputs_main.flatten(0,1)
+            inputs_aux = inputs_aux.flatten(0,1)
+            # print("shape inp main", inputs_main.shape)
+                    
+        if self.add_pres:
+            sp = torch.unsqueeze(inputs_aux[:,0:1],1)
+            # undo scaling
+            sp = sp*35451.17 + 98623.664
+            pres  = self.preslay(sp)
+            inputs_main = torch.cat((inputs_main,pres),dim=2)
+
+            
+        if self.use_initial_mlp:
+            inputs_main = self.mlp_initial(inputs_main)
+            inputs_main = self.nonlin(inputs_main)  
+            
+        # rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
+        inputs_main = torch.cat((inputs_main,rnn1_mem), dim=2)
+            
+        inputs_main = torch.transpose(inputs_main,0,1)
+        rnn1_input =  torch.flip(inputs_main, [0])
+
+        inputs_sfc = inputs_aux
+        hx = self.mlp_surface(inputs_sfc)
+        hx = self.nonlin(hx)
+        cx = self.mlp_surface2(inputs_sfc)
+        # cx = self.nonlin(cx)
+        hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
+
+        rnn1out, states = self.rnn1(rnn1_input, hidden)
+        
+        # rnn1out = torch.transpose(rnn1out,0,1)
+        rnn1out = torch.flip(rnn1out, [0])
+
+        inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
+        hx2 = self.mlp_toa(inputs_toa)
+        hx2 = self.nonlin(hx2)
+        if self.use_lstm:
+            cx2 = self.mlp_toa(inputs_toa)
+            cx2 = self.nonlin(cx2)
+            hidden = (hx2, cx2)
+            rnn2out, states = self.rnn2(rnn1out, hidden)
+        else:
+            rnn2out = self.rnn2(rnn1out, hx2)
+        
+        last_hidden = rnn2out[-1,:]
+
+        rnn2out = torch.transpose(rnn2out,0,1)
+        
+        if self.use_intermediate_mlp: 
+            rnn2out = self.mlp_latent(rnn2out)
+          
+        rnn1_mem = rnn2out
       
         out = self.mlp_output(rnn2out)
 
@@ -2096,12 +2293,50 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         
         out_sfc = self.mlp_surface_output(last_hidden)
 
+        if self.diagnose_precip: 
+          dT_precip = out[:,:,5]
+          dqv_precip = out[:,:,6]
+          dqn_precip = out[:,:,7]
+          
+          dT_precip = -self.relu(dT_precip) # force negative
+          dqv_precip = self.relu(dqv_precip) # force positive
+          dqn_precip = -self.relu(dqn_precip) # force negative
+          
+          #  out: ['ptend_t', 'ptend_q0001', 'ptend_qn', 'ptend_u', 'ptend_v']
+          out[:,:,0] = out[:,:,0] + dT_precip 
+          out[:,:,1] = out[:,:,1] + dqv_precip
+          out[:,:,2] = out[:,:,2] + dqn_precip
+          out = out[:,:,0:5]
+          
+          # reverse norm
+          dqv_precip      = dqv_precip / self.yscale_lev[:,1]
+          dqn_precip      = dqn_precip / self.yscale_lev[:,2]
+
+          one_over_grav = torch.tensor(0.1020408163) # 1/9.8
+          thick= one_over_grav*(torch.reshape(sp,(-1,1)) * (self.hybi[1:61].view(1,-1)-self.hybi[0:60].view(1,-1)) 
+                          + torch.tensor(100000)*(self.hyai[1:61].view(1,-1)-self.hyai[0:60].view(1,-1)))
+          # print("shape sp", sp.shape, "shape thick", thick.shape)
+          precc = thick*(dqv_precip + dqn_precip)
+          precc = -torch.sum(precc,1).unsqueeze(1)
+          # temp_sfc_before = inputs_main[:,-1,0]
+          # temp_sfc = temp_sfc  + (out[:,-1,0]/self.yscale_lev[-1,0])*1200
+          temp_sfc = (inputs_main[-1,:,0:1]*self.xdiv_lev[-1,0:1]) + self.xmean_lev[-1,0:1]
+          snowfrac = self.temperature_scaling_precip(temp_sfc)
+          precsc = snowfrac*precc
+          # apply norm
+          # print("dTp", torch.sum(dT_precip,1)[1].item(), "dqv", torch.sum(dqv_precip,1)[1].item(), "dqn_precip", torch.sum(dqn_precip,1)[1].item() )
+          # print("precc 1", precc[1].item(), "precsc", precsc[1].item())
+
+          precsc  = precsc * self.yscale_sca[2]
+          precc   = precc * self.yscale_sca[3]
+          # print("normed precc 1", precc[1].item(), "precsc", precsc[1].item())
+
+          out_sfc =  torch.cat((out_sfc[:,0:2], precsc, precc, out_sfc[:,2:]),dim=1)
 
         out_sfc = self.relu(out_sfc)
 
         return out, out_sfc, rnn1_mem
     
-
 class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
     use_initial_mlp: Final[bool]
     use_intermediate_mlp: Final[bool]
