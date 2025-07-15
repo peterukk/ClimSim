@@ -178,9 +178,18 @@ class train_or_eval_one_epoch:
             x_sfc = [];  x_lay_raw = []
             yto_lay = []; yto_sfc = []
             rnn1_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev, self.model.nh_mem, device=device)
+            if self.cfg.use_surface_memory:
+                sfc_mem = torch.zeros(self.batch_size, self.model.ny_sfc, device=device)
             loss_update_start_index = 60
         else:
             loss_update_start_index = 0
+            
+        if self.cfg.use_ar_noise:
+            with torch.autocast(device_type=device.type, dtype=self.dtype):
+                # eps_prev = torch.rand(1, device=device)
+                # eps_prev = torch.rand(self.model.nlev, self.batch_size*self.cfg.ensemble_size, self.cfg.nneur[0], device=device)
+                eps_prev = torch.rand(self.model.nlev, self.batch_size*self.cfg.ensemble_size, self.cfg.nneur[0], device=device)
+                eps_prev.requires_grad = False 
             
         for i,data in enumerate(self.loader):
             # print("shape mem 2 {}".format(model.rnn1_mem.shape))
@@ -211,17 +220,32 @@ class train_or_eval_one_epoch:
                 target_sfc0 = targets_sfc_chk[ichunk]
                 # print("shape xlay 0", x_lay0.shape)
 
+                if self.cfg.use_surface_memory:
+                    x_sfc0 = torch.cat((x_sfc0, sfc_mem),dim=-1)
+
                 tcomp0= time.time()               
                 
                 with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
                     if self.cfg.autoregressive:
-                        outs = self.model(x_lay0, x_sfc0, rnn1_mem)
-                        if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb":
-                            preds_lay0, preds_sfc0, rnn1_mem, dummy = outs
+                        if self.cfg.use_ar_noise:
+                            inp_list = [x_lay0, x_sfc0, rnn1_mem, eps_prev]
+                            outs = self.model(inp_list)
+                            if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb":
+                                preds_lay0, preds_sfc0, rnn1_mem, eps_prev, dummy = outs
+                            else:
+                                preds_lay0, preds_sfc0, rnn1_mem, eps_prev = outs
                         else:
-                            preds_lay0, preds_sfc0, rnn1_mem = outs
+                            inp_list = [x_lay0, x_sfc0, rnn1_mem]
+                            outs = self.model(inp_list)
+                            if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb":
+                                preds_lay0, preds_sfc0, rnn1_mem, dummy = outs
+                            else:
+                                preds_lay0, preds_sfc0, rnn1_mem = outs
                     else:
                         preds_lay0, preds_sfc0 = self.model(x_lay0, x_sfc0)
+
+                if self.cfg.use_surface_memory:
+                    sfc_mem = preds_sfc0
 
                 if self.cfg.autoregressive:
                     # In the autoregressive training case are gathering many time steps before computing loss
@@ -397,6 +421,8 @@ class train_or_eval_one_epoch:
                         x_lay_raw = []; yto_lay = []; yto_sfc = []
                         x_sfc = []
                         rnn1_mem = rnn1_mem.detach()
+                        if self.cfg.use_surface_memory:
+                            sfc_mem = sfc_mem.detach()
                         # rnn1_mem.requires_grad=True
                         
                 t_comp += time.time() - tcomp0
@@ -497,7 +523,7 @@ class train_or_eval_one_epoch:
         
         del loss, h_con, water_con
         if self.cfg.autoregressive:
-            del rnn1_mem
+            del rnn1_mem, del sfc_mem
         if device.type=="cuda": 
             torch.cuda.empty_cache()
         gc.collect()
@@ -995,6 +1021,36 @@ class generator_xy(torch.utils.data.Dataset):
         if self.use_mp_constraint:
             y_lev_b[:,:,2] = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
             y_lev_b = np.delete(y_lev_b, 3, axis=2) 
+        # elif self.pred_liq_ratio:
+        #     # total = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
+        #     # liq_frac = y_lev_b[:,:,2] / total 
+        #     # liq_frac[np.isinf(liq_ratio)] = 0 
+        #     # liq_frac[np.isnan(liq_ratio)] = 0
+        #     # # print("liq ratio", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
+            
+        #     qliq_before     = x_lev_b_denorm[:,:,2]
+        #     qice_before     = x_lev_b_denorm[:,:,3]   
+        #     qn_before       = qliq_before + qice_before 
+            
+        #     dqliq = y_lev_b[:,:,2]
+        #     dqice = y_lev_b[:,:,3]  
+        #     dqn =  dqliq + dqice
+            
+        #     qn_new          = qn_before + dqn*1200  
+        #     qliq_new        = qliq_before + dqliq*1200
+        #     # qice_new        = qice_before + dqice*1200
+        #     liq_frac = qliq_new / qn_new
+        #     liq_frac[np.isinf(liq_frac)] = 0 
+        #     liq_frac[np.isnan(liq_frac)] = 0
+        #     liq_frac[liq_frac<0.0] = 0.0
+        #     liq_frac[liq_frac>1.0] = 1.0
+            
+        #     liq_frac = liq_frac**(1/16)
+            
+        #     # print("liq frac", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
+        #     # print("len", liq_frac.size, "< -0.1 ", liq_frac[liq_frac<-0.1].size, ">1.1 ", liq_frac[liq_frac>1.1].size)
+        #     y_lev_b[:,:,2] = dqn
+        #     y_lev_b[:,:,3] = liq_frac 
 
         # elaps = time.time() - t0_it
         # print("Runtime mp {:.2f}s".format(elaps))

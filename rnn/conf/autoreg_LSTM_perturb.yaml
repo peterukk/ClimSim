@@ -17,12 +17,7 @@ val_cache: false
 num_workers: 4
 chunksize_train: 24
 chunksize_val: 14
-
-batch_size_tr: 5376
-batch_size_val: 384
 val_epoch_start: 0
-
-model_file_checkpoint: None
 
 autoregressive: true
 use_ar_noise: false
@@ -30,14 +25,10 @@ mp_mode: 1
 input_norm_per_level: true
 output_norm_per_level: true
 new_nolev_scaling: false
-# loss_fn_type: mse
-loss_fn_type: huber
-use_energy_loss: true
-# w_hcon: 1.0e-05
-w_hcon: 3.0e-06
-# input_norm_per_level: false
-# output_norm_per_level: false
-use_water_loss: true
+loss_fn_type: CRPS
+use_energy_loss: false
+w_hcon: 1.0e-05
+use_water_loss: false
 w_wcon: 3.0e7
 use_bias_loss: false
 w_bias: 1.0e5
@@ -51,26 +42,24 @@ include_prev_outputs: false
 use_surface_memory: false
 snowhice_fix: true
 
-nh_mem: 16
-nneur:
-- 160
-- 160
-
 add_pres: true
 add_refpres: false
-add_stochastic_layer: false
 use_initial_mlp: true
 use_intermediate_mlp: true
 memory: Hidden
 model_type: LSTM
 concat: false
 separate_radiation: false
-ensemble_size: 1 
-crps_start_epoch: 0 
-beta: 1.0 
 
-lr_scheduler: None
-lr_gamma: 0.95
+add_stochastic_layer: true
+beta: 1.0
+model_path_det: "saved_models/LSTM-Hidden_lr0.001.neur160-160_xv4_yv5_num33706.pt"
+nh_mem: 16
+nneur:
+- 160
+- 160
+ensemble_size: 2
+
 save_model: true
 use_wandb: true
 num_epochs: 30
@@ -83,14 +72,14 @@ timestep_scheduling: true
 optimizer: soap
 #optimizer: adamwschedulefree
 rollout_schedule:
+- 1
+- 2
 - 2
 - 2
 - 3
 - 3
 - 4
 - 4
-- 5
-- 5
-- 6
-- 6
+- 4
+- 4
 swap_true_mem_with_pred_epoch: 0

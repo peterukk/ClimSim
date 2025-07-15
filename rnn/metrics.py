@@ -9,7 +9,7 @@ from __future__ import print_function
 import numpy as np 
 import torch 
 import torch.nn as nn
-
+import torch.nn.functional as F
 
 def corrcoeff_pairs_batchfirst(A, B):
     nb, nlev, nx = A.shape
@@ -255,16 +255,19 @@ def get_water_conservation(hyai, hybi):
         thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
             + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
 
-        qv = pred_lev[:,:,1]
-        ql = pred_lev[:,:,2]
-        qi = pred_lev[:,:,3]
-        dp_water = thick*(qv + ql + qi)
+        # qv = pred_lev[:,:,1]
+        # ql = pred_lev[:,:,2]
+        # qi = pred_lev[:,:,3]
+        # dp_water = thick*(qv + ql + qi)
+        dp_water = thick*(torch.sum(pred_lev[:,:,1:4],dim=2))
         lhs = torch.sum(dp_water,1)
-        rhs = LHF / Lv - precip
+        # rhs = LHF / Lv - precip
+        rhs = - precip # Latent heat flux should not be part of loss, as land model is not directly coupled to CRM?
+
         # (batch)
         rhs = torch.reshape(rhs,(timesteps, -1))
-        lhs = torch.reshape(lhs,(timesteps, -1))
         rhs = torch.mean(rhs,dim=0)
+        lhs = torch.reshape(lhs,(timesteps, -1))
         lhs = torch.mean(lhs,dim=0)
 
         if printdebug: 
@@ -343,7 +346,232 @@ def get_hybrid_loss(_lambda):
         return my_hybrid_loss(mse, energy, _lambda)
     return hybrid_loss
 
-def CRPS(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, return_low_var_inds=False):
+def CRPS(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, alpha=1.0, return_low_var_inds=False):
+    """
+    Calculate Continuous Ranked Probability Score (CRPS)
+    or Almost fair CRPS if alpha<1.0
+
+    Parameters:
+    - y_pred (torch.Tensor): Prediction tensor.   (nens*batch,30,4)
+      Needs to be transposed to (batch, nens, 30*4)
+    - y (torch.Tensor): Ground truth tensor.  (batch,30,4)
+      needs to be reshaped to (batch,1,30*4) 
+
+    Returns:
+    - Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: CRPS and its components.
+    """ 
+    # print("shape ypred", y_pred.shape, "y true", y.shape)
+
+    # if len(y.shape)==4:
+    #     #autoreg training with time windows,
+    #     # y shape: (ntime, nb, nlev, ny)
+    #     # ypred:  (ntime, nens*nb, nlev, ny)    
+    #     time_steps,batch_size,seq_size,feature_size = y.shape
+    #     ens_size = y_pred.shape[1] // batch_size
+    #     y_pred = torch.reshape(y_pred, (time_steps, ens_size, batch_size, seq_size*feature_size))
+        
+        
+    #     y_pred = torch.transpose(y_pred, 1, 2) # time, batch, ens, seq_size*feature_size))
+    #     y_pred = torch.reshape(y_pred, (time_steps*batch_size, ens_size, seq_size*feature_size))
+    #     batch_size_new = y_pred.shape[0]
+    #     y = torch.reshape(y, (batch_size_new, 1, seq_size*feature_size))
+    #     # print("shape ypred", y_pred.shape, "y true", y.shape)
+    # else:
+    # y: ntime*nbatch,      nseq, ny 
+    # yp: ntime*nbatch*nens, nseq, ny 
+    ns,seq_size,feature_size = y.shape
+    batch_size = ns // timesteps
+    ens_size = y_pred.shape[0] // (timesteps*batch_size)          
+    # y_pred = torch.reshape(y_pred, (ens_size, batch_size, -1))
+    y_pred = torch.reshape(y_pred, (timesteps, ens_size, batch_size, seq_size*feature_size))
+    y_pred = torch.transpose(y_pred, 1, 2) # time, batch, ens, seq_size*feature_size))
+    y_pred = torch.reshape(y_pred, (timesteps*batch_size, ens_size, seq_size*feature_size))
+
+    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps, ens_size, batch_size, -1))
+    y_sfc_pred = torch.transpose(y_sfc_pred, 1, 2) # time, batch, ens, nx_sfc))
+    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps*batch_size, ens_size, -1))
+    y_pred = torch.cat((y_pred, y_sfc_pred), axis=-1)
+
+    y = torch.reshape(y, (timesteps*batch_size, 1, seq_size*feature_size))
+    y_sfc = torch.reshape(y_sfc, (timesteps*batch_size, 1, -1))
+    y = torch.cat((y, y_sfc),axis=-1)
+
+    eps = (1-alpha) / ens_size
+
+    # cdist
+    # x1 (Tensor) – input tensor of shape B×P×M
+    # x2 (Tensor) – input tensor of shape B×R×M
+    
+    # ypred (batch,nens,30*4)   y  (batch,1,30*4)   
+    # cdist out term1 (batch,1,nens)
+    # cdist out term2 (batch, nens, nens)   
+    # print("shape ytrue", y.shape, "y pred", y_pred.shape )
+
+    MSE       = torch.cdist(y, y_pred).mean()  # B, 1, nens  --> (1)
+    cmean_out = torch.cdist(y_pred, y_pred) # B, nens, nens
+    ens_var = ( (1-eps)* cmean_out.mean(0).sum() ) / (ens_size * (ens_size - 1)) 
+
+
+     # Mean over batch, then summed over ens dim. Should this instead be first sum over ens, then mean over batch?
+
+    ## ens_var = cmean_out.mean() / (ens_size * (ens_size - 1))
+    # ens_var = torch.mean(torch.sum(cmean_out,dim=[1,2])) / (ens_size * (ens_size - 1)) 
+    # MSE     = torch.mean(torch.sum(torch.cdist(y, y_pred),dim=2)) # B, 1, nens  --> (1)
+
+    MSE         /= y_pred.size(-1) ** 0.5
+    ens_var     /= y_pred.size(-1) ** 0.5
+    
+    CRPS =  beta * 2 * MSE - ens_var # beta should be 1
+
+    if return_low_var_inds:
+        x = cmean_out[:,0,1]
+        q = torch.quantile(x, 0.05,  keepdim=False)
+        inds = x <= q
+
+        # print("shape cmean out", cmean_out.shape, "shape inds", inds.shape)
+        # print("cmean out 0, 01,   2048, 01", cmean_out[0,0,1], cmean_out[2048,0,1])
+        # return beta * 2 * MSE - ens_var, MSE, ens_var, inds
+        return CRPS,  MSE, ens_var, inds
+
+    else:
+        return CRPS, MSE, ens_var
+
+
+def CRPS_l1(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
+    """
+    Calculate Continuous Ranked Probability Score.
+
+    Parameters:
+    - y_pred (torch.Tensor): Prediction tensor.   (nens*batch,30,4)
+      Needs to be transposed to (batch, nens, 30*4)
+    - y (torch.Tensor): Ground truth tensor.  (batch,30,4)
+      needs to be reshaped to (batch,1,30*4) 
+
+    Returns:
+    - Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: CRPS and its components.
+    """ 
+    
+    # print("shape ypred", y_pred.shape, "y true", y.shape)
+
+    # if len(y.shape)==4:
+    #     #autoreg training with time windows,
+    #     # y shape: (ntime, nb, nlev, ny)
+    #     # ypred:  (ntime, nens*nb, nlev, ny)    
+    #     time_steps,batch_size,seq_size,feature_size = y.shape
+    #     ens_size = y_pred.shape[1] // batch_size
+    #     y_pred = torch.reshape(y_pred, (time_steps, ens_size, batch_size, seq_size*feature_size))
+        
+        
+        
+    #     y_pred = torch.transpose(y_pred, 1, 2) # time, batch, ens, seq_size*feature_size))
+    #     y_pred = torch.reshape(y_pred, (time_steps*batch_size, ens_size, seq_size*feature_size))
+    #     batch_size_new = y_pred.shape[0]
+    #     y = torch.reshape(y, (batch_size_new, 1, seq_size*feature_size))
+    #     # print("shape ypred", y_pred.shape, "y true", y.shape)
+    # else:
+    # y: ntime*nbatch,      nseq, ny 
+    # yp: ntime*nbatch*nens, nseq, ny 
+    ns,seq_size,feature_size = y.shape
+    batch_size = ns // timesteps
+    ens_size = y_pred.shape[0] // (timesteps*batch_size)          
+    # y_pred = torch.reshape(y_pred, (ens_size, batch_size, -1))
+    y_pred = torch.reshape(y_pred, (timesteps, ens_size, batch_size, seq_size*feature_size))
+    y_pred = torch.transpose(y_pred, 1, 2) # time, batch, ens, seq_size*feature_size))
+    y_pred = torch.reshape(y_pred, (timesteps*batch_size, ens_size, seq_size*feature_size))
+
+    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps, ens_size, batch_size, -1))
+    y_sfc_pred = torch.transpose(y_sfc_pred, 1, 2) # time, batch, ens, nx_sfc))
+    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps*batch_size, ens_size, -1))
+    y_pred = torch.cat((y_pred, y_sfc_pred), axis=-1)
+
+    y = torch.reshape(y, (timesteps*batch_size, 1, seq_size*feature_size))
+    y_sfc = torch.reshape(y_sfc, (timesteps*batch_size, 1, -1))
+    y = torch.cat((y, y_sfc),axis=-1)
+
+    # ypred (batch,nens,30*4)   y  (batch,1,30*4)   
+
+    # Args:
+    #     x: Predicted ensemble values [batch, seq_len, x, y].
+    #     y: Target values [batch, 1, x, y].
+
+    # Returns:
+    #     Skill, spread, and spectral losses.
+    # """
+    # # Compute magnitude of spectral terms
+    # x_k = torch.fft.fft2(x, norm='ortho').abs()
+    # y_k = torch.fft.fft2(y, norm='ortho').abs()
+
+    # # Compute loss components L1 loss for CRPS, L2 for Energy Score
+    skill  = F.l1_loss(y_pred, y)              # mean L1 loss over ensemble members
+    spread = F.l1_loss(y_pred[:, 0], y_pred[:, 1])  # Ensemble spread (assumes ens_size = 2)
+    # spec   = F.l1_loss(x_k, y_k)          # Spectral loss over ensemble members
+
+    # # Compute weighted loss (spec_weight = 1 by default)
+    loss = skill - 0.5 * spread
+    return loss, skill, spread
+
+def CRPS3(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
+    """
+    Calculate Continuous Ranked Probability Score.
+
+    Parameters:
+    - y_pred (torch.Tensor): Prediction tensor.   (ntime*nens*batch,nlev,ny)
+      Needs to be transposed to  (nens, ntime*batch, nlev*ny)
+    - y (torch.Tensor): Ground truth tensor.  (ntime*batch,nlev,ny)
+      needs to be reshaped to (1, ntime*batch, nlev*ny) 
+
+    Returns:
+    - Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: CRPS and its components.
+    """ 
+    
+    ns,seq_size,feature_size = y.shape
+    batch_size = ns // timesteps
+    ens_size = y_pred.shape[0] // (timesteps*batch_size)          
+    # y_pred = torch.reshape(y_pred, (ens_size, batch_size, -1))
+    y_pred = torch.reshape(y_pred, (timesteps, ens_size, batch_size, seq_size*feature_size))
+    y_pred = torch.transpose(y_pred, 0, 1) # ens, time, batch, seq_size*feature_size))
+    y_pred = torch.reshape(y_pred, (ens_size, timesteps*batch_size, seq_size*feature_size))
+
+    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps, ens_size, batch_size, -1))
+    y_sfc_pred = torch.transpose(y_sfc_pred, 0, 1) # ens, time, batch, nx_sfc))
+    y_sfc_pred = torch.reshape(y_sfc_pred, (ens_size, timesteps*batch_size, -1))
+    y_pred = torch.cat((y_pred, y_sfc_pred), axis=-1)
+
+    y = torch.reshape(y, (1, timesteps*batch_size, seq_size*feature_size))
+    y_sfc = torch.reshape(y_sfc, (1, timesteps*batch_size, -1))
+    y = torch.cat((y, y_sfc),axis=-1) 
+
+    # def _kernel_crps(self, preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    # """Kernel (ensemble) CRPS.
+    mae = torch.mean(torch.abs(y - y_pred), dim=0)
+    # mae = torch.cat( [(target - mem).abs().mean().unsqueeze(0) for mem in ens], 0).mean()
+    # https://github.com/clessig/atmorep/blob/055f858e68f5e0151eb6fece9f6b574d3da4af8d/atmorep/utils/utils.py#L374
+
+    # assert ens_size > 1, "Ensemble size must be greater than 1."
+    fair = True
+    # coef = -1.0 / (ens_size * (ens_size - 1)) if fair else -1.0 / (ens_size**2)
+    coef = -1.0 / (2.0 * ens_size * (ens_size - 1)) if fair else -1.0 / (2.0 * ens_size**2)
+
+    ens_var = torch.zeros(size=y.shape, device=y.device).squeeze(0)
+    for i in range(ens_size):  # loop version to reduce memory usage
+        ens_var += torch.sum(torch.abs(y_pred[i:i+1,:,:] - y_pred[i + 1 :,:,:]), dim=0)
+    ens_var = coef * ens_var
+
+    loss = mae + ens_var
+    # (batch, n_vars)
+
+    skill = mae.mean()
+    spread = (-1*ens_var).mean()
+    # In ECMWF ANEMOI code ( https://github.com/ecmwf/anemoi-core/blob/main/training/src/anemoi/training/losses/base.py ),
+    # the loss is at this point SUMMED over the variable dimension
+    # loss = torch.sum(loss,dim=1)  # --> (batch)
+    loss = torch.mean(loss)
+   
+    return loss, skill, spread
+
+
+def CRPS4(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, return_low_var_inds=False):
+    
     """
     Calculate Continuous Ranked Probability Score.
 
@@ -402,18 +630,26 @@ def CRPS(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, return_low_var_inds=Fa
     # cdist out term1 (batch,1,nens)
     # cdist out term2 (batch, nens, nens)   
     # print("shape ytrue", y.shape, "y pred", y_pred.shape )
-    MAE     = torch.cdist(y, y_pred).mean() 
-    # ens_var = torch.cdist(y_pred, y_pred).mean(0).sum() / (self.ens_size * (self.ens_size - 1))
-    
-    cmean_out = torch.cdist(y_pred, y_pred) # B, nens, nens
 
-    ens_var = cmean_out.mean(0).sum() / (ens_size * (ens_size - 1))
-    
-    MAE         /= y_pred.size(-1) ** 0.5
+    # MSE     = torch.cdist(y, y_pred).mean()  # B, 1, nens  --> (1)
+    cmean_out = torch.cdist(y_pred, y_pred) # B, nens, nens
+    # ens_var = cmean_out.mean(0).sum() / (ens_size * (ens_size - 1)) 
+     # Mean over batch, then summed over ens dim. Should this instead be first sum over ens, then mean over batch?
+
+
+    # ens_var = cmean_out.sum(1).mean() / (ens_size * (ens_size - 1)) 
+    ens_var = torch.mean(cmean_out) / (ens_size * (ens_size - 1)) 
+
+    MSE     = torch.mean(torch.cdist(y, y_pred)) # B, 1, nens  --> (1)
+
+
+    # ens_var = cmean_out.mean() / (ens_size * (ens_size - 1))
+
+    MSE         /= y_pred.size(-1) ** 0.5
     ens_var     /= y_pred.size(-1) ** 0.5
     
-    CRPS =  beta * 2 * MAE - ens_var # beta should be 1
-    
+    CRPS =  beta * 2 * MSE - ens_var # beta should be 1
+
     if return_low_var_inds:
         x = cmean_out[:,0,1]
         q = torch.quantile(x, 0.05,  keepdim=False)
@@ -422,12 +658,16 @@ def CRPS(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, return_low_var_inds=Fa
         # print("shape cmean out", cmean_out.shape, "shape inds", inds.shape)
         # print("cmean out 0, 01,   2048, 01", cmean_out[0,0,1], cmean_out[2048,0,1])
         # return beta * 2 * MSE - ens_var, MSE, ens_var, inds
-        return CRPS,  MAE, ens_var, inds
+        return CRPS,  MSE, ens_var, inds
 
     else:
-        return CRPS, MAE, ens_var
+        return CRPS, MSE, ens_var
+
+    
 
 def get_CRPS(beta): 
     def customCRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps):
+        # return CRPS3(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, beta)
         return CRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, beta)
+
     return customCRPS

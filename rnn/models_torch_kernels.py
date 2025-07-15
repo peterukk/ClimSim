@@ -763,6 +763,8 @@ class MyStochasticLSTMLayer3(jit.ScriptModule):
         self.weight_hh = Parameter(torch.randn(( hidden_size, 3 * hidden_size)))
         self.weight_encoder =  Parameter(torch.randn((hidden_size, 2*hidden_size)))
         self.use_bias = use_bias
+        self.tau_t = torch.tensor(0.5)
+        self.tau_e = torch.sqrt(1 - self.tau_t**2)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -770,15 +772,24 @@ class MyStochasticLSTMLayer3(jit.ScriptModule):
         for w in self.parameters():
             w.data.uniform_(-std, std)
             
+    # def ar_noise(self, eps_prev, eps):
+    #     # tau_t = 0.5
+    #     # tau_e = torch.sqrt(1 - tau_t**2)
+    #     # eps = np.random.randn(1)
+    #     eps_t = self.tau_t * eps_prev + self.tau_e * eps
+    #     return eps_t       
+                
     # @torch.jit.script          
     # @jit.script_method
     @torch.compile
     def forward(
-        self, input_seq: Tensor, state: Tuple[Tensor, Tensor]
+        self, input_seq: Tensor, state: Tuple[Tensor, Tensor], eps_prev: Tensor
     ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
         nseq, batch_size, nx = input_seq.shape
         epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device, dtype=input_seq.dtype)
-        epss = epss.unbind(0)
+        # epss = epss.unbind(0)
+        
+        # eps_prev = eps_prev.unbind(0)
         inputs = input_seq.unbind(0)
         outputs = torch.jit.annotate(List[Tensor], [])
         hx, cx = state
@@ -787,22 +798,105 @@ class MyStochasticLSTMLayer3(jit.ScriptModule):
             # x = inputs[i]
             eps = epss[i]
             # eps = torch.randn_like(hx)
-            # print("shape x", x.shape, "shape hid", hidden.shape)
             # inp = torch.cat((x, hx), dim=1)
             predicted_distribution = torch.mm(hx, self.weight_encoder) 
             mean_, logvar_ = predicted_distribution.chunk(2,1)
+            
             z = mean_ + eps * torch.exp(0.5*logvar_)
             outgate = torch.sigmoid(z)
 
             x = inputs[i]
             gates = (
-              torch.mm(x, self.weight_ih) + torch.mm(hx, self.weight_hh)
-            )
+                torch.mm(x, self.weight_ih) + torch.mm(hx, self.weight_hh)
+              )
             ingate, forgetgate, cellgate = gates.chunk(3, 1)
-            # forgetgate = 1 - ingate
-            cx = (forgetgate * cx) + (torch.sigmoid(ingate) *  torch.tanh(cellgate))
+            
+            ingate = torch.sigmoid(ingate)
+            forgetgate = torch.sigmoid(forgetgate)
+            cellgate = torch.tanh(cellgate)
+    
+            cx = (forgetgate * cx) + (ingate * cellgate)
 
             hx = outgate * torch.tanh(cx)
+        
+            outputs += [hx]
+
+        state =  (hx, cx)
+
+        return torch.stack(outputs), state
+    
+    
+class MyStochasticLSTMLayer3_ar(jit.ScriptModule):
+    use_bias: Final[bool]
+
+    def __init__(self, input_size, hidden_size, use_bias):
+        super().__init__()
+        # self.cell = cell(*cell_args)
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.weight_ih = Parameter(torch.randn(( input_size, 3 * hidden_size)))
+        self.weight_hh = Parameter(torch.randn(( hidden_size, 3 * hidden_size)))
+        self.weight_encoder =  Parameter(torch.randn((hidden_size, 2*hidden_size)))
+        self.use_bias = use_bias
+        # self.tau_t = torch.tensor(0.5)
+        # self.tau_e = torch.sqrt(1 - self.tau_t**2)
+        # tau_t = torch.tensor(0.5)
+        # tau_e = torch.sqrt(1 - tau_t**2)
+        # self.register_buffer('tau_t', tau_t)
+        # self.register_buffer('tau_e', tau_e)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        std = 1.0 / math.sqrt(self.hidden_size)
+        for w in self.parameters():
+            w.data.uniform_(-std, std)
+                  
+                
+    # @torch.jit.script          
+    # @jit.script_method
+    @torch.compile
+    def forward(
+        self, input_seq: Tensor, state: Tuple[Tensor, Tensor], eps_t: Tensor
+    ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
+        nseq, batch_size, nx = input_seq.shape
+        # epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device, dtype=input_seq.dtype)
+        # epss = epss.unbind(0)
+        eps_t = eps_t.unbind(0)
+        # eps_prev = eps_prev.unbind(0)
+        inputs = input_seq.unbind(0)
+        outputs = torch.jit.annotate(List[Tensor], [])
+        hx, cx = state
+        
+        for i in range(len(inputs)):
+            # x = inputs[i]
+            # eps = epss[i]
+            # eps = torch.randn_like(hx)
+            # print("shape x", x.shape, "shape hid", hidden.shape)
+            # inp = torch.cat((x, hx), dim=1)
+            predicted_distribution = torch.mm(hx, self.weight_encoder) 
+            mean_, logvar_ = predicted_distribution.chunk(2,1)
+            
+            # eps_t = self.tau_t * eps_prev[i] + self.tau_e * eps
+            eps = eps_t[i]
+            z = mean_ + eps * torch.exp(0.5*logvar_)
+            # z = mean_ + eps * torch.exp(0.5*logvar_)
+            outgate = torch.sigmoid(z)
+
+            x = inputs[i]
+            gates = (
+                torch.mm(x, self.weight_ih) + torch.mm(hx, self.weight_hh)
+              )
+            ingate, forgetgate, cellgate = gates.chunk(3, 1)
+            
+            ingate = torch.sigmoid(ingate)
+            forgetgate = torch.sigmoid(forgetgate)
+            cellgate = torch.tanh(cellgate)
+    
+            cx = (forgetgate * cx) + (ingate * cellgate)
+
+            hx = outgate * torch.tanh(cx)
+        
             outputs += [hx]
 
         state =  (hx, cx)

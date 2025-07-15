@@ -11,6 +11,8 @@ import torch.nn as nn
 import torch.nn.parameter as Parameter
 # from layers_callbacks_torch import LayerPressure 
 import torch.nn.functional as F
+from typing import List, Tuple, Final, Optional
+from torch import Tensor
 from models_torch_kernels import GLU
 from models_torch_kernels import *
 import numpy as np 
@@ -567,8 +569,12 @@ class LSTM_autoreg_torchscript(nn.Module):
         
         return out_denorm, out_sfc_denorm
     
-    def forward(self, inputs_main, inputs_aux, rnn1_mem):
-        # if self.ensemble_size>0:
+    # def forward(self, inputs_main, inputs_aux, rnn1_mem):
+    def forward(self, inp_list : List[Tensor]):
+        inputs_main   = inp_list[0]
+        inputs_aux    = inp_list[1]
+        rnn1_mem      = inp_list[2]
+
         if self.use_ensemble:
             inputs_main = inputs_main.unsqueeze(0)
             inputs_aux = inputs_aux.unsqueeze(0)
@@ -1821,6 +1827,7 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
     use_memory: Final[bool]
     separate_radiation: Final[bool]
     use_lstm: Final[bool]
+    use_ar_noise: Final[bool]
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
@@ -1861,7 +1868,13 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         self.nonlin = nn.Tanh()
         self.relu = nn.ReLU()
         self.use_lstm=use_lstm
-
+        
+        self.use_ar_noise=True
+        if self.use_ar_noise:
+            tau_t = torch.tensor(0.85)
+            tau_e = torch.sqrt(1 - tau_t**2)
+            self.register_buffer('tau_t', tau_t)
+            self.register_buffer('tau_e', tau_e)
         yscale_lev = torch.from_numpy(out_scale).to(device)
         yscale_sca = torch.from_numpy(out_sfc_scale).to(device)
         xmean_lev  = torch.from_numpy(xmean_lev).to(device)
@@ -1876,7 +1889,7 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         self.register_buffer('xdiv_lev', xdiv_lev)
         self.register_buffer('xdiv_sca', xdiv_sca)
         self.use_intermediate_mlp=use_intermediate_mlp
-            
+
         if self.use_memory:
             if self.use_intermediate_mlp:
                 self.nh_mem = nh_mem
@@ -1905,8 +1918,12 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         
         use_bias=False
         if self.use_lstm:
-            self.rnn1      = MyStochasticLSTMLayer2(self.nx_rnn1, self.nh_rnn1, use_bias=use_bias) 
-            self.rnn2      = MyStochasticLSTMLayer2(self.nx_rnn2, self.nh_rnn2,use_bias=use_bias)
+            if self.use_ar_noise:
+                rnn_layer = MyStochasticLSTMLayer3_ar
+            else:
+                rnn_layer = MyStochasticLSTMLayer3
+            self.rnn1      = rnn_layer(self.nx_rnn1, self.nh_rnn1, use_bias=use_bias) 
+            self.rnn2      = rnn_layer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)
             self.mlp_surface2    = nn.Linear(self.nx_sfc, self.nh_rnn1)
             self.mlp_toa2        = nn.Linear(2, self.nh_rnn2)
         else:
@@ -1964,7 +1981,15 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         
         return out_denorm, out_sfc_denorm
     
-    def forward(self, inputs_main, inputs_aux, rnn1_mem):
+    
+    
+    def forward(self, inp_list : List[Tensor]):
+        inputs_main   = inp_list[0]
+        inputs_aux    = inp_list[1]
+        rnn1_mem      = inp_list[2]
+        if self.use_ar_noise:
+            eps_prev  = inp_list[3]
+            
         if self.use_ensemble:
             inputs_main = inputs_main.unsqueeze(0)
             inputs_aux = inputs_aux.unsqueeze(0)
@@ -2005,11 +2030,16 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
             cx = self.mlp_surface2(inputs_sfc)
             cx = self.nonlin(cx)
             hidden = (hx, cx)
-            rnn1out, states = self.rnn1(rnn1_input, hidden)
+            if self.use_ar_noise:
+                rnn1out, states = self.rnn1(rnn1_input, hidden, eps_prev)
+            else:
+                rnn1out, states = self.rnn1(rnn1_input, hidden)
         else:
             rnn1out = self.rnn1(rnn1_input, hx)
         
         rnn1out = torch.flip(rnn1out, [0])
+        if self.use_ar_noise:
+            eps_prev_rev = torch.flip(eps_prev, [0])
 
         inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
         hx2 = self.mlp_toa(inputs_toa)
@@ -2018,7 +2048,12 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
             cx2 = self.mlp_toa(inputs_toa)
             cx2 = self.nonlin(cx2)
             hidden = (hx2, cx2)
-            rnn2out, states = self.rnn2(rnn1out, hidden)
+            if self.use_ar_noise:
+                rnn2out, states = self.rnn2(rnn1out, hidden, eps_prev_rev)
+                del eps_prev_rev
+            else:
+                rnn2out, states = self.rnn2(rnn1out, hidden)
+            del rnn1out
         else:
             rnn2out = self.rnn2(rnn1out, hx2)
         
@@ -2052,8 +2087,14 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         out_sfc = sfc_mean_ + eps * sigma
 
         out_sfc = self.relu(out_sfc)
-
-        return out, out_sfc, rnn1_mem
+        if self.use_ar_noise:
+            # eps = torch.rand(out.shape[1], out.shape[0], hx2.shape[-1], device=out.device)
+            # eps = torch.randn_like(eps_prev)
+            eps_prev = self.tau_t * eps_prev + self.tau_e * torch.randn_like(eps_prev) #eps
+             
+            return out, out_sfc, rnn1_mem, eps_prev
+        else:
+            return out, out_sfc, rnn1_mem
     
 
 class halfstochastic_RNN_autoreg_torchscript(nn.Module):

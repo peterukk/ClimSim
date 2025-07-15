@@ -3,6 +3,7 @@ rnn/wandb
 rnn/predfrac
 rnn/*.pt 
 rnn/outputs
+rnn/saved_models/*.pt
 
 *.out
 website/_build/

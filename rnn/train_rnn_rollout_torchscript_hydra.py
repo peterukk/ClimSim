@@ -147,7 +147,6 @@ def main(cfg: DictConfig):
     #  'tm_state_q0_dyn', 'tm_state_u_dyn', 'pbuf_ozone', 'pbuf_CH4', 'pbuf_N2O']
     
     dims = hf['input_sca'].shape; nx_sfc = dims[-1]
-    print("nx_sfc:", nx_sfc)
     vars_1D_inp = hf['input_sca'].attrs.get('varnames').tolist()
     #1D (scalar) Input variables:
     #   'ps' 'pbuf_SOLIN' 'pbuf_LHFLX' 'pbuf_SHFLX' 'pbuf_TAUX' 'pbuf_TAUY'
@@ -203,6 +202,9 @@ def main(cfg: DictConfig):
 
     if cfg.add_refpres:
         nx = nx + 1
+
+    if cfg.use_surface_memory:
+        nx_sfc = nx_sfc + ny_sfc
         
     # if use_mp_constraint:
     if cfg.mp_mode>0:
@@ -743,7 +745,7 @@ def main(cfg: DictConfig):
             logged_metrics['epoch'] = epoch
             wandb.log(logged_metrics)
         
-        if epoch%2:
+        if (bool(epoch%2) and (epoch>=cfg.val_epoch_start)):
             print("VALIDATION..")
             val_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps)
             if val_runner.loader.dataset.cache:
