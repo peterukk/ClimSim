@@ -59,6 +59,8 @@ def main(cfg: DictConfig):
     print('RAM memory % used:', psutil.virtual_memory()[2], flush=True)
     # Getting usage of virtual_memory in GB ( 4th field)
     print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
+    
+    # torch.autograd.set_detect_anomaly(True)
 
     # cfg = OmegaConf.load("conf/autoreg_LSTM.yaml")
     
@@ -312,6 +314,11 @@ def main(cfg: DictConfig):
         xmean_sca[6] = 0.0
         # yscale_sca[0]  = 1.0 
         # yscale_sca[4:] = 1.0 
+    elif cfg.model_type=="physrad":
+        xdiv_sca[1] = 1.0; xmean_sca[1] = 0.0
+        xdiv_sca[6] = 1.0; xmean_sca[6] = 0.0
+        xdiv_sca[9] = 1.0; xmean_sca[9] = 0.0
+        xdiv_sca[10] = 1.0; xmean_sca[10] = 0.0
 
     if cfg.snowhice_fix:
         xmean_sca[15] = 0.0 
@@ -378,6 +385,26 @@ def main(cfg: DictConfig):
                         use_initial_mlp = cfg.use_initial_mlp,
                         use_intermediate_mlp = cfg.use_intermediate_mlp,
                         add_pres = cfg.add_pres, output_prune = cfg.output_prune)
+    elif cfg.model_type=="CFC":
+        if cfg.autoregressive:
+            model = LiquidNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
+                        out_scale = yscale_lev,
+                        out_sfc_scale = yscale_sca, 
+                        xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+                        xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                        device=device,
+                        nx = nx, nx_sfc=nx_sfc, 
+                        ny = ny, ny_sfc=ny_sfc, 
+                        nneur=cfg.nneur, 
+                        nout_cfc=cfg.cfc_nout,
+                        use_initial_mlp = cfg.use_initial_mlp,
+                        use_intermediate_mlp = cfg.use_intermediate_mlp,
+                        add_pres = cfg.add_pres,
+                        add_stochastic_layer = cfg.add_stochastic_layer, 
+                        output_prune = cfg.output_prune,
+                        use_ensemble = use_ensemble,
+                        concat = cfg.concat,
+                        nh_mem = cfg.nh_mem)#,
     elif cfg.model_type=="SRNN":
         model = stochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
@@ -394,7 +421,9 @@ def main(cfg: DictConfig):
                     output_prune = cfg.output_prune,
                     use_memory = cfg.autoregressive,
                     use_ensemble = use_ensemble,
-                    nh_mem = cfg.nh_mem)#,
+                    nh_mem = cfg.nh_mem,
+                    ar_noise_mode = cfg.ar_noise_mode,
+                    ar_tau = cfg.ar_tau)#,
     elif cfg.model_type=="partiallystochasticRNN":
         model = halfstochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
@@ -412,6 +441,25 @@ def main(cfg: DictConfig):
                     use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem,
                     diagnose_precip = diagnose_precip)#,
+    elif cfg.model_type=="physrad":
+        model = LSTM_autoreg_torchscript_physrad(hyam,hybm,hyai,hybi,
+                    out_scale = yscale_lev,
+                    out_sfc_scale = yscale_sca, 
+                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                    device=device,
+                    nx = nx, nx_sfc=nx_sfc, 
+                    ny = ny, ny_sfc=ny_sfc, 
+                    nneur=cfg.nneur, 
+                    use_initial_mlp = cfg.use_initial_mlp,
+                    use_intermediate_mlp = cfg.use_intermediate_mlp,
+                    add_pres = cfg.add_pres,
+                    add_stochastic_layer = cfg.add_stochastic_layer, 
+                    output_prune = cfg.output_prune,
+                    use_ensemble = use_ensemble,
+                    use_third_rnn = use_third_rnn,
+                    concat = cfg.concat,
+                    nh_mem = cfg.nh_mem)#,
     elif cfg.model_type=="radflux":
         model = LSTM_autoreg_torchscript_radflux(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
@@ -600,15 +648,36 @@ def main(cfg: DictConfig):
   
 #   https://docs.pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.OneCycleLR.html
     if cfg.lr_scheduler=="OneCycleLR":
+    #   scheduler_end_epoch = 30
       #max_lr = 5*cfg.lr
-      max_lr = 4*cfg.lr
+    #   max_lr = 4*cfg.lr
+        # max_lr = 0.002
+        max_lr = cfg.scheduler_max_lr
       # max_lr = 3*cfg.lr
-      steps_per_epoch = int(2*train_data.ntimesteps // timestep_schedule.mean())
-      print("Using OneCycleLR with max_lr={} steps_per_epoch={}".format(max_lr, steps_per_epoch))
-      lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, 
-                                                         div_factor=max_lr/cfg.lr,
-                                                         final_div_factor=10,
-                                                         epochs=30, steps_per_epoch= steps_per_epoch)
+        # final_div_factor = 10
+        # min_lr = 0.0002
+        min_lr = cfg.scheduler_min_lr
+        final_div_factor = cfg.lr/min_lr
+    #   steps_per_epoch = int(2*train_data.ntimesteps // timestep_schedule.mean())
+    #   print("Using OneCycleLR with max_lr={} steps_per_epoch={}".format(max_lr, steps_per_epoch))
+    #   lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, 
+    #                                                      div_factor=max_lr/cfg.lr,
+    #                                                      final_div_factor=10,
+    #                                                      epochs=scheduler_end_epoch, steps_per_epoch= steps_per_epoch)
+
+    #   steps_per_epoch = int(2*train_data.ntimesteps // timestep_schedule.mean())
+        # pct_start = 0.1
+        scheduler_end_epoch = cfg.scheduler_end_epoch
+        # scheduler_end_epoch = cfg.num_epochs
+        pct_start = cfg.scheduler_peak_epoch / scheduler_end_epoch
+        annealing = cfg.scheduler_annealing # "linear" #"cos"
+        print("Using OneCycleLR with max_lr={} total steps={}, min_lr={}, pct_start={}, anneal={}".format(max_lr, scheduler_end_epoch, min_lr, pct_start, annealing))
+        lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, 
+                                                            div_factor=max_lr/cfg.lr,
+                                                            final_div_factor=final_div_factor,
+                                                            total_steps=scheduler_end_epoch,
+                                                            pct_start=pct_start, 
+                                                            anneal_strategy=annealing)                                                         
     elif cfg.lr_scheduler=="StepLR":
       print("Using StepLR with gamma={}".format(cfg.lr_gamma))
       lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=cfg.lr_gamma, last_epoch=-1)
@@ -723,9 +792,17 @@ def main(cfg: DictConfig):
 
         train_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps, lr_scheduler)
 
+        if cfg.lr_scheduler != "None":
+          # lr_scheduler.step()
+          # # debugging purpose
+          print("last LR was", lr_scheduler.get_last_lr()) # will print last learning rate.
+          
         if cfg.lr_scheduler=="StepLR":
+            print("Calling scheduler .step()")
             lr_scheduler.step()
-
+        elif cfg.lr_scheduler=="OneCycleLR" and epoch<(cfg.scheduler_end_epoch-1):
+            print("Calling scheduler .step()")
+            lr_scheduler.step()
         if train_runner.loader.dataset.cache:
             train_runner.loader.dataset.cache_loaded = True
         
@@ -771,20 +848,25 @@ def main(cfg: DictConfig):
             # val_loss = val_runner.metrics["R2"]
 
             # MODEL CHECKPOINT IF VALIDATION LOSS IMPROVED
-            if True:
-            # if cfg.save_model and val_loss < best_val_loss:
+            # if True:
+            if cfg.save_model and val_loss < best_val_loss:
             # if cfg.save_model and val_loss > best_val_loss:
-                SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_ep{}_val{:.4f}.pt'.format(cfg.model_type,
+                # SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_ep{}_val{:.4f}.pt'.format(cfg.model_type,
+                #                                                                 cfg.memory, cfg.lr, 
+                #                                                                 cfg.nneur[0], cfg.nneur[1], 
+                #                                                                 inpstr, outpstr,
+                #                                                                 model_num, epoch, val_loss)
+                SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}.pt'.format(cfg.model_type,
                                                                                 cfg.memory, cfg.lr, 
                                                                                 cfg.nneur[0], cfg.nneur[1], 
-                                                                                inpstr, outpstr,
-                                                                                model_num, epoch, val_loss)
-                save_file_torch = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script.pt"
+                                                                                inpstr, outpstr, model_num)
+                save_file_torch1 = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script_gpu.pt"
+                save_file_torch2 = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script_cpu.pt"
                 print("saving model to", SAVE_PATH)
                 # print("New best validation result obtained, saving model to", SAVE_PATH)
                 if cfg.loss_fn_type == "CRPS":
                     model.use_ensemble=False
-                model = model.to("cpu")
+                # model = model.to("cpu")
                 torch.save({
                             'epoch': epoch,
                             'model_state_dict': model.state_dict(),
@@ -793,7 +875,11 @@ def main(cfg: DictConfig):
                             }, SAVE_PATH)  
                 scripted_model = torch . jit . script ( model )
                 scripted_model = scripted_model.eval()
-                scripted_model.save(save_file_torch)
+                scripted_model.save(save_file_torch1)
+                model = model.to("cpu")
+                scripted_model = torch . jit . script ( model )
+                scripted_model = scripted_model.eval()
+                scripted_model.save(save_file_torch2)
                 best_val_loss = val_loss 
                 if cfg.loss_fn_type == "CRPS":
                     model.use_ensemble=True
@@ -851,11 +937,7 @@ def main(cfg: DictConfig):
         print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timesteps))
         print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
         # if epoch == 6:
-        if cfg.lr_scheduler != "None":
-          # lr_scheduler.step()
-          # # debugging purpose
-          print("last LR was", lr_scheduler.get_last_lr()) # will print last learning rate.
-          
+
     if cfg.use_wandb:
         wandb.finish()
 

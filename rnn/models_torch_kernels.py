@@ -862,7 +862,11 @@ class MyStochasticLSTMLayer3_ar(jit.ScriptModule):
         nseq, batch_size, nx = input_seq.shape
         # epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device, dtype=input_seq.dtype)
         # epss = epss.unbind(0)
-        eps_t = eps_t.unbind(0)
+        if eps_t.dim() == 3:
+            eps_t = eps_t.unbind(0)
+            eps_has_vertical_dim=True 
+        else:
+            eps_has_vertical_dim=False
         # eps_prev = eps_prev.unbind(0)
         inputs = input_seq.unbind(0)
         outputs = torch.jit.annotate(List[Tensor], [])
@@ -878,7 +882,10 @@ class MyStochasticLSTMLayer3_ar(jit.ScriptModule):
             mean_, logvar_ = predicted_distribution.chunk(2,1)
             
             # eps_t = self.tau_t * eps_prev[i] + self.tau_e * eps
-            eps = eps_t[i]
+            if eps_has_vertical_dim:
+                eps = eps_t[i]
+            else:
+                eps = eps_t 
             z = mean_ + eps * torch.exp(0.5*logvar_)
             # z = mean_ + eps * torch.exp(0.5*logvar_)
             outgate = torch.sigmoid(z)

@@ -152,7 +152,7 @@ class train_or_eval_one_epoch:
         running_loss = 0.0; running_energy = 0.0; running_water = 0.0
         running_var=0.0; running_bias = 0.0
         epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0; epoch_mae = 0.0
-        epoch_R2precc = 0.0
+        epoch_R2precc = 0.0; epoch_R2netsw = 0.0; epoch_R2flwds = 0.0
         epoch_hcon = 0.0; epoch_wcon = 0.0
         epoch_ens_var = 0.0; epoch_det_skill = 0.0; epoch_spreadskill = 0.0
         epoch_r2_lev = 0.0
@@ -177,20 +177,35 @@ class train_or_eval_one_epoch:
             targets_lay = []; targets_sfc = [] 
             x_sfc = [];  x_lay_raw = []
             yto_lay = []; yto_sfc = []
-            rnn1_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev, self.model.nh_mem, device=device)
+            rnn1_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev_mem, self.model.nh_mem, device=device)
             if self.cfg.use_surface_memory:
                 sfc_mem = torch.zeros(self.batch_size, self.model.ny_sfc, device=device)
             loss_update_start_index = 60
         else:
             loss_update_start_index = 0
             
-        if self.cfg.use_ar_noise:
-            with torch.autocast(device_type=device.type, dtype=self.dtype):
-                # eps_prev = torch.rand(1, device=device)
-                # eps_prev = torch.rand(self.model.nlev, self.batch_size*self.cfg.ensemble_size, self.cfg.nneur[0], device=device)
-                eps_prev = torch.rand(self.model.nlev, self.batch_size*self.cfg.ensemble_size, self.cfg.nneur[0], device=device)
-                eps_prev.requires_grad = False 
+        # torch.autograd.set_detect_anomaly(True)
             
+        # Option ar_noise_mode for training stochastic RNNs
+        # 0 : Fully uncorrelated noise. The sampled noise (eps) used in the stochastic RNN has no temporal correlation, is
+        # redrawn at every vertical level and for each RNN. Therefore no need to keep track of it outside the model
+        # 1: Eps has temporal correlation (correlation time scale set by tau_t), 
+        # but no vertical correlation (eps has a vertical dimension) and is not shared by the two RNNs 
+        # 2: Eps has temporal correlation and no vertical correlation, and is shared between the two RNNs
+        # 3: Fully correlated noise: temporal correlation, and eps is shared between the two RNN models and at all vertical levels
+        if self.cfg.ar_noise_mode>0:
+            use_ar_noise = True
+            if self.cfg.ar_noise_mode==1:
+                eps_prev = torch.rand(self.model.nlev, self.batch_size*self.cfg.ensemble_size, self.cfg.nneur[0], device=device)
+                eps_prev2 = torch.rand(self.model.nlev, self.batch_size*self.cfg.ensemble_size, self.cfg.nneur[1], device=device)
+                eps_prev = torch.stack((eps_prev,eps_prev2))
+            elif self.cfg.ar_noise_mode==2:
+                eps_prev = torch.rand(self.model.nlev, self.batch_size*self.cfg.ensemble_size, self.cfg.nneur[0], device=device)
+            elif self.cfg.ar_noise_mode==3:
+                eps_prev = torch.rand(self.batch_size*self.cfg.ensemble_size, self.cfg.nneur[0], device=device)
+            eps_prev.requires_grad = False 
+        else:
+            use_ar_noise = False 
         for i,data in enumerate(self.loader):
             # print("shape mem 2 {}".format(model.rnn1_mem.shape))
             x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk  = data 
@@ -226,23 +241,29 @@ class train_or_eval_one_epoch:
                 tcomp0= time.time()               
                 
                 with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
+                    inp_list = [x_lay0, x_sfc0]
                     if self.cfg.autoregressive:
-                        if self.cfg.use_ar_noise:
-                            inp_list = [x_lay0, x_sfc0, rnn1_mem, eps_prev]
-                            outs = self.model(inp_list)
+                        inp_list.append(rnn1_mem)
+                    if use_ar_noise:
+                        inp_list.append(eps_prev)
+                    if self.cfg.model_type=="physrad":
+                        inp_list.append(x_lay_raw0)
+                        
+                    outs = self.model(inp_list)
+                        
+                    if self.cfg.autoregressive:
+                        if use_ar_noise:
                             if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb":
                                 preds_lay0, preds_sfc0, rnn1_mem, eps_prev, dummy = outs
                             else:
                                 preds_lay0, preds_sfc0, rnn1_mem, eps_prev = outs
                         else:
-                            inp_list = [x_lay0, x_sfc0, rnn1_mem]
-                            outs = self.model(inp_list)
                             if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb":
                                 preds_lay0, preds_sfc0, rnn1_mem, dummy = outs
                             else:
                                 preds_lay0, preds_sfc0, rnn1_mem = outs
                     else:
-                        preds_lay0, preds_sfc0 = self.model(x_lay0, x_sfc0)
+                        preds_lay0, preds_sfc0 = outs
 
                 if self.cfg.use_surface_memory:
                     sfc_mem = preds_sfc0
@@ -348,8 +369,8 @@ class train_or_eval_one_epoch:
                             huber = huber.detach(); mse = mse.detach(); mae = mae.detach()
                         h_con = h_con.detach() 
                         water_con = water_con.detach()
-                        if self.cfg.lr_scheduler=="OneCycleLR":
-                            lr_scheduler.step()
+                        # if self.cfg.lr_scheduler=="OneCycleLR":
+                        #     lr_scheduler.step()
                           
                     ypo_lay = ypo_lay.detach(); ypo_sfc = ypo_sfc.detach()
                     yto_lay = yto_lay.detach(); yto_sfc = yto_sfc.detach()
@@ -394,10 +415,15 @@ class train_or_eval_one_epoch:
 
                             self.metric_R2.update(ypo_lay.reshape((-1,self.ny_pp)), yto_lay.reshape((-1,self.ny_pp)))
                                    
-                            prec_pred = ypo_sfc.reshape(-1,self.model.ny_sfc)[:,3].cpu().numpy()
-                            prec_true = yto_sfc.reshape(-1,self.model.ny_sfc)[:,3].cpu().numpy()
-                            r2_np = np.corrcoef((prec_pred,prec_true))[0,1]
-                            epoch_R2precc += r2_np
+                            sfc_pred = ypo_sfc.reshape(-1,self.model.ny_sfc).cpu().numpy().transpose()
+                            sfc_true = yto_sfc.reshape(-1,self.model.ny_sfc).cpu().numpy().transpose()
+
+                            epoch_R2netsw += np.corrcoef((sfc_pred[0,:],sfc_true[0,:]))[0,1]
+                            epoch_R2flwds += np.corrcoef((sfc_pred[1,:],sfc_true[1,:]))[0,1]
+
+                            prec_pred = sfc_pred[3,:]
+                            prec_true = sfc_true[3,:]
+                            epoch_R2precc += np.corrcoef((prec_pred,prec_true))[0,1]
                             epoch_prec_std_frac += prec_pred.std()/prec_true.std()
                             # epoch_prec_perc_frac += np.percentile(prec_pred,99.9)/np.percentile(prec_true,99.9)
 
@@ -499,6 +525,8 @@ class train_or_eval_one_epoch:
 
         #self.metrics['R2_precc'] = self.metric_R2_precc.compute()
         self.metrics['R2_precc'] = epoch_R2precc / k
+        self.metrics['R2_FLWDS'] = epoch_R2flwds / k
+        self.metrics['R2_NETSW'] = epoch_R2netsw / k
         self.metrics['prec_std_frac'] = epoch_prec_std_frac / k 
         self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
         self.metrics['mae_cli'] = np.nanmean(epoch_mae_lev_cli / k)
@@ -523,7 +551,9 @@ class train_or_eval_one_epoch:
         
         del loss, h_con, water_con
         if self.cfg.autoregressive:
-            del rnn1_mem, del sfc_mem
+            del rnn1_mem
+        if self.cfg.use_surface_memory:
+            del sfc_mem
         if device.type=="cuda": 
             torch.cuda.empty_cache()
         gc.collect()
