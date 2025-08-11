@@ -442,6 +442,7 @@ def main(cfg: DictConfig):
                     nh_mem = cfg.nh_mem,
                     diagnose_precip = diagnose_precip)#,
     elif cfg.model_type=="physrad":
+        from models_rad import LSTM_autoreg_torchscript_physrad
         model = LSTM_autoreg_torchscript_physrad(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
                     out_sfc_scale = yscale_sca, 
@@ -623,7 +624,7 @@ def main(cfg: DictConfig):
         else:
             loss_fn = metrics.get_CRPS(cfg.beta)
     else:
-        raise NotImplementedError()
+        raise NotImplementedError("loss_fn {} not implemented".format(cfg.loss_fn_type))
         
     if cfg.optimizer == "adam":
         optimizer = torch.optim.Adam(model.parameters(), lr = cfg.lr)
@@ -636,7 +637,7 @@ def main(cfg: DictConfig):
         from soap import SOAP
         optimizer = SOAP(model.parameters(), lr = cfg.lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
     else:
-        raise NotImplementedError()
+        raise NotImplementedError("optimizer {} not implemented".format(cfg.optimizer))
 
 
     timewindow_default = 1

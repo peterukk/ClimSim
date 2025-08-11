@@ -10,7 +10,7 @@ import sys
 import torch
 import torch.nn as nn
 import torch.nn.parameter as Parameter
-# from layers_callbacks_torch import LayerPressure 
+from layers import LayerPressure, LayerPressureThickness, LevelPressure
 import torch.nn.functional as F
 from typing import List, Tuple, Final, Optional
 from torch import Tensor
