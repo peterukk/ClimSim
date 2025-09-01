@@ -105,7 +105,112 @@ lbd_qn_mean = np.repeat(np.float32(2268406.8),60)
 # liquid_ratio = (T_denorm - 253.16) / 20.0 
 # liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
         
+def zonal_mean_area_weighted(data, grid_area, lat):
+    # Define latitude bins ranging from -90 to 90, each bin spans 10 degrees
+    bins = np.arange(-90, 91, 10)  # Create edges for 10 degree bins
 
+    # Get indices for each lat value indicating which bin it belongs to
+    bin_indices = np.digitize(lat.values, bins) - 1
+
+    # Initialize a list to store the zonal mean for each latitude bin
+    data_zonal_mean = []
+
+    # Iterate through each bin to calculate the weighted average
+    for i in range(len(bins)-1):
+        # Filter data and grid_area for current bin
+        mask = (bin_indices == i)
+        data_filtered = data[mask]
+        grid_area_filtered = grid_area[mask]
+
+        # Check if there's any data in this bin
+        if data_filtered.size > 0:
+            # Compute area-weighted average for the current bin
+            weighted_mean = np.average(data_filtered, axis=0, weights=grid_area_filtered)
+        else:
+            # If no data in bin, append NaN or suitable value
+            weighted_mean = np.nan
+
+        # Append the result to the list
+        data_zonal_mean.append(weighted_mean)
+
+    # Convert list to numpy array
+    data_zonal_mean = np.array(data_zonal_mean)
+
+    # The mid points of the bins are used as the representative latitudes
+    lats_mid = bins[:-1] + 5
+
+    return data_zonal_mean, lats_mid
+
+def plot_bias(vars_stacked, grid_area, lat, level):
+    import xarray as xr
+    
+    # labels=["Heating","U","V","Cloud water", "cloud ice"]
+    # scalings = [1,1,1,1e6,1e6]
+    
+    labels=["Heating","Moistening","V","Cloud water", "cloud ice"]
+    scalings = [1,1000,1,1e6,1e6]
+    
+    # max_diffs = [40,5]
+    
+    latitude_ticks = [-60, -30, 0, 30, 60]
+    latitude_labels = ['60S', '30S', '0', '30N', '60N']
+    
+    fig, axs = plt.subplots(len(vars_stacked), 3, figsize=(14, 12.5)) 
+    
+    for idx in range(len(vars_stacked)):
+        var_t, var_p = vars_stacked[idx]
+        
+        sp_zm, lats_sorted = zonal_mean_area_weighted(var_t, grid_area, lat)
+        nn_zm, lats_sorted = zonal_mean_area_weighted(var_p, grid_area, lat)
+        
+        # data_sp, data_nn = 1e6*sp_zm.T, 1e6*nn_zm.T
+        
+        scaling = scalings[idx]
+        data_sp = scaling * xr.DataArray(sp_zm[:, :].T, dims=["hybrid pressure (hPa)", "latitude"],
+                                         coords={"hybrid pressure (hPa)": level, "latitude": lats_sorted})
+        data_nn = scaling * xr.DataArray(nn_zm[:, :].T, dims=["hybrid pressure (hPa)", "latitude"],
+                                         coords={"hybrid pressure (hPa)": level, "latitude": lats_sorted})
+        data_diff = data_nn - data_sp
+            
+        # Determine color scales
+        vmax = max(abs(data_sp).max(), abs(data_nn).max())
+        vmin = min(abs(data_sp).min(), abs(data_nn).min())
+        # if var_info['diff_scale']:
+        #     vmax_diff = abs(data_diff).max() * diff_scale
+        #     vmin_diff = -vmax_diff
+        # vmax_diff =  max_diffs[idx]
+        # vmin_diff = -vmax_diff
+        vmax_diff = max(abs(data_diff).max(), abs(data_diff).max())
+        vmin_diff = min(abs(data_diff).min(), abs(data_diff).min())
+        # Plot each variable in its row
+        
+        
+        data_sp.plot(ax=axs[idx, 0], add_colorbar=True, cmap='viridis', vmin=vmin, vmax=vmax)
+        # axs[idx, 0].set_title(f'{labels[idx * 3]} {var_title} ({unit}): MMF')
+        axs[idx, 0].set_title("{} , {} ".format(labels[idx],'MMF'))
+        axs[idx, 0].invert_yaxis()
+        
+        data_nn.plot(ax=axs[idx, 1], add_colorbar=True, cmap='viridis', vmin=vmin, vmax=vmax)
+        axs[idx, 1].set_title("{} , {} ".format(labels[idx],'RNN'))
+        axs[idx, 1].invert_yaxis()
+        axs[idx, 1].set_ylabel('')  # Clear the y-label to clean up plot
+        
+        data_diff.plot(ax=axs[idx, 2], add_colorbar=True, cmap='RdBu_r', vmin=vmin_diff, vmax=vmax_diff)
+        axs[idx, 2].set_title("{} , {} ".format(labels[idx],'diff'))
+        axs[idx, 2].invert_yaxis()
+        axs[idx, 2].set_ylabel('')  # Clear the y-label to clean up plot
+        
+        # axs[idx, 0].set_xlabel('')
+        # axs[idx, 1].set_xlabel('')
+        # axs[idx, 2].set_xlabel('')
+    
+    # Set these ticks and labels for each subplot
+    for ax_row in axs:
+        for ax in ax_row:
+            ax.set_xticks(latitude_ticks)  # Set the positions for the ticks
+            ax.set_xticklabels(latitude_labels)  # Set the custom text labels
+    plt.tight_layout()
+    plt.show() 
 
 class train_or_eval_one_epoch:
     def __init__(self, dataloader, 
@@ -142,7 +247,7 @@ class train_or_eval_one_epoch:
         else:
             self.use_ensemble=False
             
-        if self.cfg.mp_mode>0:
+        if abs(self.cfg.mp_mode)>0:
             self.use_mp_constraint=True
         else:
             self.use_mp_constraint=False 
@@ -208,8 +313,9 @@ class train_or_eval_one_epoch:
             use_ar_noise = False 
         for i,data in enumerate(self.loader):
             # print("shape mem 2 {}".format(model.rnn1_mem.shape))
-            x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk  = data 
-            
+            # x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk  = data 
+            x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk, yto_lay_chk, yto_sfc_chk  = data 
+
             # print("shape x lay", x_lay_chk.shape)
 
             # print(" x lay raw 0,50::", x_lay_raw_chk[0,50:,0])
@@ -218,13 +324,17 @@ class train_or_eval_one_epoch:
             x_sfc_chk       = x_sfc_chk.to(device)
             targets_sfc_chk = targets_sfc_chk.to(device)
             targets_lay_chk = targets_lay_chk.to(device)
-            
+            yto_lay_chk     = yto_lay_chk.to(device)
+            yto_sfc_chk     = yto_sfc_chk.to(device)
+
             x_lay_chk       = torch.split(x_lay_chk, self.batch_size)
             x_lay_raw_chk   = torch.split(x_lay_raw_chk, self.batch_size)
             x_sfc_chk       = torch.split(x_sfc_chk, self.batch_size)
             targets_sfc_chk = torch.split(targets_sfc_chk, self.batch_size)
             targets_lay_chk = torch.split(targets_lay_chk, self.batch_size)
-            
+            yto_lay_chk     = torch.split(yto_lay_chk, self.batch_size)
+            yto_sfc_chk     = torch.split(yto_sfc_chk, self.batch_size)
+
             # to speed-up IO, we loaded chk=many batches, which now need to be divided into batches
             # each batch is one time step
             for ichunk in range(len(x_lay_chk)):
@@ -233,6 +343,8 @@ class train_or_eval_one_epoch:
                 x_sfc0 = x_sfc_chk[ichunk]
                 target_lay0 = targets_lay_chk[ichunk]
                 target_sfc0 = targets_sfc_chk[ichunk]
+                yto_lay0 = yto_lay_chk[ichunk]
+                yto_sfc0 = yto_sfc_chk[ichunk]
                 # print("shape xlay 0", x_lay0.shape)
 
                 if self.cfg.use_surface_memory:
@@ -274,6 +386,9 @@ class train_or_eval_one_epoch:
                     targets_lay.append(target_lay0); targets_sfc.append(target_sfc0)
                     x_sfc.append(x_sfc0)
                     x_lay_raw.append(x_lay_raw0)
+                    yto_lay.append(yto_lay0); yto_sfc.append(yto_sfc0)
+
+
                 else:
                     preds_lay = preds_lay0; preds_sfc = preds_sfc0
                     targets_lay = target_lay0; targets_sfc = target_sfc0
@@ -289,7 +404,9 @@ class train_or_eval_one_epoch:
                         targets_sfc = torch.cat(targets_sfc)
                         x_sfc       = torch.cat(x_sfc)
                         x_lay_raw   = torch.cat(x_lay_raw)
-                        
+                        yto_lay     = torch.cat(yto_lay)
+                        yto_sfc     = torch.cat(yto_sfc)
+
                     with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
                         
                         if self.cfg.loss_fn_type == "CRPS":
@@ -313,15 +430,15 @@ class train_or_eval_one_epoch:
                                           
                         if self.use_mp_constraint:
                             ypo_lay, ypo_sfc = self.model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
-                            with torch.no_grad(): 
-                                yto_lay, yto_sfc = self.model.pp_mp(targets_lay, targets_sfc, x_lay_raw )
+                            # with torch.no_grad(): 
+                            #     yto_lay, yto_sfc = self.model.pp_mp(targets_lay, targets_sfc, x_lay_raw )
                             # ypo_lay, ypo_sfc, yto_lay, yto_sfc = model.pp_mp(preds_lay, preds_sfc, targets_lay, targets_sfc, x_lay_raw )
                             # if i>10: print ("yto lay true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
                             # if i>10: print ("yto lay pp-true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
 
                         else:
                             ypo_lay, ypo_sfc = self.model.postprocessing(preds_lay, preds_sfc)
-                            yto_lay, yto_sfc = self.model.postprocessing(targets_lay, targets_sfc)
+                            # yto_lay, yto_sfc = self.model.postprocessing(targets_lay, targets_sfc)
                             
                         with torch.no_grad():
                             x_sfc = x_sfc*self.model.xdiv_sca + self.model.xmean_sca 
@@ -644,11 +761,20 @@ class generator_xy(torch.utils.data.Dataset):
         self.output_prune=output_prune
         self.include_prev_inputs = include_prev_inputs
         self.include_prev_outputs = include_prev_outputs
-        if self.mp_mode>0:
-            self.use_mp_constraint = True 
-        else:
-            self.use_mp_constraint = False    
-        
+        # if self.mp_mode>0:
+        #     self.use_mp_constraint = True 
+        # else:
+        #     self.use_mp_constraint = False    
+        if self.mp_mode==0: # predict qliq, qice
+            self.hu_mp_constraint = False 
+            self.pred_liq_ratio = False
+        elif self.mp_mode>0: # predict qn, DIAGNOSE liquid fraction
+            self.hu_mp_constraint = True 
+            self.pred_liq_ratio = False
+        else: # < 0  predict qn and liquid fraction
+            self.hu_mp_constraint = False       
+            self.pred_liq_ratio = True 
+
         self.v4_to_v5_inputs    = v4_to_v5_inputs
         if input_norm_per_level:
             self.lbd_qc = lbd_qc_lev
@@ -1043,44 +1169,50 @@ class generator_xy(torch.utils.data.Dataset):
         #     print("OO", i, "minmax y ", y_lev_b[:,:,i].min(), y_lev_b[:,:,i].max())
         
         # if not self.reverse_input_norm:    
-        # y_lev_b_denorm = np.copy(y_lev_b)
-        # y_sfc_b_denorm = np.copy(y_sfc_b)
+        y_lev_b_denorm = np.copy(y_lev_b)
+        y_sfc_b_denorm = np.copy(y_sfc_b)
         
         # t0_it = time.time()
 
-        if self.use_mp_constraint:
+        if self.hu_mp_constraint:
             y_lev_b[:,:,2] = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
             y_lev_b = np.delete(y_lev_b, 3, axis=2) 
-        # elif self.pred_liq_ratio:
-        #     # total = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
-        #     # liq_frac = y_lev_b[:,:,2] / total 
-        #     # liq_frac[np.isinf(liq_ratio)] = 0 
-        #     # liq_frac[np.isnan(liq_ratio)] = 0
-        #     # # print("liq ratio", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
+        elif self.pred_liq_ratio:
+            # total = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
+            # liq_frac = y_lev_b[:,:,2] / total 
+            # liq_frac[np.isinf(liq_ratio)] = 0 
+            # liq_frac[np.isnan(liq_ratio)] = 0
+            # # print("liq ratio", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
             
-        #     qliq_before     = x_lev_b_denorm[:,:,2]
-        #     qice_before     = x_lev_b_denorm[:,:,3]   
-        #     qn_before       = qliq_before + qice_before 
+            qliq_before     = x_lev_b_denorm[:,:,2]
+            qice_before     = x_lev_b_denorm[:,:,3]   
+            qn_before       = qliq_before + qice_before 
             
-        #     dqliq = y_lev_b[:,:,2]
-        #     dqice = y_lev_b[:,:,3]  
-        #     dqn =  dqliq + dqice
+            dqliq = y_lev_b[:,:,2]
+            dqice = y_lev_b[:,:,3]  
+            dqn =  dqliq + dqice
             
-        #     qn_new          = qn_before + dqn*1200  
-        #     qliq_new        = qliq_before + dqliq*1200
-        #     # qice_new        = qice_before + dqice*1200
-        #     liq_frac = qliq_new / qn_new
-        #     liq_frac[np.isinf(liq_frac)] = 0 
-        #     liq_frac[np.isnan(liq_frac)] = 0
-        #     liq_frac[liq_frac<0.0] = 0.0
-        #     liq_frac[liq_frac>1.0] = 1.0
+            qn_new          = qn_before + dqn*1200  
+            qliq_new        = qliq_before + dqliq*1200
+            # qice_new        = qice_before + dqice*1200
             
-        #     liq_frac = liq_frac**(1/16)
+            inds = np.nonzero(qn_new)
+            liq_frac = np.zeros_like(qn_new)
+            liq_frac[inds] = qliq_new[inds] / qn_new[inds]
             
-        #     # print("liq frac", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
-        #     # print("len", liq_frac.size, "< -0.1 ", liq_frac[liq_frac<-0.1].size, ">1.1 ", liq_frac[liq_frac>1.1].size)
-        #     y_lev_b[:,:,2] = dqn
-        #     y_lev_b[:,:,3] = liq_frac 
+            # qn_new = np.clip(qn_new, 1.0e-7, 0.5 )
+            # liq_frac = qliq_new / qn_new
+            # liq_frac[np.isinf(liq_frac)] = 0 
+            # liq_frac[np.isnan(liq_frac)] = 0
+            
+            liq_frac[liq_frac<0.0] = 0.0
+            liq_frac[liq_frac>1.0] = 1.0
+            # print(" min max liq frac", liq_frac.min(), liq_frac.max())
+                        
+            # print("liq frac", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
+            # print("len", liq_frac.size, "< -0.1 ", liq_frac[liq_frac<-0.1].size, ">1.1 ", liq_frac[liq_frac>1.1].size)
+            y_lev_b[:,:,2] = dqn
+            y_lev_b[:,:,3] = liq_frac 
 
         # elaps = time.time() - t0_it
         # print("Runtime mp {:.2f}s".format(elaps))
@@ -1115,14 +1247,14 @@ class generator_xy(torch.utils.data.Dataset):
         
         y_lev_b = torch.from_numpy(y_lev_b)
         y_sfc_b = torch.from_numpy(y_sfc_b)
-        # y_lev_b_denorm = torch.from_numpy(y_lev_b_denorm)
-        # y_sfc_b_denorm = torch.from_numpy(y_sfc_b_denorm)
+        y_lev_b_denorm = torch.from_numpy(y_lev_b_denorm)
+        y_sfc_b_denorm = torch.from_numpy(y_sfc_b_denorm)
 
         # print("gen x_lev shape", x_lev_b.shape)
         gc.collect()
 
-        # return x_lev_b, x_sfc_b, y_lev_b, y_sfc_b, x_lev_b_denorm, y_lev_b_denorm, y_sfc_b_denorm
-        return x_lev_b, x_sfc_b, y_lev_b, y_sfc_b, x_lev_b_denorm
+        return x_lev_b, x_sfc_b, y_lev_b, y_sfc_b, x_lev_b_denorm, y_lev_b_denorm, y_sfc_b_denorm
+        # return x_lev_b, x_sfc_b, y_lev_b, y_sfc_b, x_lev_b_denorm
         
         # return x_lev_b, x_sfc_b, y_lev_b, y_sfc_b, y_lev_b_denorm, y_sfc_b_denorm
  

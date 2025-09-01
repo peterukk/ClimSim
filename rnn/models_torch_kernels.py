@@ -783,8 +783,7 @@ class MyStochasticLSTMLayer3(jit.ScriptModule):
     # @jit.script_method
     @torch.compile
     def forward(
-        self, input_seq: Tensor, state: Tuple[Tensor, Tensor], eps_prev: Tensor
-    ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
+        self, input_seq: Tensor, state: Tuple[Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
         nseq, batch_size, nx = input_seq.shape
         epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device, dtype=input_seq.dtype)
         # epss = epss.unbind(0)
@@ -862,8 +861,13 @@ class MyStochasticLSTMLayer3_ar(jit.ScriptModule):
         nseq, batch_size, nx = input_seq.shape
         # epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device, dtype=input_seq.dtype)
         # epss = epss.unbind(0)
+        # if eps_t_seq.dim() == 3:
+        #     eps_t = eps_t_seq.unbind(0)
+        #     eps_has_vertical_dim=True 
+        # else:
+        #     eps_t = eps_t_seq
+        #     eps_has_vertical_dim=False
         if eps_t.dim() == 3:
-            eps_t = eps_t.unbind(0)
             eps_has_vertical_dim=True 
         else:
             eps_has_vertical_dim=False

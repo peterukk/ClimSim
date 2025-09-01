@@ -19,7 +19,6 @@ import numpy as np
 from typing import Final 
 import time 
 
-
 class LayerPressure(nn.Module):
     def __init__(self,hyam, hybm, name='LayerPressure',
                  norm=True,

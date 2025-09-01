@@ -65,14 +65,23 @@ def main(cfg: DictConfig):
     # cfg = OmegaConf.load("conf/autoreg_LSTM.yaml")
     
     # mp_mode = 0   # regular 6 outputs
-    # mp_mode = 1   # 5 outputs, pred qn, liq_ratio diagnosed from temperature (mp_constraint)
-    # mp_mode = 2   # same as mode=1, but predict only total precipitation PRECC,
-                    # and again diagnose snow based on temperature
-                    
-    if cfg.mp_mode>0:
-        use_mp_constraint=True
-    else:
-        use_mp_constraint=False 
+    # mp_mode = 1   # 5 outputs, predict qn, liq_ratio DIAGNOSED from temperature (mp_constraint) (Hu et al.)
+    # mp_mode = -1  # 6 outputs, predict qn + liq_ratio PREDICTED
+    # ignore what's below (confusing), instead new option (physical_precip) for precipitation hack (prev mp_mode=3)
+    if cfg.physical_precip and cfg.mp_mode==0:
+      raise NotImplementedError("Physical_precip=true as it not compatible with mp_mode=0 as it requires qn")
+
+
+    # mp_mode = 2   # same as mode=1 (predict qn), liq_ratio diagnose, attempt to diagnose precipitation from 
+    #  vertically integrated moisture change, diagnose snow based on temperature
+    # mp_mode = 3   # similar to mode=2 but keep track of precipitation that hasn't fallen yet
+
+    # negative value of mp_mode (-3...-1) : same as abs(mp_mode) where we use qn but liq ratio is PREDICTED
+
+    # if abs(cfg.mp_mode)>0:
+    #     use_mp_constraint=True
+    # else:
+    #     use_mp_constraint=False 
         
     
     if cfg.memory=="None":
@@ -178,11 +187,15 @@ def main(cfg: DictConfig):
         vars_2D_inp.insert(2,"state_qn")
         vars_2D_inp.insert(3,"liq_partition")
     
-    if cfg.mp_mode>0:
+    if abs(cfg.mp_mode)>0:
         vars_2D_outp.remove('ptend_q0002')
         vars_2D_outp.remove('ptend_q0003')
         vars_2D_outp.insert(2,"ptend_qn")
-    
+        if not cfg.output_norm_per_level:
+            raise NotImplementedError("output_norm_per_level=false not compatible with mp_mode !=0")
+
+
+
     if cfg.include_prev_outputs:
         if not cfg.output_norm_per_level:
             raise NotImplementedError("Only level-specific norm coefficients saved for previous tendency outputs")
@@ -215,11 +228,21 @@ def main(cfg: DictConfig):
     else:
         ny_pp = ny 
         
-    if cfg.mp_mode==2:
-        diagnose_precip = True
+    if cfg.mp_mode<0:
+        predict_liq_ratio=True
+        print("mp mode was <0, we are PREDICTING liquid fraction")
     else:
-        diagnose_precip = False
+        predict_liq_ratio=False
         
+    # if abs(cfg.mp_mode)==2:
+    #     diagnose_precip = True
+    # else:
+    #     diagnose_precip = False
+        
+    # if abs(cfg.mp_mode)==3:
+    #     diagnose_precip_v2 = True
+    # else:
+    #     diagnose_precip_v2 = False
 
     print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
 
@@ -227,18 +250,26 @@ def main(cfg: DictConfig):
 
     if cfg.output_norm_per_level:
         yscale_lev = output_scale[vars_2D_outp].to_dataarray(dim='features', name='outputs_lev').transpose().values
+
+        if cfg.mp_mode<0:
+            ones = np.ones((nlev),dtype=np.float32).reshape(nlev,1)
+            yscale_lev = np.concatenate((yscale_lev[:,0:3], ones, yscale_lev[:,3:]), axis=1)
+            print("Padded y norm coefficients with ones, new shape: {}".format(yscale_lev.shape))
+
     else:
         yscale_lev = np.repeat(np.array([2.3405453e+04, 2.3265182e+08, 1.4898973e+08, 6.4926711e+04,
                 7.8328773e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
         if cfg.new_nolev_scaling:
-            if use_mp_constraint:
-                
+            # if use_mp_constraint:
+            if cfg.mp_mode==1:
                 yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.58085550e+08, 5.00182069e+04,
                        6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            else:
+            elif cfg.mp_mode==0:
                 yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.91623978e+08, 3.23919949e+08, 
                     5.00182069e+04, 6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-                
+            else:
+                raise NotImplementedError()
+            
     if cfg.input_norm_per_level:
         xmax_lev = input_max[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
         xmin_lev = input_min[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
@@ -367,7 +398,10 @@ def main(cfg: DictConfig):
                         # repeat_mu = cfg.repeat_mu,
                         separate_radiation = cfg.separate_radiation,
                         use_ensemble = use_ensemble,
-                        diagnose_precip = diagnose_precip,
+                        physical_precip = cfg.physical_precip,
+                        # diagnose_precip = diagnose_precip,
+                        # diagnose_precip_v2 = diagnose_precip_v2,
+                        predict_liq_ratio=predict_liq_ratio,
                         use_third_rnn = use_third_rnn,
                         concat = cfg.concat,
                         nh_mem = cfg.nh_mem)#,
@@ -717,15 +751,14 @@ def main(cfg: DictConfig):
                                          cfg, metrics_det, metric_h_con, metric_water_con, batch_size_val, train=False)
     
     inpstr = "v5" if cfg.v4_to_v5_inputs else "v4"
-    outpstr = "v5" if use_mp_constraint else "v4"
-    SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}.pt'.format(cfg.model_type,
+    MODEL_STR =  '{}-{}_lr{}.neur{}-{}_x{}_mp{}_num{}'.format(cfg.model_type,
                                                                      cfg.memory, cfg.lr, 
                                                                      cfg.nneur[0], cfg.nneur[1], 
-                                                                     inpstr, outpstr,
+                                                                     inpstr, cfg.mp_mode,
                                                                      model_num)
 
-
-    save_file_torch = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script.pt"
+    SAVE_PATH       = "saved_models/" + MODEL_STR + ".pt"
+    save_file_torch = "saved_models/" + MODEL_STR + "_script.pt"
     best_val_loss = np.inf
     # best_val_loss = 0.0
     
@@ -857,12 +890,8 @@ def main(cfg: DictConfig):
                 #                                                                 cfg.nneur[0], cfg.nneur[1], 
                 #                                                                 inpstr, outpstr,
                 #                                                                 model_num, epoch, val_loss)
-                SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}.pt'.format(cfg.model_type,
-                                                                                cfg.memory, cfg.lr, 
-                                                                                cfg.nneur[0], cfg.nneur[1], 
-                                                                                inpstr, outpstr, model_num)
-                save_file_torch1 = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script_gpu.pt"
-                save_file_torch2 = "saved_models/" + SAVE_PATH.split("/")[1].split(".pt")[0] + "_script_cpu.pt"
+                save_file_torch1 = "saved_models/" + MODEL_STR + "_script_gpu.pt"
+                save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
                 print("saving model to", SAVE_PATH)
                 # print("New best validation result obtained, saving model to", SAVE_PATH)
                 if cfg.loss_fn_type == "CRPS":
@@ -885,6 +914,7 @@ def main(cfg: DictConfig):
                 if cfg.loss_fn_type == "CRPS":
                     model.use_ensemble=True
                 model = model.to(device)
+                print("model saved!")
 
                 R2 = val_runner.metrics["R2_lev"]
                 labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
@@ -902,9 +932,8 @@ def main(cfg: DictConfig):
                         j = j + 1
                     
                 fig.subplots_adjust(hspace=0)
-                plt.savefig(os.path.join('saved_models/val_eval/', '{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_val_R2.pdf'.format(cfg.model_type,
-                                                                                cfg.memory, cfg.lr, cfg.nneur[0], cfg.nneur[1], 
-                                                                                inpstr, outpstr, model_num)))
+                plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_R2.pdf')
+
                 plt.clf()
                 bias = val_runner.metrics["bias_perlev"]
                 fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
@@ -915,9 +944,7 @@ def main(cfg: DictConfig):
                     axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
 
                 fig.subplots_adjust(hspace=0.6)                                                     
-                plt.savefig(os.path.join('saved_models/val_eval/', '{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_val_bias.pdf'.format(cfg.model_type,
-                                                                                cfg.memory, cfg.lr, cfg.nneur[0], cfg.nneur[1], 
-                                                                                inpstr, outpstr, model_num)))
+                plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_bias.pdf')
 
                 plt.clf()
                 rmse = val_runner.metrics["rmse_perlev"]
@@ -929,9 +956,7 @@ def main(cfg: DictConfig):
                     axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
 
                 fig.subplots_adjust(hspace=0.6)                                                     
-                plt.savefig(os.path.join('saved_models/val_eval/', '{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_val_rmse.pdf'.format(cfg.model_type,
-                                                                                cfg.memory, cfg.lr, cfg.nneur[0], cfg.nneur[1], 
-                                                                                inpstr, outpstr, model_num)))
+                plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_rmse.pdf')
 
 
 
