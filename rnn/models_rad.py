@@ -74,7 +74,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
     # predict_flux: Final[bool]
     use_third_rnn: Final[bool]
     concat: Final[bool]
-
+    mp_constraint: Final[bool]
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
@@ -92,7 +92,8 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
                 # predict_flux=False,
                 # ensemble_size=1,
                 coeff_stochastic = 0.0,
-                nh_mem=16):
+                nh_mem=16,
+                mp_mode=0):
         super(LSTM_autoreg_torchscript_physrad, self).__init__()
         self.ny = ny 
         self.nlev = nlev 
@@ -122,7 +123,12 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         if self.repeat_mu:
             nx = nx + 1
         self.use_ensemble = use_ensemble
-
+        if mp_mode==0:
+          self.mp_constraint=False 
+        elif mp_mode==1:
+          self.mp_constraint=True
+        else:
+          raise NotImplementedError("model requires mp_mode>=0")
         self.nlev = 60
         self.nlev_crm = 50
         self.nlev_mem = self.nlev_crm
@@ -388,6 +394,24 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         specific_humidity = (epsilon * e_actual) / (pressure - e_actual * (1 - epsilon))
         
         return specific_humidity
+
+    @torch.compile
+    def reftrans_lw(self, source_lev, tau_lw):
+        planck_top = source_lev[:,:,0:-1]
+        planck_bot = source_lev[:,:,1:]
+        
+        od_loc = 1.66 * tau_lw
+        trans_lw = torch.exp(-od_loc)
+        # Calculate coefficient for Padé approximant (vectorized)
+        coeff = 0.2 * od_loc
+        # Calculate mean Planck function (vectorized)
+        planck_fl = 0.5 * (planck_top + planck_bot)
+        # Calculate source terms using Padé approximant (vectorized)
+        one_minus_trans = 1.0 - trans_lw
+        one_plus_coeff = 1.0 + coeff
+        source_dn = one_minus_trans * (planck_fl + coeff * planck_bot) / one_plus_coeff
+        source_up = one_minus_trans * (planck_fl + coeff * planck_top) / one_plus_coeff
+        return source_up, source_dn, trans_lw
     
     @torch.compile
     def calc_reflectance_transmittance_sw(self, mu0, od, ssa, asymmetry ):
@@ -902,12 +926,18 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         qn_before       = qliq_before + qice_before 
         
         T_new           = T_before  + out_denorm[:,:,0:1]*1200
-        liq_frac_constrained    = self.temperature_scaling(T_new)
 
-        #                            dqn
-        qn_new      = qn_before + out_denorm[:,:,2:3]*1200  
-        qliq_new    = liq_frac_constrained*qn_new
-        qice_new    = (1-liq_frac_constrained)*qn_new
+        if self.mp_constraint:
+          liq_frac_constrained    = self.temperature_scaling(T_new)
+          #                            dqn
+          qn_new      = qn_before + out_denorm[:,:,2:3]*1200  
+          qliq_new    = liq_frac_constrained*qn_new
+          qice_new    = (1-liq_frac_constrained)*qn_new
+        else:
+          qliq_new    = qliq_before + out_denorm[:,:,2:3]*1200 
+          qice_new    = qice_before + out_denorm[:,:,3:4]*1200 
+
+
         dq          = out_denorm[:,:,1:2]
         q_new       = q_before + dq*1200 
         q_new       = torch.clamp(q_new, min=0.0)
@@ -935,7 +965,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         
         # T_new = (T_new - self.xmean_lev[:,0:1] ) / (self.xdiv_lev[:,0:1])
         temp = (T_new - 160 ) / (180)
-        pressure = (torch.log(pres) - 0.00515) / (11.59485)
+        pressure = (torch.log(play) - 0.00515) / (11.59485)
         vmr_h2o = (torch.sqrt(torch.sqrt(vmr_h2o))  - 0.0101) / 0.497653
         # print("q new  min max", torch.min(q_new[:,:]).item(), torch.max(q_new[:,:]).item())
         # print("q nans", torch.nonzero(torch.isnan(q_new.view(-1))))
@@ -996,22 +1026,23 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         del pfrac, optprops_lw
         
         # ---- REFTRANS LW ----
-        # planck_top = source_lev[0:-1,:]
-        # planck_bot = source_lev[1:,:]
-        planck_top = source_lev[:,:,0:-1]
-        planck_bot = source_lev[:,:,1:]
+        # planck_top = source_lev[:,:,0:-1]
+        # planck_bot = source_lev[:,:,1:]
         
-        od_loc = 1.66 * tau_lw
-        trans_lw = torch.exp(-od_loc)
-        # Calculate coefficient for Padé approximant (vectorized)
-        coeff = 0.2 * od_loc
-        # Calculate mean Planck function (vectorized)
-        planck_fl = 0.5 * (planck_top + planck_bot)
-        # Calculate source terms using Padé approximant (vectorized)
-        one_minus_trans = 1.0 - trans_lw
-        one_plus_coeff = 1.0 + coeff
-        source_dn = one_minus_trans * (planck_fl + coeff * planck_bot) / one_plus_coeff
-        source_up = one_minus_trans * (planck_fl + coeff * planck_top) / one_plus_coeff
+        # od_loc = 1.66 * tau_lw
+        # trans_lw = torch.exp(-od_loc)
+        # # Calculate coefficient for Padé approximant (vectorized)
+        # coeff = 0.2 * od_loc
+        # # Calculate mean Planck function (vectorized)
+        # planck_fl = 0.5 * (planck_top + planck_bot)
+        # # Calculate source terms using Padé approximant (vectorized)
+        # one_minus_trans = 1.0 - trans_lw
+        # one_plus_coeff = 1.0 + coeff
+        # source_dn = one_minus_trans * (planck_fl + coeff * planck_bot) / one_plus_coeff
+        # source_up = one_minus_trans * (planck_fl + coeff * planck_top) / one_plus_coeff
+
+        source_up, source_dn, trans_lw = self.reftrans_lw(source_lev, tau_lw)
+
         # print("shape source_up dn trans_lw", source_up.shape, source_dn.shape, trans_lw.shape)
         # source_up       = torch.reshape(source_up, (nlev,-1))
         # source_dn       = torch.reshape(source_dn, (nlev,-1))
@@ -1198,7 +1229,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         flux_diff = flux_net[:,1:] - flux_net[:,0:-1]
 
         pres_diff = plev[:,1:] - plev[:,0:-1]
-        dT_rad = (flux_diff / pres_diff) * 0.009767579681 # * g/cp = 9.80665 / 1004
+        dT_rad = -(flux_diff / pres_diff) * 0.009767579681 # * g/cp = 9.80665 / 1004
         # print("flux_diff  min max", torch.min(flux_diff[:,:]).item(), torch.max(flux_diff[:,:]).item())
         # print("pres_diff  min max", torch.min(pres_diff[:,:]).item(), torch.max(pres_diff[:,:]).item())
         # print("dT_rad  min max", torch.min(dT_rad[:,:]).item(), torch.max(dT_rad[:,:]).item())

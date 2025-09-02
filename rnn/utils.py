@@ -358,7 +358,7 @@ class train_or_eval_one_epoch:
                         inp_list.append(rnn1_mem)
                     if use_ar_noise:
                         inp_list.append(eps_prev)
-                    if self.cfg.model_type=="physrad":
+                    if self.cfg.model_type in ["physrad", "radflux"]:
                         inp_list.append(x_lay_raw0)
                         
                     outs = self.model(inp_list)

@@ -12,14 +12,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np 
 from typing import Final 
-from models import  MyRNN, LSTM_autoreg_torchscript
+from models import  MyRNN, LSTM_autoreg_torchscript, stochastic_RNN_autoreg_torchscript
 import h5py
 from utils import apply_input_norm_numba, cloud_exp_norm_numba, apply_output_norm_numba
 import matplotlib.pyplot as plt
 import time 
 
+# import os
+# import sys
+# import inspect
+# currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
+# parentdir = os.path.dirname(currentdir)
+# sys.path.insert(0, parentdir) 
 
-nneur = (128,128)
+# from climsim_utils.data_utils import data_utils
+
+
+nneur = (144,144)
 
 
 fdir = "/media/peter/CrucialBX500/data/ClimSim/ClimSim/rnn/saved_models/"
@@ -40,9 +49,6 @@ memory = "Hidden"
 # nneur = (160,160)
 
 
-
-
-
 nx, nx_sfc, ny, ny_sfc = 15, 19, 5, 8
 
 model_type = "LSTM"
@@ -55,7 +61,6 @@ concat = False
 add_refpres = False
 add_pres = True 
 ensemble_size = 1
-add_stochastic_lever = False
 
 sfc_vars_remove = (17, 18, 19, 20, 21)
 
@@ -221,311 +226,510 @@ qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem = True, True
 
 
 model_path_script = "saved_models/LSTM_autoreg_torchscript_perturb-Hidden_lr0.001.neur160-160_xv4_yv5_num89507_script.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, True
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, True
 
 model_path_script = "saved_models/QRNN-Hidden_lr0.001.neur144-144_xv4_yv5_num3999_script.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, False
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
 
 model_path_script = "saved_models/LSTM-Hidden_lr0.001.neur128-128_xv4_yv5_num47738.pt_script.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, False
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
 
 model_path_script = "saved_models/LSTM-Hidden_lr0.001.neur144-144_xv4_yv5_num58348_script_ep2.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, False
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
 
 # model_path_script = "saved_models/LSTM-Hidden_lr0.001.neur144-144_xv4_yv5_num58348_script.pt"
-# qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, False
+# qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
 
 model_path_script = "saved_models/LSTM-Hidden_lr0.001.neur128-128_xv4_yv5_num65791_ep11_val0.9199_script.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, False
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
 
 model_path_script = "saved_models/LSTM_autoreg_torchscript_perturb-Hidden_lr0.001.neur128-128_xv4_yv5_num62843_script_ep1.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, True
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, True
 return_det = False
 
 # model_path_script = "saved_models/LSTM_autoreg_torchscript_perturb-Hidden_lr0.001.neur160-160_xv4_yv5_num44960_script.pt"
 # qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem = True, True, False, True, 16, 60
-# is_stochastic = True
+# perturb = True
 
 model_path_script = "saved_models/LSTM_autoreg_torchscript_perturb-Hidden_lr0.001.neur128-128_xv4_yv5_num47987_ep0_script.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, True
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, True
 return_det = False
 
 model_path_script = "saved_models/LSTM-Hidden_lr0.0015.neur160-160_xv4_yv5_num96562_script.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, False
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
 return_det = False
 
 model_path_script = "saved_models/LSTM_autoreg_torchscript_perturb-Hidden_lr0.0004.neur160-160_xv4_yv5_num50210_ep0_script.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, True
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, True
 return_det = False
+
+rh_prune = True
 
 
 model_path_script = "saved_models/LSTM_autoreg_torchscript_perturb-Hidden_lr0.0004.neur160-160_xv4_yv5_num665_ep1_script.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, True
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, True
 return_det = False
 
 model_path_script = "saved_models/LSTM-Hidden_lr0.001.neur192-192_xv4_yv5_num96160_script.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, False
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
 
 model_path_script = "saved_models/LSTM_sepmp-Hidden_lr0.001.neur160-160_xv4_yv5_num2134_script.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, False
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
 
 model_path_script = "saved_models/LSTM-Hidden_lr0.001.neur144-144_xv4_yv5_num34897_script.pt"
-qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, is_stochastic = True, True, False, True, 16, 60, False
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
 
+model_path_script = "saved_models/LSTM-Hidden_lr0.0005.neur144-144_xv4_yv5_num86705_script_ep8.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/LSTM-Hidden_lr0.0004.neur144-144_xv4_yv5_num43301_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/LSTM-Hidden_lr0.0005.neur144-144_xv4_yv5_num16992_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/LSTM-Hidden_lr0.0005.neur144-144_xv4_yv5_num99576_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/SRNN-Hidden_lr0.001.neur144-144_xv4_yv5_num79482_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/LSTM-Hidden_lr0.0007.neur144-144_xv4_yv5_num8415_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/LSTM-Hidden_lr0.0005.neur144-144_xv4_yv5_num92002_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/LSTM-Hidden_lr0.0005.neur144-144_xv4_yv5_num10438_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
+
+# model_path_script = "saved_models/partiallystochasticRNN-Hidden_lr0.0005.neur144-144_xv4_yv5_num63117_script.pt"
+# qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
+
+# model_path_script = "saved_models/partiallystochasticRNN-Hidden_lr0.0005.neur144-144_xv4_yv5_num55290_ep18_script.pt"
+# qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/LSTM-Hidden_lr0.0005.neur160-160_xv4_yv5_num7285_ep1_val0.4092_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/LSTM_autoreg_torchscript_perturb-Hidden_lr0.0005.neur144-144_xv4_yv5_num64972_ep4_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, True
+
+model_path_script = "saved_models/LSTM_autoreg_torchscript_perturb-Hidden_lr0.0005.neur144-144_xv4_yv5_num78097_ep0_script.pt"
+qinput_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, False, True, 16, 60, True
+
+model_path_script = "saved_models/partiallystochasticRNN-Hidden_lr0.0005.neur144-144_xv4_yv5_num91428_ep5_val0.4202_script.pt"
+qinput_prune, rh_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, True, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/partiallystochasticRNN-Hidden_lr0.0005.neur160-160_xv4_yv5_num55050_ep1_val0.4315_script.pt"
+qinput_prune, rh_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, False, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/LSTM_sepmp-Hidden_lr0.0005.neur144-144_xv4_yv5_num58938_ep1_val0.4534_script.pt"
+qinput_prune, rh_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, False, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/SRNN-Hidden_lr0.00177.neur160-160_xv4_yv5_num35046_ep11_val0.4558_script.pt"
+qinput_prune, rh_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, False, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/SRNN-Hidden_lr0.0005.neur144-144_xv4_yv5_num10216_ep9_val1.0315_script.pt"
+qinput_prune, rh_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, False, True, False, True, 16, 60, False
+
+model_path_script = "saved_models/SRNN-Hidden_lr0.0005.neur144-144_xv4_yv5_num10216_ep9_val1.0315_script.pt"
+qinput_prune, rh_prune, snowhice_fix, v5_input, mp_constraint, nmem, nlev_mem, perturb = True, False, True, False, True, 16, 60, False
+
+
+
+# model = stochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
+#             out_scale = yscale_lev,
+#             out_sfc_scale = yscale_sca, 
+#             xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+#             xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+#             device="cpu",
+#             nx = nx, nx_sfc=nx_sfc, 
+#             ny = ny, ny_sfc=ny_sfc, 
+#             nneur=nneur, 
+#             use_initial_mlp = use_initial_mlp,
+#             use_intermediate_mlp = use_intermediate_mlp,
+#             add_pres = add_pres,
+#             output_prune = True,
+#             use_memory = autoregressive,
+#             use_ensemble = True,
+#             nh_mem = 16)#,
+
+# SRNN-Hidden_lr0.0005.neur144-144_xv4_yv5_num30746_ep9_val0.4097
 
 existing_wrapper=True
 
 # if existing_wrapper:
 model = torch.jit.load(model_path_script)
-# else:
-#     model_path = "saved_models/LSTM-Hidden_lr0.001.neur128-128_xv4_yv5_num16135.pt"
-#     qinput_prune, snowhice_fix, v5_input, mp_constraint = True, True, False, True
 
-#     model = LSTM_autoreg_torchscript(hyam,hybm,hyai,hybi,
-#                 out_scale = yscale_lev,
-#                 out_sfc_scale = yscale_sca, 
-#                 xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-#                 xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-#                 device=device,
-#                 nx = nx, nx_sfc=nx_sfc, 
-#                 ny = ny, ny_sfc=ny_sfc, 
-#                 nneur=nneur, 
-#                 use_initial_mlp = use_initial_mlp,
-#                 use_intermediate_mlp = use_intermediate_mlp,
-#                 add_pres = add_pres,
-#                 add_stochastic_layer = add_stochastic_layer, 
-#                 output_prune = output_prune,
-#                 use_memory = autoregressive,
-#                 separate_radiation = separate_radiation,
-#                 use_ensemble = use_ensemble,
-#                 use_third_rnn = use_third_rnn,
-#                 nh_mem = nh_mem)#,
-
-
-
-class NewModel_constraint(nn.Module):
-    qinput_prune: Final[bool]
-    snowhice_fix: Final[bool]
-    v5_input: Final[bool]
-    mp_constraint: Final[bool]
-    is_stochastic: Final[bool]
-    return_det: Final[bool]
+try:
+  use_ar_noise = model.use_ar_noise
+  print("Use ar noise: {}".format(use_ar_noise))
+except:
+  print("Not defined, setting use_ar_noise to false") 
+  use_ar_noise = False 
+  
+if not use_ar_noise:
+    class NewModel_constraint(nn.Module):
+        qinput_prune: Final[bool]
+        rh_prune: Final[bool]
+        snowhice_fix: Final[bool]
+        v5_input: Final[bool]
+        mp_constraint: Final[bool]
+        perturb: Final[bool]
+        return_det: Final[bool]
+        
+        def __init__(self, original_model, 
+                     lbd_qc, lbd_qi, lbd_qn,
+                     qinput_prune, rh_prune,
+                     snowhice_fix, v5_input, mp_constraint, 
+                     perturb, return_det):
+            
+            super(NewModel_constraint, self).__init__()
+            self.original_model = original_model
+            self.lbd_qc     = torch.tensor(lbd_qc, dtype=torch.float32)
+            self.lbd_qi     = torch.tensor(lbd_qi, dtype=torch.float32)
+            self.lbd_qn     = torch.tensor(lbd_qn, dtype=torch.float32)
     
-    def __init__(self, original_model, 
-                 lbd_qc, lbd_qi, lbd_qn,
-                 qinput_prune, snowhice_fix, v5_input, mp_constraint, 
-                 is_stochastic, return_det):
-        
-        super(NewModel_constraint, self).__init__()
-        self.original_model = original_model
-        self.lbd_qc     = torch.tensor(lbd_qc, dtype=torch.float32)
-        self.lbd_qi     = torch.tensor(lbd_qi, dtype=torch.float32)
-        self.lbd_qn     = torch.tensor(lbd_qn, dtype=torch.float32)
-
-        self.hardtanh = nn.Hardtanh(0.0, 1.0)
-        self.qinput_prune = qinput_prune
-        self.snowhice_fix = snowhice_fix
-        self.v5_input = v5_input
-        self.mp_constraint = mp_constraint  
-        self.is_stochastic = is_stochastic
-        self.return_det = return_det
-        self.nmem = nmem
-        
-        self.xmean_lev      = self.original_model.xmean_lev.to("cpu")
-        self.xdiv_lev       = self.original_model.xdiv_lev.to("cpu")
-        self.xmean_sca      = self.original_model.xmean_sca.to("cpu")
-        self.xdiv_sca       = self.original_model.xdiv_sca.to("cpu")
-        self.yscale_lev     = self.original_model.yscale_lev.to("cpu")
-        self.yscale_sca     = self.original_model.yscale_sca.to("cpu")
-
-    def preprocessing(self, x_main0, x_sfc0):
-        # v4 input array
-        x_main = x_main0.clone()
-        x_sfc = x_sfc0.clone()
-        
-        # for i in range(x_main.shape[-1]):
-        #     print("i", i, "min max", np.min(x_main[:,:,i]), np.max(x_main[:,:,i]))
-        # for i in range(x_sfc.shape[-1]):
-        #     print("i", i, "min max sfc", np.min(x_sfc[:,i]), np.max(x_sfc[:,i]))
-        if self.snowhice_fix:
-            x_sfc = torch.where(torch.ge(x_sfc,1e10), torch.tensor(-1.0), x_sfc)
+            self.hardtanh = nn.Hardtanh(0.0, 1.0)
+            self.qinput_prune = qinput_prune
+            self.rh_prune = rh_prune
+            self.snowhice_fix = snowhice_fix
+            self.v5_input = v5_input
+            self.mp_constraint = mp_constraint  
+            self.perturb = perturb
+            self.return_det = return_det
+            self.nmem = nmem
             
-        if self.v5_input:
-            # v5 inputs
-            qn   = x_main[:,:,2]  + x_main[:,:,3]
-            if self.qinput_prune:
-                qn[:,0:15] = 0.0
-            qn = 1 - torch.exp(-qn * self.lbd_qn)
-            x_main[:,:,2] = qn
-            liq_frac_constrained  = self.temperature_scaling(x_main[:,:,0])
-            x_main[:,:,3] = liq_frac_constrained
-
-            #                            mean     max - min
-            # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
-            # x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
-            x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
-            x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
-            
-            # if self.qinput_prune:
-            #     x_main[:,0:15,2] = 0.0
+            self.xmean_lev      = self.original_model.xmean_lev.to("cpu")
+            self.xdiv_lev       = self.original_model.xdiv_lev.to("cpu")
+            self.xmean_sca      = self.original_model.xmean_sca.to("cpu")
+            self.xdiv_sca       = self.original_model.xdiv_sca.to("cpu")
+            self.yscale_lev     = self.original_model.yscale_lev.to("cpu")
+            self.yscale_sca     = self.original_model.yscale_sca.to("cpu")
+    
+        def preprocessing(self, x_main0, x_sfc0):
+            # v4 input array
+            x_main = x_main0.clone()
+            x_sfc = x_sfc0.clone()
+    
+            if self.snowhice_fix:
+                x_sfc = torch.where(torch.ge(x_sfc,1e10), torch.tensor(-1.0), x_sfc)
                 
-        else:
-            # v4 inputs
-            x_main[:,:,2] = 1 - torch.exp(-x_main[:,:,2] * self.lbd_qc)
-            x_main[:,:,3] = 1 - torch.exp(-x_main[:,:,3] * self.lbd_qi)   
-            
-            #                            mean     max - min
-            # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
-            # x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
-            x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
-            x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
-            
-            if self.qinput_prune:
-                x_main[:,0:15,2:3] = 0.0
-        # clip RH 
-        x_main[:,:,1] = torch.clamp(x_main[:,:,1], 0, 1.2)
-
-        x_main = torch.where(torch.isnan(x_main), torch.tensor(0.0, device=x_main.device), x_main)
-        x_main = torch.where(torch.isinf(x_main), torch.tensor(0.0, device=x_main.device), x_main)
-        return x_main, x_sfc 
+            if self.v5_input:
+                # v5 inputs
+                qn   = x_main[:,:,2]  + x_main[:,:,3]
+                if self.qinput_prune:
+                    qn[:,0:15] = 0.0
+                qn = 1 - torch.exp(-qn * self.lbd_qn)
+                x_main[:,:,2] = qn
+                liq_frac_constrained  = self.temperature_scaling(x_main[:,:,0])
+                x_main[:,:,3] = liq_frac_constrained
     
-    # def postprocessing(self, out_lev, out_sfc):
-    #     out_lev[:,0:12,1:] = 0
-    #     out_lev      = out_lev / self.yscale_lev
-    #     out_sfc     = out_sfc / self.yscale_sca
-
-    #     return out_lev, out_sfc
+                #                            mean     max - min
+                # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+                # x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+                x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+                x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+                
+                # if self.qinput_prune:
+                #     x_main[:,0:15,2] = 0.0
+                    
+            else:
+                # v4 inputs
+                x_main[:,:,2] = 1 - torch.exp(-x_main[:,:,2] * self.lbd_qc)
+                x_main[:,:,3] = 1 - torch.exp(-x_main[:,:,3] * self.lbd_qi)   
+                
+                #                            mean     max - min
+                # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+                # x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+                x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+                x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+                
+                if self.qinput_prune:
+                    x_main[:,0:15,2:3] = 0.0
+            # clip RH 
+            if self.rh_prune:
+                x_main[:,:,1] = torch.clamp(x_main[:,:,1], 0, 1.2)
     
-    def temperature_scaling(self, T_raw):
-        # T_denorm = T = T*(self.xmax_lev[:,0] - self.xmin_lev[:,0]) + self.xmean_lev[:,0]
-        # T_denorm = T*(self.xcoeff_lev[2,:,0] - self.xcoeff_lev[1,:,0]) + self.xcoeff_lev[0,:,0]
-        # liquid_ratio = (T_raw - 253.16) / 20.0 
-        liquid_ratio = (T_raw - 253.16) * 0.05 
-        # liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
-        liquid_ratio = self.hardtanh(liquid_ratio)
-
-        return liquid_ratio
+            x_main = torch.where(torch.isnan(x_main), torch.tensor(0.0, device=x_main.device), x_main)
+            x_main = torch.where(torch.isinf(x_main), torch.tensor(0.0, device=x_main.device), x_main)
+            return x_main, x_sfc 
     
-    def mp_postprocessing(self, T_before, qn_before, qliq_before, qice_before, rnn1_mem,
-                          out_lev, out_sfc):
-        T_new           = T_before  + out_lev[:,:,0:1]*1200
-        # print("T_new min", T_new.min(), "max", T_new.max())
         
-        liq_frac_constrained    = self.temperature_scaling(T_new)
-        # liq_frac_constrained    = self.original_model.temperature_scaling(T_new)
-
-        # #                            dqn
-        qn_new      = qn_before + out_lev[:,:,2:3]*1200  
-        qliq_new    = liq_frac_constrained*qn_new
-        qice_new    = (1-liq_frac_constrained)*qn_new
-        dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
-        dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
-        
-        batch_size = out_lev.shape[0] 
-        # (nb, nlev, ny) --> (nb, ny, nlev)
-        out_lev = torch.transpose(out_lev, 1, 2).reshape(batch_size,300)
-        nlev_mem = rnn1_mem.shape[1]
-
-        yout = torch.zeros((batch_size,368+nlev_mem*self.nmem), device=T_before.device)
-        yout[:,0:120] = out_lev[:,0:120]
-        yout[:,120:180] = torch.reshape(dqliq, (batch_size, 60))
-        yout[:,180:240] = torch.reshape(dqice, (batch_size, 60))
-        yout[:,240:360] = out_lev[:,180:360]
-        yout[:,360:368] = out_sfc
-        yout[:,368:] = torch.reshape(rnn1_mem,(-1,rnn1_mem.shape[1]*self.nmem))
-        return yout
+        def temperature_scaling(self, T_raw):
+            # T_denorm = T = T*(self.xmax_lev[:,0] - self.xmin_lev[:,0]) + self.xmean_lev[:,0]
+            # T_denorm = T*(self.xcoeff_lev[2,:,0] - self.xcoeff_lev[1,:,0]) + self.xcoeff_lev[0,:,0]
+            # liquid_ratio = (T_raw - 253.16) / 20.0 
+            liquid_ratio = (T_raw - 253.16) * 0.05 
+            # liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
+            liquid_ratio = self.hardtanh(liquid_ratio)
     
-    def forward(self, x_main, x_sfc, rnn1_mem):
-        # x_denorm = x_main.clone()
+            return liquid_ratio
         
-        T_before        = x_main[:,:,0:1].clone()
-        qliq_before     = x_main[:,:,2:3].clone()
-        qice_before     = x_main[:,:,3:4].clone()
-        qn_before       = qliq_before + qice_before 
-        # print("shape xsfc", x_sfc.shape)
-
-        # print("xmain 0", torch.sum(x_main[200,:,:]))
-
-        x_main, x_sfc = self.preprocessing(x_main, x_sfc)
-
-        if self.is_stochastic:
-            out_lev, out_sfc, rnn1_mem, out_lev_det = self.original_model(x_main, x_sfc, rnn1_mem)
-            out_lev_det      = out_lev_det / self.yscale_lev
-
-        else:
-            out_lev, out_sfc, rnn1_mem = self.original_model(x_main, x_sfc, rnn1_mem)
-
-        out_lev      = out_lev / self.yscale_lev
-        out_sfc      = out_sfc / self.yscale_sca
-        
-        # nlev_mem = rnn1_mem.shape[1]
-        
-        if self.mp_constraint:
-            yout = self.mp_postprocessing(T_before, qn_before, qliq_before, qice_before, 
-                                  rnn1_mem, out_lev, out_sfc)
+        def mp_postprocessing(self, T_before, qn_before, qliq_before, qice_before, rnn1_mem,
+                              out_lev, out_sfc):
+            T_new           = T_before  + out_lev[:,:,0:1]*1200
+            # print("T_new min", T_new.min(), "max", T_new.max())
             
-            if self.is_stochastic and self.return_det:
-                yout_det = self.mp_postprocessing(T_before, qn_before, qliq_before, qice_before, 
-                                      rnn1_mem, out_lev_det, out_sfc)
-            # T_new           = T_before  + out_lev[:,:,0:1]*1200
-            # # print("T_new min", T_new.min(), "max", T_new.max())
-            
-            # liq_frac_constrained    = self.temperature_scaling(T_new)
-            # # liq_frac_constrained    = self.original_model.temperature_scaling(T_new)
+            liq_frac_constrained    = self.temperature_scaling(T_new)
+            # liq_frac_constrained    = self.original_model.temperature_scaling(T_new)
     
-            # # #                            dqn
-            # qn_new      = qn_before + out_lev[:,:,2:3]*1200  
-            # qliq_new    = liq_frac_constrained*qn_new
-            # qice_new    = (1-liq_frac_constrained)*qn_new
-            # dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
-            # dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
+            # #                            dqn
+            qn_new      = qn_before + out_lev[:,:,2:3]*1200  
+            qliq_new    = liq_frac_constrained*qn_new
+            qice_new    = (1-liq_frac_constrained)*qn_new
+            dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
+            dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
             
-            # batch_size = out_lev.shape[0] 
-            # # (nb, nlev, ny) --> (nb, ny, nlev)
-            # out_lev = torch.transpose(out_lev, 1, 2).reshape(batch_size,300)
-    
-            # yout = torch.zeros((batch_size,368+nlev_mem*self.nmem), device=x_main.device)
-            # yout[:,0:120] = out_lev[:,0:120]
-            # yout[:,120:180] = torch.reshape(dqliq, (batch_size, 60))
-            # yout[:,180:240] = torch.reshape(dqice, (batch_size, 60))
-            # yout[:,240:360] = out_lev[:,180:360]
-            # yout[:,360:368] = out_sfc
-            # yout[:,368:] = torch.reshape(rnn1_mem,(-1,rnn1_mem.shape[1]*self.nmem))
-            
-        else:
             batch_size = out_lev.shape[0] 
-            out_lev = torch.transpose(out_lev, 1, 2).reshape(batch_size,360)
-            yout = torch.zeros((batch_size,368+nlev_mem*self.nmem), device=x_main.device)
-            yout[:,0:360] = out_lev
+            # (nb, nlev, ny) --> (nb, ny, nlev)
+            out_lev = torch.transpose(out_lev, 1, 2).reshape(batch_size,300)
+            nlev_mem = rnn1_mem.shape[1]
+    
+            yout = torch.zeros((batch_size,368+nlev_mem*self.nmem), device=T_before.device)
+            yout[:,0:120] = out_lev[:,0:120]
+            yout[:,120:180] = torch.reshape(dqliq, (batch_size, 60))
+            yout[:,180:240] = torch.reshape(dqice, (batch_size, 60))
+            yout[:,240:360] = out_lev[:,180:360]
             yout[:,360:368] = out_sfc
-            yout[:,368:] = torch.reshape(rnn1_mem,(-1,nlev_mem*self.nmem))
-                      
-        yout = torch.where(torch.isnan(yout), torch.tensor(0.0, device=x_main.device), yout)
-        if self.is_stochastic and self.return_det:
-            yout_det = torch.where(torch.isnan(yout_det), torch.tensor(0.0, device=x_main.device), yout_det)
-
-            return yout, yout_det 
-        else:
-            # return yout, rnn1_mem
+            yout[:,368:] = torch.reshape(rnn1_mem,(-1,rnn1_mem.shape[1]*self.nmem))
             return yout
+        
+        def forward(self, x_main, x_sfc, rnn1_mem):
+            # x_denorm = x_main.clone()
+            
+            T_before        = x_main[:,:,0:1].clone()
+            qliq_before     = x_main[:,:,2:3].clone()
+            qice_before     = x_main[:,:,3:4].clone()
+            qn_before       = qliq_before + qice_before 
+            # print("shape xsfc", x_sfc.shape)
+    
+            # print("xmain 0", torch.sum(x_main[200,:,:]))
+    
+            x_main, x_sfc = self.preprocessing(x_main, x_sfc)
+    
+            if self.perturb:
+                out_lev, out_sfc, rnn1_mem, out_lev_det = self.original_model(x_main, x_sfc, rnn1_mem)
+                out_lev_det      = out_lev_det / self.yscale_lev
+    
+            else:
+                out_lev, out_sfc, rnn1_mem = self.original_model(x_main, x_sfc, rnn1_mem)
+    
+            out_lev      = out_lev / self.yscale_lev
+            out_sfc      = out_sfc / self.yscale_sca
+            
+            # nlev_mem = rnn1_mem.shape[1]
+            
+            if self.mp_constraint:
+                yout = self.mp_postprocessing(T_before, qn_before, qliq_before, qice_before, 
+                                      rnn1_mem, out_lev, out_sfc)
+                
+                if self.perturb and self.return_det:
+                    yout_det = self.mp_postprocessing(T_before, qn_before, qliq_before, qice_before, 
+                                          rnn1_mem, out_lev_det, out_sfc)
+            else:
+                batch_size = out_lev.shape[0] 
+                out_lev = torch.transpose(out_lev, 1, 2).reshape(batch_size,360)
+                yout = torch.zeros((batch_size,368+nlev_mem*self.nmem), device=x_main.device)
+                yout[:,0:360] = out_lev
+                yout[:,360:368] = out_sfc
+                yout[:,368:] = torch.reshape(rnn1_mem,(-1,nlev_mem*self.nmem))
+                          
+            yout = torch.where(torch.isnan(yout), torch.tensor(0.0, device=x_main.device), yout)
+            if self.perturb and self.return_det:
+                yout_det = torch.where(torch.isnan(yout_det), torch.tensor(0.0, device=x_main.device), yout_det)
+    
+                return yout, yout_det 
+            else:
+                return yout
+else:
+    class NewModel_constraint(nn.Module):
+        qinput_prune: Final[bool]
+        rh_prune: Final[bool]
+        snowhice_fix: Final[bool]
+        v5_input: Final[bool]
+        mp_constraint: Final[bool]
+        perturb: Final[bool]
+        return_det: Final[bool]
+        
+        def __init__(self, original_model, 
+                     lbd_qc, lbd_qi, lbd_qn,
+                     qinput_prune, rh_prune,
+                     snowhice_fix, v5_input, mp_constraint, 
+                     perturb, return_det):
+            
+            super(NewModel_constraint, self).__init__()
+            self.original_model = original_model
+            self.lbd_qc     = torch.tensor(lbd_qc, dtype=torch.float32)
+            self.lbd_qi     = torch.tensor(lbd_qi, dtype=torch.float32)
+            self.lbd_qn     = torch.tensor(lbd_qn, dtype=torch.float32)
 
-        # directly write output so that columns are fastest varying dim,
-        # features are slow varying
-        # yout = torch.zeros((368+60*16, batch_size))
+            self.hardtanh = nn.Hardtanh(0.0, 1.0)
+            self.qinput_prune = qinput_prune
+            self.rh_prune = rh_prune
+            self.snowhice_fix = snowhice_fix
+            self.v5_input = v5_input
+            self.mp_constraint = mp_constraint  
+            if not self.mp_constraint:
+                raise NotImplementedError()
+            self.perturb = perturb
+            self.return_det = return_det
+            self.nmem = nmem
+            
+            self.xmean_lev      = self.original_model.xmean_lev.to("cpu")
+            self.xdiv_lev       = self.original_model.xdiv_lev.to("cpu")
+            self.xmean_sca      = self.original_model.xmean_sca.to("cpu")
+            self.xdiv_sca       = self.original_model.xdiv_sca.to("cpu")
+            self.yscale_lev     = self.original_model.yscale_lev.to("cpu")
+            self.yscale_sca     = self.original_model.yscale_sca.to("cpu")
 
-        # return yout, rnn1_mem
-        # return yout
+        def preprocessing(self, x_main0, x_sfc0):
+            # v4 input array
+            x_main = x_main0.clone()
+            x_sfc = x_sfc0.clone()
 
+            if self.snowhice_fix:
+                x_sfc = torch.where(torch.ge(x_sfc,1e10), torch.tensor(-1.0), x_sfc)
+                
+            if self.v5_input:
+                # v5 inputs
+                qn   = x_main[:,:,2]  + x_main[:,:,3]
+                if self.qinput_prune:
+                    qn[:,0:15] = 0.0
+                qn = 1 - torch.exp(-qn * self.lbd_qn)
+                x_main[:,:,2] = qn
+                liq_frac_constrained  = self.temperature_scaling(x_main[:,:,0])
+                x_main[:,:,3] = liq_frac_constrained
 
-# new_model = NewModel(model, xmean_lev, xmean_sca, 
-#                     xdiv_lev, xdiv_sca,
-#                     yscale_lev, yscale_sca, 
-#                     lbd_qc, lbd_qi)
+                #                            mean     max - min
+                # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+                # x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+                x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+                x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+                
+                # if self.qinput_prune:
+                #     x_main[:,0:15,2] = 0.0
+                    
+            else:
+                # v4 inputs
+                x_main[:,:,2] = 1 - torch.exp(-x_main[:,:,2] * self.lbd_qc)
+                x_main[:,:,3] = 1 - torch.exp(-x_main[:,:,3] * self.lbd_qi)   
+                
+                #                            mean     max - min
+                # x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+                # x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+                x_main = (x_main - self.xmean_lev)/(self.xdiv_lev)
+                x_sfc =  (x_sfc -  self.xmean_sca)/(self.xdiv_sca)
+                
+                if self.qinput_prune:
+                    x_main[:,0:15,2:3] = 0.0
+            # clip RH 
+            if self.rh_prune:
+                x_main[:,:,1] = torch.clamp(x_main[:,:,1], 0, 1.2)
 
+            x_main = torch.where(torch.isnan(x_main), torch.tensor(0.0, device=x_main.device), x_main)
+            x_main = torch.where(torch.isinf(x_main), torch.tensor(0.0, device=x_main.device), x_main)
+            return x_main, x_sfc 
+
+        
+        def temperature_scaling(self, T_raw):
+            # T_denorm = T = T*(self.xmax_lev[:,0] - self.xmin_lev[:,0]) + self.xmean_lev[:,0]
+            # T_denorm = T*(self.xcoeff_lev[2,:,0] - self.xcoeff_lev[1,:,0]) + self.xcoeff_lev[0,:,0]
+            # liquid_ratio = (T_raw - 253.16) / 20.0 
+            liquid_ratio = (T_raw - 253.16) * 0.05 
+            # liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
+            liquid_ratio = self.hardtanh(liquid_ratio)
+
+            return liquid_ratio
+        
+        def mp_postprocessing(self, T_before, qn_before, qliq_before, qice_before, rnn1_mem,
+                              out_lev, out_sfc, eps_prev):
+            T_new           = T_before  + out_lev[:,:,0:1]*1200
+            # print("T_new min", T_new.min(), "max", T_new.max())
+            
+            liq_frac_constrained    = self.temperature_scaling(T_new)
+            # liq_frac_constrained    = self.original_model.temperature_scaling(T_new)
+
+            # #                            dqn
+            qn_new      = qn_before + out_lev[:,:,2:3]*1200  
+            qliq_new    = liq_frac_constrained*qn_new
+            qice_new    = (1-liq_frac_constrained)*qn_new
+            dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
+            dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
+            
+            batch_size = out_lev.shape[0] 
+            nlev = out_lev.shape[1]
+            # (nb, nlev, ny) --> (nb, ny, nlev)
+            out_lev = torch.transpose(out_lev, 1, 2).reshape(batch_size,300)
+            nlev_mem = rnn1_mem.shape[1]
+            nhidden = eps_prev.shape[-1]
+
+            # eps_prev = torch.rand(self.model.nlev, self.batch_size*self.cfg.ensemble_size, self.cfg.nneur[0], device=device)
+            # (nlev, nb, nh) --> (nb, nlev, nh )
+            eps_prev = torch.transpose(eps_prev, 0, 1)  #  (nb, nlev, nh )
+            
+            yout = torch.zeros((batch_size,368 + nlev_mem*self.nmem + nlev*nhidden), device=T_before.device)
+            yout[:,0:120] = out_lev[:,0:120]
+            yout[:,120:180] = torch.reshape(dqliq, (batch_size, 60))
+            yout[:,180:240] = torch.reshape(dqice, (batch_size, 60))
+            yout[:,240:360] = out_lev[:,180:360]
+            yout[:,360:368] = out_sfc
+            yout[:,368:368+nlev_mem*self.nmem] = torch.reshape(rnn1_mem,(-1,nlev_mem*self.nmem))
+            yout[:,368+nlev_mem*self.nmem:] = torch.reshape(eps_prev, (batch_size, nlev*nhidden))
+            return yout
+        
+        def forward(self, x_main, x_sfc, rnn1_mem, eps_prev):
+            # x_denorm = x_main.clone()
+            
+            T_before        = x_main[:,:,0:1].clone()
+            qliq_before     = x_main[:,:,2:3].clone()
+            qice_before     = x_main[:,:,3:4].clone()
+            qn_before       = qliq_before + qice_before 
+            # print("shape xsfc", x_sfc.shape)
+
+            # print("xmain 0", torch.sum(x_main[200,:,:]))
+
+            x_main, x_sfc = self.preprocessing(x_main, x_sfc)
+            
+            # (nb, nlev, nh ) -->  (nlev, nb, nh) 
+            eps_prev = torch.transpose(eps_prev, 0, 1)
+            
+            inp_list = [x_main, x_sfc, rnn1_mem, eps_prev]
+
+            if self.perturb:
+                out_lev, out_sfc, rnn1_mem, eps_prev, out_lev_det = self.original_model(inp_list)
+                out_lev_det      = out_lev_det / self.yscale_lev
+
+            else:
+                out_lev, out_sfc, rnn1_mem, eps_prev = self.original_model(inp_list)
+
+            out_lev      = out_lev / self.yscale_lev
+            out_sfc      = out_sfc / self.yscale_sca
+            
+            # nlev_mem = rnn1_mem.shape[1]
+            
+            # if self.mp_constraint:
+            yout = self.mp_postprocessing(T_before, qn_before, qliq_before, qice_before, 
+                                  rnn1_mem, out_lev, out_sfc, eps_prev)
+            
+            if self.perturb and self.return_det:
+                yout_det = self.mp_postprocessing(T_before, qn_before, qliq_before, qice_before, 
+                                      rnn1_mem, out_lev_det, out_sfc, eps_prev)
+           
+                          
+            yout = torch.where(torch.isnan(yout), torch.tensor(0.0, device=x_main.device), yout)
+            if self.perturb and self.return_det:
+                yout_det = torch.where(torch.isnan(yout_det), torch.tensor(0.0, device=x_main.device), yout_det)
+
+                return yout, yout_det 
+            else:
+                return yout
 
 new_model = NewModel_constraint(model, lbd_qc, lbd_qi, lbd_qn, 
-                                qinput_prune, snowhice_fix, v5_input, mp_constraint, 
-                                is_stochastic, return_det)
+                                qinput_prune, rh_prune, 
+                                snowhice_fix, v5_input, mp_constraint, 
+                                perturb, return_det)
 
 device = torch.device("cpu")
 new_model = new_model.to(device)
@@ -553,6 +757,7 @@ bsize = 384
 # nb = 2160
 
 nb = 1400
+nb = 60
 
 nlev = 60
 # nlev = 50
@@ -614,6 +819,8 @@ j = 0
 ntime = nb 
 j = 0 
 rnn1_mem = torch.zeros((bsize, nlev_mem, nmem))
+if use_ar_noise:
+    eps = torch.randn((bsize, nlev, model.nh_rnn1))
 
 outs = []
 outs_det = []
@@ -628,18 +835,25 @@ for jj in range(ntime):
     
     with torch.no_grad(): 
         # out_test, rnn1_mem = scripted_model(x0,x1,rnn1_mem)
-        if is_stochastic:
-            out_test, out_det_test = scripted_model(x0,x1,rnn1_mem)
+        if perturb:
+            if use_ar_noise:
+                out_test, out_det_test = scripted_model(x0,x1,rnn1_mem,eps)
+            else:
+                out_test, out_det_test = scripted_model(x0,x1,rnn1_mem)
             outs_det.append(out_det_test[:,0:368])
         else:
-            out_test = scripted_model(x0,x1,rnn1_mem)
+            if use_ar_noise:
+                out_test = scripted_model(x0,x1,rnn1_mem,eps)
+            else:
+                out_test = scripted_model(x0,x1,rnn1_mem)
         outs.append(out_test[:,0:368])
-        rnn1_mem = torch.reshape(out_test[:,368:], (bsize,nlev_mem,nmem))
+        rnn1_mem = torch.reshape(out_test[:,368:368+nlev_mem*nmem], (bsize,nlev_mem,nmem))
+        eps =  torch.reshape(out_test[:,368+nlev_mem*nmem:], (bsize,nlev,model.nh_rnn1))
     j = j + bsize
     
 outs = torch.stack(outs)
 outs_lev = outs[:,:,0:360].reshape(-1,384,6,60).transpose(2,3).detach().numpy()
-if is_stochastic:
+if perturb:
     outs_det = torch.stack(outs_det)
     outs_lev_det = outs_det[:,:,0:360].reshape(-1,384,6,60).transpose(2,3).detach().numpy()
     y_pred_det = outs_lev_det
@@ -665,7 +879,7 @@ gc.collect()
 
 R2 = np.zeros((60,6))
 bias = np.zeros((60,6))
-if is_stochastic:
+if perturb:
     z = outs_lev - outs_lev_det
     z_mean_profile = np.zeros((60,6))
     z_abs_mean_profile = np.zeros((60,6))
@@ -682,7 +896,7 @@ for i in range(6):
         R2[j,i] = np.corrcoef(truth, pred)[0,1]**2
         bias[j,i] = np.nanmean(truth - pred)
         
-        if is_stochastic:
+        if perturb:
             z_mean_profile[j,i] = np.mean(z[:,:,j,i])
             z_abs_mean_profile[j,i] = np.mean(np.abs(z[:,:,j,i]))
 
@@ -835,7 +1049,7 @@ for irow in range(2):
 fig.subplots_adjust(hspace=0)
 
 
-# if is_stochastic:
+# if perturb:
 #     y = np.arange(60)
 #     ncols, nrows = 3,2
 #     fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(5.5, 3.5),
@@ -962,7 +1176,7 @@ R2_dq = np.zeros((384,60))
 R2_clw = np.zeros((384,60))
 R2_cli = np.zeros((384,60))
 #R2_qn = np.zeros((384,60))
-if is_stochastic:
+if perturb:
     z_mean_abs_dt =  np.zeros((384,60)) 
     z_mean_abs_dq =  np.zeros((384,60)) 
     z_mean_abs_clw =  np.zeros((384,60)) 
@@ -991,7 +1205,7 @@ for i in range(384):
         mean_abs_clw[i,j] = np.mean(np.abs(y_true[:,i,j,2]))
         mean_abs_cli[i,j] = np.mean(np.abs(y_true[:,i,j,3])) 
         
-        if is_stochastic:
+        if perturb:
             z_mean_abs_dt[i,j] = np.mean(np.abs(z[:,i,j,0]))
             z_mean_abs_dq[i,j] = np.mean(np.abs(z[:,i,j,1]))
             z_mean_abs_clw[i,j] = np.mean(np.abs(z[:,i,j,2]))
@@ -1003,9 +1217,9 @@ for i in range(384):
             z_mean_fac_cli[i,j] = np.mean(np.abs(z[:,i,j,3])) / np.mean(np.abs(y_pred[:,i,j,3]))
             
 # z = outs_lev - outs_lev_det
-
-z_mean_fac_clw[z_mean_fac_clw>100] = np.nan
-z_mean_fac_cli[z_mean_fac_cli>100] = np.nan
+if perturb:
+    z_mean_fac_clw[z_mean_fac_clw>100] = np.nan
+    z_mean_fac_cli[z_mean_fac_cli>100] = np.nan
 
 vars_stacked2 = [[mae_dt,R2_dt], 
                  [mae_dq,R2_dq], 
@@ -1063,7 +1277,7 @@ plt.show()
 
 fs_label = 15
 
-if is_stochastic:
+if perturb:
     vars_stacked2 = [[mae_dt,R2_dt, z_mean_fac_dt], 
                      [mae_dq,R2_dq, z_mean_fac_dq], 
                     [mae_clw,R2_clw, z_mean_fac_clw], 

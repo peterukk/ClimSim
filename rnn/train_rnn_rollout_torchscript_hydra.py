@@ -71,7 +71,6 @@ def main(cfg: DictConfig):
     if cfg.physical_precip and cfg.mp_mode==0:
       raise NotImplementedError("Physical_precip=true as it not compatible with mp_mode=0 as it requires qn")
 
-
     # mp_mode = 2   # same as mode=1 (predict qn), liq_ratio diagnose, attempt to diagnose precipitation from 
     #  vertically integrated moisture change, diagnose snow based on temperature
     # mp_mode = 3   # similar to mode=2 but keep track of precipitation that hasn't fallen yet
@@ -494,7 +493,8 @@ def main(cfg: DictConfig):
                     use_ensemble = use_ensemble,
                     use_third_rnn = use_third_rnn,
                     concat = cfg.concat,
-                    nh_mem = cfg.nh_mem)#,
+                    nh_mem = cfg.nh_mem,
+                    mp_mode = cfg.mp_mode)
     elif cfg.model_type=="radflux":
         model = LSTM_autoreg_torchscript_radflux(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
@@ -511,7 +511,8 @@ def main(cfg: DictConfig):
                     output_prune = cfg.output_prune,
                     use_memory = cfg.autoregressive,
                     use_ensemble = use_ensemble,
-                    nh_mem = cfg.nh_mem)#,
+                    nh_mem = cfg.nh_mem,
+                    mp_mode = cfg.mp_mode)
     elif cfg.model_type=="LSTM_sepmp":
         model = LSTM_autoreg_torchscript_mp(hyam,hybm,hyai,hybi,
                         out_scale = yscale_lev,
@@ -639,6 +640,8 @@ def main(cfg: DictConfig):
     else:
         nloc_val = val_data.nloc
         batch_size_val = cfg.batch_size_val 
+
+    print("batch_size_tr: {}, batch_size_val: {}".format(batch_size_tr, batch_size_val))
 
     metric_h_con = metrics.get_energy_metric(hyai, hybi)
     metric_water_con = metrics.get_water_conservation(hyai, hybi)

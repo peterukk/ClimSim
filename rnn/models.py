@@ -9,7 +9,7 @@ import sys
 import torch
 import torch.nn as nn
 import torch.nn.parameter as Parameter
-from layers import LayerPressure 
+from layers import LayerPressure, LevelPressure
 import torch.nn.functional as F
 from typing import List, Tuple, Final, Optional
 from torch import Tensor
@@ -1785,6 +1785,7 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
     output_prune: Final[bool]
     use_ensemble: Final[bool]
     use_memory: Final[bool]
+    mp_constraint: Final[bool]
 
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
@@ -1799,7 +1800,8 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
                 use_memory=False,
                 use_ensemble=False,
                 coeff_stochastic = 0.0,
-                nh_mem=16):
+                nh_mem=16,
+                mp_mode=0):
         super(LSTM_autoreg_torchscript_radflux, self).__init__()
         self.ny = ny 
         self.nlev = nlev 
@@ -1812,6 +1814,8 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         if self.add_pres:
             self.preslay = LayerPressure(hyam,hybm)
             nx = nx +1
+        self.preslay_nonorm = LayerPressure(hyam,hybm,name="LayerPressure_nonorm", norm=False)
+        self.preslev = LevelPressure(hyai,hybi)
         self.nx = nx
         self.nh_rnn1 = self.nneur[0]
         self.nx_rnn2 = self.nneur[0]
@@ -1819,6 +1823,13 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
 
         self.use_memory= use_memory
         self.use_ensemble = use_ensemble
+        if mp_mode==0:
+          self.mp_constraint=False 
+        elif mp_mode==1:
+          self.mp_constraint=True
+        else:
+          raise NotImplementedError("model requires mp_mode>=0")
+
         # if self.predict_flux:
         self.preslev = LayerPressure(hyai, hybi, norm=False)
         if self.use_initial_mlp:
@@ -1840,7 +1851,7 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         self.ny_crm = 4
         self.ny_rad = 4
         self.ny_sfc_rad = 4
-        self.ny_sfc = 2
+        self.ny_sfc_crm = 2
             
         # self.ensemble_size = ensemble_size
         self.add_stochastic_layer = add_stochastic_layer
@@ -1861,7 +1872,8 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         self.register_buffer('xmean_sca', xmean_sca)
         self.register_buffer('xdiv_lev', xdiv_lev)
         self.register_buffer('xdiv_sca', xdiv_sca)
-
+        self.lbd_qc     = torch.tensor(lbd_qc, dtype=torch.float32, device=device)
+        self.lbd_qi     = torch.tensor(lbd_qi, dtype=torch.float32, device=device)
         # in ClimSim config of E3SM, the CRM physics first computes 
         # moist physics on 50 levels, and then computes radiation on 60 levels!
         self.use_intermediate_mlp=use_intermediate_mlp
@@ -1921,14 +1933,14 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         else:
             self.mlp_output = nn.Linear(nh_rnn, self.ny)
             
-        self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc)
+        self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc_crm)
             
         # if self.separate_radiation:
             # self.nh_rnn1_rad = self.nh_rnn1 
             # self.nh_rnn2_rad = self.nh_rnn2 
         self.nh_rnn1_rad = 128 
         self.nh_rnn2_rad = 128
-        self.rnn1_rad      = nn.GRU(self.ny_crm+self.nx_rad, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
+        self.rnn1_rad      = nn.GRU(9, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
         self.rnn2_rad      = nn.GRU(self.nh_rnn1_rad, self.nh_rnn2_rad,  batch_first=True) 
         self.mlp_surface_rad = nn.Linear(self.nx_sfc_rad, self.nh_rnn1_rad)
         self.mlp_flux_scale = nn.Linear(self.nx_sfc_rad, 32)
@@ -1937,6 +1949,31 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         self.mlp_surface_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_sfc_rad)
         # self.mlp_toa_rad  = nn.Linear(2, self.nh_rnn2_rad)
         self.mlp_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_rad)
+        
+        
+    def pp_mp(self, out, out_sfc, x_denorm):
+        out_denorm      = out / self.yscale_lev
+        out_sfc_denorm  = out_sfc / self.yscale_sca
+
+        T_before        = x_denorm[:,:,0:1]
+        qliq_before     = x_denorm[:,:,2:3]
+        qice_before     = x_denorm[:,:,3:4]   
+        qn_before       = qliq_before + qice_before 
+
+        # print("shape x denorm", x_denorm.shape, "T", T_before.shape)
+        T_new           = T_before  + out_denorm[:,:,0:1]*1200
+
+        # T_new           = T_before  + out_denorm[:,:,0:1]*1200
+        liq_frac_constrained    = self.temperature_scaling(T_new)
+
+        #                            dqn
+        qn_new      = qn_before + out_denorm[:,:,2:3]*1200  
+        qliq_new    = liq_frac_constrained*qn_new
+        qice_new    = (1-liq_frac_constrained)*qn_new
+        dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
+        dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
+        out_denorm  = torch.cat((out_denorm[:,:,0:2], dqliq, dqice, out_denorm[:,:,3:]),dim=2)
+        return out_denorm, out_sfc_denorm
 
     def temperature_scaling(self, T_raw):
         liquid_ratio = (T_raw - 253.16) * 0.05 
@@ -1947,13 +1984,59 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         out             = out / self.yscale_lev
         out_sfc         = out_sfc / self.yscale_sca
         return out, out_sfc
+
+    def relative_to_specific_humidity(self, rh, temp, pressure):
+        """
+        Convert relative humidity to specific humidity using PyTorch tensors.
         
+        Args:
+            rh (torch.Tensor): Relative humidity as a fraction (0-1)
+            temp (torch.Tensor): Temperature in Kelvin
+            pressure (torch.Tensor): Pressure in Pa (Pascals)
+        
+        Returns:
+            torch.Tensor: Specific humidity (kg water vapor / kg total air)
+        
+        Notes:
+            - Uses Clausius-Clapeyron relation for saturation vapor pressure
+            - Computes temperature-dependent latent heat of vaporization
+            - All calculations performed in Kelvin (no temperature conversion)
+        """
+        
+        # Constants
+        es0 = 611.2  # Reference saturation vapor pressure at T0 (Pa)
+        T0 = 273.15  # Reference temperature (K) - triple point of water
+        Rv = 461.5   # Specific gas constant for water vapor (J/(kg·K))
+        
+        # Gas constant ratio (water vapor / dry air)
+        epsilon = 0.622  # kg/kg
+        
+        # Temperature-dependent latent heat of vaporization (J/kg)
+        # Linear relationship: Lv = Lv0 + a * (T - T0)
+        # where Lv0 = 2.501e6 J/kg at 273.15K, and a ≈ -2370 J/(kg·K)
+        Lv0 = 2.501e6  # Latent heat at reference temperature (J/kg)
+        a = -2370.0    # Temperature coefficient (J/(kg·K))
+        
+        Lv = Lv0 + a * (temp - T0)
+        
+        # Calculate saturation vapor pressure using Clausius-Clapeyron relation
+        # es = es0 * exp((Lv/Rv) * (1/T0 - 1/T))
+        e_sat = es0 * torch.exp((Lv / Rv) * (1/T0 - 1/temp))
+        
+        # Calculate actual vapor pressure
+        e_actual = rh * e_sat
+        
+        # Calculate specific humidity
+        # q = (epsilon * e) / (p - e * (1 - epsilon))
+        specific_humidity = (epsilon * e_actual) / (pressure - e_actual * (1 - epsilon))
+        
+        return specific_humidity
 
     def forward(self, inp_list : List[Tensor]):
         inputs_main     = inp_list[0]
         inputs_aux      = inp_list[1]
         rnn1_mem        = inp_list[2]
-        # x_denorm        = inp_list[3]
+        x_denorm        = inp_list[3]
         
         incflux = inputs_aux[:,1:2] # TOA flux * cos_sza
 
@@ -1976,6 +2059,8 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
             sp = sp*35451.17 + 98623.664
             pres  = self.preslay(sp)
             inputs_main = torch.cat((inputs_main,pres),dim=2)
+            play = self.preslay_nonorm(sp)
+            plev = self.preslev(sp)
             
                     # Do not use inputs -2,-3,-4 (O3, CH4, N2O) or first 10 levels
         inputs_main_crm = torch.cat((inputs_main[:,10:,0:-4], inputs_main[:,10:,-1:]),dim=2)
@@ -2077,22 +2162,75 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
 
         out_sfc = self.mlp_surface_output(final_sfc_inp)
         
+
+        out_new = torch.zeros(batch_size, self.nlev_rad, self.ny, device=inputs_main.device)
+        out_new[:,10:,:] = out
+        out_denorm      = out_new / self.yscale_lev
+        T_before        = x_denorm[:,:,0:1]
+        rh_before       = x_denorm[:,:,1:2]
+        # rh_before =  torch.clamp(rh_before, min=0.1, max=1.4)
+        q_before        = self.relative_to_specific_humidity(rh_before, T_before, play)
+        q_before        = torch.clamp(q_before, min=0.0, max=0.5)
+        qliq_before     = x_denorm[:,:,2:3]
+        qice_before     = x_denorm[:,:,3:4]   
+        qn_before       = qliq_before + qice_before 
+        T_new           = T_before  + out_denorm[:,:,0:1]*1200
+        if self.mp_constraint:
+          liq_frac_constrained    = self.temperature_scaling(T_new)
+          #                            dqn
+          qn_new      = qn_before + out_denorm[:,:,2:3]*1200  
+          qliq_new    = liq_frac_constrained*qn_new
+          qice_new    = (1-liq_frac_constrained)*qn_new
+        else:
+          qliq_new    = qliq_before + out_denorm[:,:,2:3]*1200 
+          qice_new    = qice_before + out_denorm[:,:,3:4]*1200 
+
+        dq          = out_denorm[:,:,1:2]
+        q_new       = q_before + dq*1200 
+        q_new       = torch.clamp(q_new, min=0.0)
+
+
+        vmr_h2o = q_new * 1.608079364 # (28.97 / 18.01528) # mol_weight_air / mol_weight_gas
+        #                             avogad)
+        # T_new = (T_new - self.xmean_lev[:,0:1] ) / (self.xdiv_lev[:,0:1])
+        temp = (T_new - 160 ) / (180)
+        pressure = (torch.log(play) - 0.00515) / (11.59485)
+        vmr_h2o = (torch.sqrt(torch.sqrt(vmr_h2o))  - 0.0101) / 0.497653
+        # print("q new  min max", torch.min(q_new[:,:]).item(), torch.max(q_new[:,:]).item())
+        # print("q nans", torch.nonzero(torch.isnan(q_new.view(-1))))
+        # assert not torch.isnan(q_new).any()
+        # 0. INPUT SCALING - clouds
+        qliq_new = 1 - torch.exp(-qliq_new * self.lbd_qc)
+        qice_new = 1 - torch.exp(-qice_new * self.lbd_qi)
+        
+        # Radiation inputs: pressure, temperature, water vapor, cloud ice and liquid, O3, CH4, N2O,, cld heterogeneity
+        cloudfrac  = torch.zeros(batch_size, self.nlev, 1, device=inputs_main.device)
+        cloudfrac[:,10:] = rnn1_mem[:,:,0:1]
+
+        # inputs_rad =  torch.zeros(batch_size, self.nlev_rad, 9, device=inputs_main.device)
+        # inputs_rad[:,:,0:6] =  torch.cat((pressure, temp, vmr_h2o, qliq_new, qice_new, cloudfrac),dim=2)
+        # inputs_rad[:,:,6:] =  inputs_main[:,:,12:15]
+        inputs_rad = torch.cat((pressure, temp, vmr_h2o, qliq_new, qice_new, cloudfrac, inputs_main[:,:,12:15] ),dim=2)
+        # inputs_rad = torch.cat((pressure, temp, vmr_h2o, qliq_new, qice_new, inputs_main[:,:,12:15], cloudfrac),dim=2)
+        
+
         # RADIATION
         # if self.separate_radiation:
         # out_crm = out.clone()
-        out_new = torch.zeros(batch_size, self.nlev_rad, self.ny, device=inputs_main.device)
-        out_new[:,10:,:] = out
-        # Start at surface again
-        # Do not use inputs 4,5 (winds)
-        inputs_main_rad =  torch.cat((inputs_main[:,:,0:4], inputs_main[:,:,6:]),dim=2)
-        # # add dT, dq, dq_cldliq, dq_cldice from crm 
-        # inputs_main_rad[:,:,0:1] = inputs_main_rad[:,:,0:1] + tend
+        # out_new = torch.zeros(batch_size, self.nlev_rad, self.ny, device=inputs_main.device)
+        # out_new[:,10:,:] = out
+        # # Start at surface again
+        # # Do not use inputs 4,5 (winds)
+        # inputs_main_rad =  torch.cat((inputs_main[:,:,0:4], inputs_main[:,:,6:]),dim=2)
+        # # # add dT, dq, dq_cldliq, dq_cldice from crm 
+        # # inputs_main_rad[:,:,0:1] = inputs_main_rad[:,:,0:1] + tend
         
-        # T_old =   inputs_main * (self.xcoeff_lev[2,:,0:1] - self.xcoeff_lev[1,:,0:1]) + self.xcoeff_lev[0,:,0:1] 
-        # T_new = T_old + dT
-        inputs_rad =  torch.zeros(batch_size, self.nlev_rad, self.ny_crm+self.nx_rad,device=inputs_main.device)
-        inputs_rad[:,10:,0:self.ny_crm] = out[:,:,0:self.ny_crm] #torch.flip(rnn2out, [1])
-        inputs_rad[:,:,self.ny_crm:] = inputs_main_rad
+        # # T_old =   inputs_main * (self.xcoeff_lev[2,:,0:1] - self.xcoeff_lev[1,:,0:1]) + self.xcoeff_lev[0,:,0:1] 
+        # # T_new = T_old + dT
+        # inputs_rad =  torch.zeros(batch_size, self.nlev_rad, self.ny_crm+self.nx_rad,device=inputs_main.device)
+        # inputs_rad[:,10:,0:self.ny_crm] = out[:,:,0:self.ny_crm] #torch.flip(rnn2out, [1])
+        # inputs_rad[:,:,self.ny_crm:] = inputs_main_rad
+
         inputs_rad = torch.flip(inputs_rad, [1])
 
         inputs_sfc_rad = inputs_aux[:,6:11]
@@ -2114,7 +2252,8 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         hidden2 = (torch.unsqueeze(hx2,0))
         rnn_out, last_h = self.rnn2_rad(rnn_out, hidden2)
         out_rad = self.mlp_output_rad(rnn_out) # 4: LW_down, LW_up, SW_down, SW_yp
-        
+        out_rad = self.relu(out_rad)
+
         lw_flux_scale = self.mlp_flux_scale(inputs_sfc_rad)
         lw_flux_scale = self.mlp_flux_scale2(lw_flux_scale)
 
@@ -2135,7 +2274,7 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         
         preslev  = self.preslev(sp)
         pres_diff = preslev[:,1:] - preslev[:,0:-1]
-        dT_rad = (flux_diff / pres_diff) * 0.009767579681 # * g/cp = 9.80665 / 1004
+        dT_rad = -(flux_diff / pres_diff) * 0.009767579681 # * g/cp = 9.80665 / 1004
         # normalize heating rate output
         dT_rad = dT_rad * self.yscale_lev[:,0:1] 
         
@@ -2344,7 +2483,6 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
         dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
         out_denorm  = torch.cat((out_denorm[:,:,0:2], dqliq, dqice, out_denorm[:,:,3:]),dim=2)
-        
         
         return out_denorm, out_sfc_denorm
     
@@ -2640,7 +2778,6 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
         out_denorm  = torch.cat((out_denorm[:,:,0:2], dqliq, dqice, out_denorm[:,:,3:]),dim=2)
         
-        
         return out_denorm, out_sfc_denorm
     
     def forward(self, inputs_main, inputs_aux, rnn1_mem):
@@ -2908,7 +3045,6 @@ class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
         dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
         dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
         out_denorm  = torch.cat((out_denorm[:,:,0:2], dqliq, dqice, out_denorm[:,:,3:]),dim=2)
-        
         
         return out_denorm, out_sfc_denorm
     
