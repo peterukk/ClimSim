@@ -819,7 +819,7 @@ class LSTM_autoreg_torchscript(nn.Module):
           precc = flux_dn_precip[:,-1]
           precc = precc.unsqueeze(1)
           pres_diff = pres_nonorm[:,1:] - pres_nonorm[:,0:-1]
-          dP_adv = (flux_diff / pres_diff) #
+          dP_adv = -(flux_diff / pres_diff) #
           zeroes = torch.zeros(batch_size, 1, device=inputs_main.device)
           dP_adv = torch.cat((zeroes,dP_adv),dim=1)
             
