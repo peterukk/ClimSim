@@ -474,7 +474,9 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         one_minus_kmu0_sqr = (1.0 - k_mu0 * k_mu0)
         one_minus_kmu0_sqr = torch.clamp(one_minus_kmu0_sqr, min=1e-6) 
         # print("one_minus_kmu0_sqr  min max", torch.min(one_minus_kmu0_sqr).item(), torch.max(one_minus_kmu0_sqr).item())
-        reftrans_factor_dir = mu0 * ssa * reftrans_factor / one_minus_kmu0_sqr
+        # reftrans_factor_dir = mu0 * ssa * reftrans_factor / one_minus_kmu0_sqr
+        reftrans_factor_dir =  ssa * reftrans_factor / one_minus_kmu0_sqr
+
         # print("reftrans_factor_dir  min max", torch.min(reftrans_factor_dir).item(), torch.max(reftrans_factor_dir).item())
         # assert not torch.isnan(reftrans_factor_dir).any()
 
@@ -503,8 +505,10 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         ref_diff = torch.clamp(ref_diff, min=0.0, max=1.0)
         trans_diff = torch.clamp(trans_diff, min=0.0, max=1.0)
     
-        ref_dir = torch.clamp(ref_dir, min=zeroes, max=mu0*(1.0 - trans_dir_dir))
-        trans_dir_diff = torch.clamp(trans_dir_diff, min=zeroes, max=mu0*(1.0 - trans_dir_dir - ref_dir))
+        # ref_dir = torch.clamp(ref_dir, min=zeroes, max=mu0*(1.0 - trans_dir_dir))
+        # trans_dir_diff = torch.clamp(trans_dir_diff, min=zeroes, max=mu0*(1.0 - trans_dir_dir - ref_dir))
+        ref_dir = torch.clamp(ref_dir, min=zeroes, max=(1.0 - trans_dir_dir))
+        trans_dir_diff = torch.clamp(trans_dir_diff, min=zeroes, max=(1.0 - trans_dir_dir - ref_dir))
         
         return ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir
     
@@ -547,114 +551,6 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         source_up = one_minus_trans * (planck_fl + coeff * planck_top) / one_plus_coeff
         
         return transmittance, source_up, source_dn
-    
-    # @torch.compile
-    def adding_ica_sw(self, incoming_toa, albedo_surf_diffuse, albedo_surf_direct, cos_sza,
-                reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir):
-        """
-        Adding method for shortwave radiation with Independent Column Approximation (ICA).
-        
-        Args:
-            incoming_toa: Incoming downwelling solar radiation at TOA (tensor of shape [ncol])
-            albedo_surf_diffuse: Surface albedo to diffuse radiation (tensor of shape [ncol])
-            albedo_surf_direct: Surface albedo to direct radiation (tensor of shape [ncol])
-            cos_sza: Cosine of solar zenith angle (tensor of shape [ncol])
-            reflectance: Diffuse reflectance of each layer (tensor of shape [nlev, ncol])
-            transmittance: Diffuse transmittance of each layer (tensor of shape [nlev, ncol])
-            ref_dir: Direct beam reflectance of each layer (tensor of shape [nlev, ncol])
-            trans_dir_diff: Direct beam to diffuse transmittance (tensor of shape [nlev, ncol])
-            trans_dir_dir: Direct transmittance of each layer (tensor of shape [nlev, ncol])
-        
-        Returns:
-            tuple: (flux_up, flux_dn_diffuse, flux_dn_direct) each of shape [nlev+1, ncol]
-        """
-        
-        nlev, ncol = reflectance.shape
-        device = reflectance.device
-        dtype = reflectance.dtype
-        
-        # Initialize output arrays
-        flux_up = torch.zeros(nlev + 1, ncol, dtype=dtype, device=device)
-        flux_dn_diffuse = torch.zeros(nlev + 1, ncol, dtype=dtype, device=device)
-        flux_dn_direct = torch.zeros(nlev + 1, ncol, dtype=dtype, device=device)
-        
-        # Initialize working arrays
-        albedo = torch.zeros(nlev + 1, ncol, dtype=dtype, device=device)
-        source = torch.zeros(nlev + 1, ncol, dtype=dtype, device=device)
-        inv_denominator = torch.zeros(nlev, ncol, dtype=dtype, device=device)
-        
-        # Compute profile of direct (unscattered) solar fluxes at each half-level
-        # by working down through the atmosphere
-        flux_dn_direct[0, :] = incoming_toa
-        for jlev in range(nlev):
-            flux_dn_direct[jlev + 1, :] = flux_dn_direct[jlev, :].clone()  * trans_dir_dir[jlev, :]
-        
-        # Set surface albedo
-        albedo[nlev, :] = albedo_surf_diffuse
-        
-        # At the surface, the direct solar beam is reflected back into the diffuse stream
-        source[nlev, :] = albedo_surf_direct * flux_dn_direct[nlev, :] * cos_sza
-        
-        # Work back up through the atmosphere and compute the albedo of the entire
-        # earth/atmosphere system below that half-level, and also the "source"
-        for jlev in range(nlev - 1, -1, -1):  # nlev down to 1 in Fortran indexing
-            # Lacis and Hansen (1974) Eq 33, Shonk & Hogan (2008) Eq 10:
-            # inv_denominator[jlev, :] = 1.0 / (1.0 - albedo[jlev + 1, :].clone()  * reflectance[jlev, :])
-            
-            albedoplusone = albedo[jlev + 1, :].clone()
-            inv_denominator[jlev, :] = 1.0 / (1.0 - albedoplusone  * reflectance[jlev, :])
-
-            # Shonk & Hogan (2008) Eq 9, Petty (2006) Eq 13.81:
-            # albedo[jlev, :] = (reflectance[jlev, :] + 
-            #                   transmittance[jlev, :] * transmittance[jlev, :] * 
-            #                   albedo[jlev + 1, :] * inv_denominator[jlev, :])
-            
-            inv_denom = inv_denominator[jlev, :].clone()
-            albedo[jlev, :] = (reflectance[jlev, :] + 
-                              torch.square(transmittance[jlev, :])* 
-                              albedoplusone  * inv_denom )
-            
-            # Shonk & Hogan (2008) Eq 11:
-            fluxdndir = flux_dn_direct[jlev, :].clone()
-            source[jlev, :] = (ref_dir[jlev, :] * fluxdndir +
-                              transmittance[jlev, :] * 
-                              (source[jlev + 1, :] + 
-                              albedoplusone * trans_dir_diff[jlev, :] * fluxdndir) *
-                              inv_denom )
-        
-        # At top-of-atmosphere there is no diffuse downwelling radiation
-        flux_dn_diffuse[0, :] = 0.0
-        
-        # At top-of-atmosphere, all upwelling radiation is due to scattering
-        # by the direct beam below that level
-        flux_up[0, :] = source[0, :]
-        
-        # Work back down through the atmosphere computing the fluxes at each half-level
-        for jlev in range(nlev):  # 1 to nlev in Fortran indexing
-            # Shonk & Hogan (2008) Eq 14 (after simplification):
-            # flux_dn_diffuse[jlev + 1, :] = ((transmittance[jlev, :] * flux_dn_diffuse[jlev, :] +
-            #                                 reflectance[jlev, :] * source[jlev + 1, :] +
-            #                                 trans_dir_diff[jlev, :] * flux_dn_direct[jlev, :]) *
-            #                                inv_denominator[jlev, :])
-            fluxdndir = flux_dn_direct[jlev, :].clone()
-            fluxdndiff = flux_dn_diffuse[jlev, :].clone()
-
-            flux_dn_diffuse[jlev + 1, :] = ((transmittance[jlev, :] * fluxdndiff +  
-                                             reflectance[jlev, :] * source[jlev + 1, :]  + 
-                                             trans_dir_diff[jlev, :] * fluxdndir) *
-                                           inv_denominator[jlev, :])      
-      
-            # Shonk & Hogan (2008) Eq 12:
-            flux_up[jlev + 1, :] = (albedo[jlev + 1, :] * flux_dn_diffuse[jlev + 1, :].clone() +
-                                   source[jlev + 1, :])
-            
-            # Apply cosine correction to direct flux
-            flux_dn_direct[jlev, :] = fluxdndir * cos_sza
-        
-        # Final cosine correction for surface direct flux
-        flux_dn_direct[nlev, :] = flux_dn_direct[nlev, :] * cos_sza
-        
-        return flux_up, flux_dn_diffuse, flux_dn_direct
     
     @torch.compile
     def adding_ica_sw_batchfirst(self, incoming_toa, albedo_surf_diffuse, albedo_surf_direct, cos_sza,
@@ -701,7 +597,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
             albedo[:, nlev] = albedo_surf_diffuse
             
             # At the surface, the direct solar beam is reflected back into the diffuse stream
-            source[:, nlev] = albedo_surf_direct * flux_dn_direct[:, nlev] * cos_sza
+            source[:, nlev] = albedo_surf_direct * flux_dn_direct[:, nlev] #* cos_sza
             
             # Work back up through the atmosphere and compute the albedo of the entire
             # earth/atmosphere system below that half-level, and also the "source"
@@ -753,10 +649,10 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
                                        source[:, jlev + 1])
                 
                 # Apply cosine correction to direct flux
-                flux_dn_direct[:, jlev] = fluxdndir * cos_sza
+                # flux_dn_direct[:, jlev] = fluxdndir * cos_sza
             
             # Final cosine correction for surface direct flux
-            flux_dn_direct[:, nlev] = flux_dn_direct[:, nlev] * cos_sza
+            # flux_dn_direct[:, nlev] = flux_dn_direct[:, nlev] * cos_sza
             
             return flux_up, flux_dn_diffuse, flux_dn_direct
    
@@ -1139,6 +1035,8 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         
         incoming_toa    = inputs_aux[:,1:2]
         # print("inc toa 0  min max", torch.min(incoming_toa).item(), torch.max(incoming_toa).item())
+        # incoming_toa    = torch.clone(torch.div(incoming_toa, mu0))
+        # print("inc toa 1  min max", torch.min(incoming_toa).item(), torch.max(incoming_toa).item())
 
         toa_spectral = self.softmax_dim1(torch.square(self.sw_solar_weights))
         # print("toa_spectral  min max", torch.min(toa_spectral).item(), torch.max(toa_spectral).item())
@@ -1224,6 +1122,11 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         # print("flux_lw_up  min max", torch.min(flux_lw_up[:,:]).item(), torch.max(flux_lw_up[:,:]).item())
         # print("flux_lw_net  min max", torch.min(flux_lw_net[:,:]).item(), torch.max(flux_lw_net[:,:]).item())
         # print("flux_sw_net  min max", torch.min(flux_sw_net[:,:]).item(), torch.max(flux_sw_net[:,:]).item())
+        # print("incflux 100", inputs_aux[100,1:2].item())
+        # print("mu0 100", mu0[100].item())
+        # print("flux_sw_dn 100", flux_sw_dn[100,:].detach().cpu().numpy())
+
+        # print("flux_sw 100", flux_sw_net[100,:].detach().cpu().numpy())
 
         flux_net = flux_lw_net + flux_sw_net
         flux_diff = flux_net[:,1:] - flux_net[:,0:-1]

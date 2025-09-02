@@ -1,15 +1,15 @@
-#tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_gzip8_chunk1_subset.h5
+tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_gzip8_chunk1_subset.h5
 #tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_nocompress_chunk3.h5
-tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedyear_nocompress_chunk3.h5
+#tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedyear_nocompress_chunk3.h5
 val_data_fname: data_v4_rnn_nonorm_year8_nocompress_chunk3.h5
 #tr_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
 #val_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
-#tr_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
-#val_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
+tr_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
+val_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
 #tr_data_dir: "/gpfs/projects/ehpc272/low_res_expanded/"
 #val_data_dir: "/gpfs/projects/ehpc272/low_res_expanded/"
-tr_data_dir: "/data/ClimSim/"
-val_data_dir: "/data/ClimSim/"
+#tr_data_dir: "/data/ClimSim/"
+#val_data_dir: "/data/ClimSim/"
 
 
 
@@ -24,7 +24,7 @@ num_workers: 4
 chunksize_train: 24
 chunksize_val: 14
 
-batch_size_tr: 2688
+batch_size_tr: 3840
 batch_size_val: 384
 val_epoch_start: 0
 
@@ -42,11 +42,11 @@ new_nolev_scaling: false
 loss_fn_type: huber
 use_energy_loss: true
 # w_hcon: 1.0e-05
-w_hcon: 3.0e-06
+w_hcon: 6.0e-06
 # input_norm_per_level: false
 # output_norm_per_level: false
 use_water_loss: true
-w_wcon: 3.0e7
+w_wcon: 6.0e7
 use_bias_loss: false
 w_bias: 1.0e5
 output_prune: true
@@ -78,16 +78,16 @@ ensemble_size: 1
 crps_start_epoch: 0 
 beta: 1.0 
 
-lr_scheduler: None
-scheduler_end_epoch: 30
-scheduler_min_lr: 0.0001
-scheduler_max_lr: 0.002
+lr_scheduler: OneCycleLR
+scheduler_end_epoch: 95
+scheduler_min_lr: 0.0000003
+scheduler_max_lr: 0.0015
 scheduler_peak_epoch: 4
-scheduler_annealing: linear
+scheduler_annealing: cos
 lr_gamma: 0.95
 save_model: true
 use_wandb: true
-num_epochs: 30
+num_epochs: 100
 lr: 0.001
 timestepped_optimizer: false
 mp_autocast: true
@@ -97,7 +97,7 @@ timestep_scheduling: true
 optimizer: soap
 #optimizer: adamwschedulefree
 rollout_schedule:
-- 2
+- 1
 - 2
 - 3
 - 3
