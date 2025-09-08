@@ -440,7 +440,11 @@ def main(cfg: DictConfig):
                         use_ensemble = use_ensemble,
                         concat = cfg.concat,
                         nh_mem = cfg.nh_mem)#,
-    elif cfg.model_type=="SRNN":
+    elif cfg.model_type in ["SLSTM", "SGRU"]: #cfg.model_type=="SRNN":
+        if cfg.model_type=="SLSTM":
+            use_lstm=True 
+        else:
+            use_lstm=False 
         model = stochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
                     out_sfc_scale = yscale_sca, 
@@ -450,6 +454,7 @@ def main(cfg: DictConfig):
                     nx = nx, nx_sfc=nx_sfc, 
                     ny = ny, ny_sfc=ny_sfc, 
                     nneur=cfg.nneur, 
+                    use_lstm=use_lstm,
                     use_initial_mlp = cfg.use_initial_mlp,
                     use_intermediate_mlp = cfg.use_intermediate_mlp,
                     add_pres = cfg.add_pres,

@@ -2311,7 +2311,7 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
                 output_prune=False,
                 use_memory=False,
                 use_ensemble=True,
-                use_lstm=False,
+                use_lstm=True,
                 nh_mem=64,
                 ar_noise_mode=0,
                 ar_tau = 0.85,
@@ -2414,7 +2414,8 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
             if self.use_ar_noise:
                 rnn_layer = MyStochasticLSTMLayer3_ar
             else:
-                rnn_layer = MyStochasticLSTMLayer3
+                # rnn_layer = MyStochasticLSTMLayer3
+                rnn_layer = MyStochasticLSTMLayer4
             self.rnn1      = rnn_layer(self.nx_rnn1, self.nh_rnn1, use_bias=use_bias) 
             self.rnn2      = rnn_layer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)
             self.mlp_surface2    = nn.Linear(self.nx_sfc, self.nh_rnn1)
@@ -2529,9 +2530,9 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
             cx = self.nonlin(cx)
             hidden = (hx, cx)
             if self.use_ar_noise:
-                rnn1out = self.rnn1(rnn1_input, hidden, eps_prev)
+                rnn1out, state = self.rnn1(rnn1_input, hidden, eps_prev)
             else:
-                rnn1out = self.rnn1(rnn1_input, hidden)
+                rnn1out, state = self.rnn1(rnn1_input, hidden)
         else:
             hidden = hx
             rnn1out = self.rnn1(rnn1_input, hidden)
@@ -2550,11 +2551,11 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
             cx2 = self.nonlin(cx2)
             hidden = (hx2, cx2)
             if self.use_ar_noise:
-                rnn2out = self.rnn2(rnn1out, hidden, eps_prev2)
+                rnn2out, state = self.rnn2(rnn1out, hidden, eps_prev2)
                 if not self.two_eps_variables:
                     del eps_prev2
             else:
-                rnn2out = self.rnn2(rnn1out, hidden)
+                rnn2out, state = self.rnn2(rnn1out, hidden)
             last_hidden = rnn2out[-1,:]
         else:
             hidden = hx2

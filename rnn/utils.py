@@ -268,6 +268,7 @@ class train_or_eval_one_epoch:
         epoch_bias_lev_tot = 0.0; epoch_bias_perlev= 0.0
         epoch_mae_lev_clw = 0.0; epoch_mae_lev_cli = 0.0
         epoch_rmse_perlev = 0.0; epoch_prec_std_frac = 0.0
+        epoch_dt_std = 0.0
         t_comp =0 
         t0_it = time.time()
         j = 0; k = 0; k2=2    
@@ -415,6 +416,7 @@ class train_or_eval_one_epoch:
                             # print("preds shape", preds_lay)
                             # use only first member from here on 
                             preds_lay = torch.reshape(preds_lay, (timesteps, self.cfg.ensemble_size, self.batch_size,  self.model.nlev,  self.model.ny))
+                            dt_std    = torch.mean(torch.std(preds_lay[:,:,:,:,0], dim=1)).detach()
                             preds_lay = torch.reshape(preds_lay[:,0,:,:], shape=targets_lay.shape)
                             preds_sfc = torch.reshape(preds_sfc, (timesteps, self.cfg.ensemble_size, self.batch_size,  self.model.ny_sfc))
                             preds_sfc = torch.reshape(preds_sfc[:,0,:], shape=targets_sfc.shape)
@@ -507,7 +509,8 @@ class train_or_eval_one_epoch:
                                 epoch_ens_var += ens_var.item()
                                 epoch_det_skill += det_skill.item()
                                 epoch_spreadskill += ens_var.item() / det_skill.item()
-
+                                if self.use_ensemble:
+                                    epoch_dt_std += dt_std.item()
                             biases_lev, biases_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc, numpy=True)
                             epoch_bias_lev += np.mean(biases_lev)
                             epoch_bias_heating += biases_lev[0]
@@ -604,7 +607,8 @@ class train_or_eval_one_epoch:
             self.metrics['ens_var'] =  epoch_ens_var / k
             self.metrics['det_skill'] =  epoch_det_skill / k
             self.metrics['spread_skill_ratio'] =  epoch_spreadskill / k
-
+            if self.use_ensemble:
+                self.metrics['dt_ens_std']  += epoch_dt_std / k
         self.metrics["h_conservation"] =  epoch_hcon / k
         self.metrics["water_conservation"] =  epoch_wcon / k
 
