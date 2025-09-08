@@ -20,6 +20,8 @@ import time
 from metrics import corrcoeff_pairs_batchfirst 
 import matplotlib
 import matplotlib.pyplot as plt
+# from pickle import dump
+
 lbd_qi_lev = np.array([10000000.        , 10000000.        , 10000000.        ,
        10000000.        , 10000000.        , 10000000.        ,
        10000000.        , 10000000.        , 10000000.        ,
@@ -270,7 +272,8 @@ class train_or_eval_one_epoch:
         t0_it = time.time()
         j = 0; k = 0; k2=2    
         device = self.device
-        
+        # torch.cuda.memory._record_memory_history(enabled='all')
+
         if self.cfg.optimizer == "adamwschedulefree":
             if self.train:
                 optim.train()
@@ -283,8 +286,6 @@ class train_or_eval_one_epoch:
             x_sfc = [];  x_lay_raw = []
             yto_lay = []; yto_sfc = []
             rnn1_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev_mem, self.model.nh_mem, device=device)
-            if self.cfg.use_surface_memory:
-                sfc_mem = torch.zeros(self.batch_size, self.model.ny_sfc, device=device)
             loss_update_start_index = 60
         else:
             loss_update_start_index = 0
@@ -313,12 +314,8 @@ class train_or_eval_one_epoch:
             use_ar_noise = False 
         for i,data in enumerate(self.loader):
             # print("shape mem 2 {}".format(model.rnn1_mem.shape))
-            # x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk  = data 
             x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk, yto_lay_chk, yto_sfc_chk  = data 
 
-            # print("shape x lay", x_lay_chk.shape)
-
-            # print(" x lay raw 0,50::", x_lay_raw_chk[0,50:,0])
             x_lay_chk       = x_lay_chk.to(device)
             x_lay_raw_chk   = x_lay_raw_chk.to(device)
             x_sfc_chk       = x_sfc_chk.to(device)
@@ -347,9 +344,6 @@ class train_or_eval_one_epoch:
                 yto_sfc0 = yto_sfc_chk[ichunk]
                 # print("shape xlay 0", x_lay0.shape)
 
-                if self.cfg.use_surface_memory:
-                    x_sfc0 = torch.cat((x_sfc0, sfc_mem),dim=-1)
-
                 tcomp0= time.time()               
                 
                 with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
@@ -376,9 +370,6 @@ class train_or_eval_one_epoch:
                                 preds_lay0, preds_sfc0, rnn1_mem = outs
                     else:
                         preds_lay0, preds_sfc0 = outs
-
-                if self.cfg.use_surface_memory:
-                    sfc_mem = preds_sfc0
 
                 if self.cfg.autoregressive:
                     # In the autoregressive training case are gathering many time steps before computing loss
@@ -441,9 +432,9 @@ class train_or_eval_one_epoch:
                             # yto_lay, yto_sfc = self.model.postprocessing(targets_lay, targets_sfc)
                             
                         with torch.no_grad():
-                            x_sfc = x_sfc*self.model.xdiv_sca + self.model.xmean_sca 
-                            surf_pres_denorm = x_sfc[:,0:1]
-                            lhf = x_sfc[:,2] 
+                            # x_sfc = x_sfc*self.model.xdiv_sca + self.model.xmean_sca 
+                            surf_pres_denorm = x_sfc[:,0:1]*self.model.xdiv_sca[0:1] + self.model.xmean_sca[0:1]
+                            lhf = x_sfc[:,2]*self.model.xdiv_sca[2] + self.model.xmean_sca[2]
 
                         # Energy conservation metric
                         h_con           = self.metric_h_con(yto_lay, ypo_lay, surf_pres_denorm, 1) #timesteps)
@@ -564,9 +555,6 @@ class train_or_eval_one_epoch:
                         x_lay_raw = []; yto_lay = []; yto_sfc = []
                         x_sfc = []
                         rnn1_mem = rnn1_mem.detach()
-                        if self.cfg.use_surface_memory:
-                            sfc_mem = sfc_mem.detach()
-                        # rnn1_mem.requires_grad=True
                         
                 t_comp += time.time() - tcomp0
                 # # print statistics 
@@ -580,7 +568,6 @@ class train_or_eval_one_epoch:
 
                     r2raw = self.metric_R2.compute()
 
-                    #r2_np = np.corrcoef((ypo_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy(),yto_sfc.reshape(-1,ny_sfc)[:,3].detach().cpu().numpy()))[0,1]
                     if self.cfg.loss_fn_type == "CRPS": 
                         running_var = running_var / fac
 
@@ -596,9 +583,19 @@ class train_or_eval_one_epoch:
                     t0_it = time.time()
                     t_comp = 0
                 j += 1
+
+            # if i>0:
+            #     s = torch.cuda.memory._snapshot()
+            #     with open(f"snapshot.pickle", "wb") as f:
+            #         dump(s, f)
+
+            #     # tell CUDA to stop recording memory allocations now
+            #     torch.cuda.memory._record_memory_history(enabled=None)
+            #     print("SNAPSHOT SAVED")
+            #     ff
                 
             del x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk
-                
+
         self.metrics['loss'] =  epoch_loss / k
         self.metrics['mean_squared_error'] = epoch_mse / k
         self.metrics['huber'] = epoch_huber / k
@@ -669,8 +666,8 @@ class train_or_eval_one_epoch:
         del loss, h_con, water_con
         if self.cfg.autoregressive:
             del rnn1_mem
-        if self.cfg.use_surface_memory:
-            del sfc_mem
+        # if self.cfg.use_surface_memory:
+        #     del sfc_mem
         if device.type=="cuda": 
             torch.cuda.empty_cache()
         gc.collect()

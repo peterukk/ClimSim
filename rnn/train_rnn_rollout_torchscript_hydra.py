@@ -61,8 +61,10 @@ def main(cfg: DictConfig):
     print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
     
     # torch.autograd.set_detect_anomaly(True)
-
+    # print("backends:", torch._dynamo.list_backends())
     # cfg = OmegaConf.load("conf/autoreg_LSTM.yaml")
+
+    # torch.cuda.memory._record_memory_history(enabled='all')
     
     # mp_mode = 0   # regular 6 outputs
     # mp_mode = 1   # 5 outputs, predict qn, liq_ratio DIAGNOSED from temperature (mp_constraint) (Hu et al.)
@@ -217,8 +219,8 @@ def main(cfg: DictConfig):
     if cfg.add_refpres:
         nx = nx + 1
 
-    if cfg.use_surface_memory:
-        nx_sfc = nx_sfc + ny_sfc
+    # if cfg.use_surface_memory:
+    #     nx_sfc = nx_sfc + 2
         
     # if use_mp_constraint:
     if cfg.mp_mode>0:
@@ -672,8 +674,20 @@ def main(cfg: DictConfig):
     elif cfg.optimizer == "soap":
         from soap import SOAP
         optimizer = SOAP(model.parameters(), lr = cfg.lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
+    elif cfg.optimizer == "muon":
+        from muon import SingleDeviceMuonWithAuxAdam
+        hidden_weights = [p for p in model.parameters() if p.ndim >= 2]
+        hidden_gains_biases = [p for p in model.parameters() if p.ndim < 2]
+        rnn_params = [*model.rnn1.parameters(), *model.rnn2.parameters()]
+        param_groups = [
+            dict(params=hidden_weights, use_muon=True,
+                lr=cfg.lr, weight_decay=0.01),
+            dict(params=hidden_gains_biases, use_muon=False,
+                lr=3e-4, betas=(0.9, 0.95), weight_decay=0.01),
+        ]
+        optimizer = SingleDeviceMuonWithAuxAdam(param_groups)  
     else:
-        raise NotImplementedError("optimizer {} not implemented".format(cfg.optimizer))
+        raise NotImplementedError(("optimizer {} not implemented".format(cfg.optimizer)))
 
 
     timewindow_default = 1
@@ -722,7 +736,7 @@ def main(cfg: DictConfig):
       print("not using a LR scheduler")
       lr_scheduler=None
     else:
-      raise NotImplementedError()
+      raise NotImplementedError(("scheduler {} not supported".format(cfg.lr_scheduler)))
 
     # lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optimizer, gamma=cfg.learning_rate_decay_factor,last_epoch=-1)
 
