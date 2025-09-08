@@ -472,8 +472,7 @@ def main(cfg: DictConfig):
                     add_pres = cfg.add_pres,
                     output_prune = cfg.output_prune,
                     use_ensemble = use_ensemble,
-                    nh_mem = cfg.nh_mem,
-                    diagnose_precip = diagnose_precip)#,
+                    nh_mem = cfg.nh_mem)#,
     elif cfg.model_type=="physrad":
         from models_rad import LSTM_autoreg_torchscript_physrad
         model = LSTM_autoreg_torchscript_physrad(hyam,hybm,hyai,hybi,

@@ -914,6 +914,68 @@ class MyStochasticLSTMLayer3_ar(jit.ScriptModule):
 
         return torch.stack(outputs), state
 
+
+class MyStochasticLSTMLayer4(jit.ScriptModule):
+    use_bias: Final[bool]
+
+    def __init__(self, input_size, hidden_size, use_bias):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+
+        self.weight_encoder =  Parameter(torch.randn((hidden_size+input_size, 5*hidden_size)))
+        # self.weight_encoder =  Parameter(torch.randn((5,hidden_size+input_size, hidden_size)))
+
+        self.use_bias = use_bias
+        self.tau_t = torch.tensor(0.5)
+        self.tau_e = torch.sqrt(1 - self.tau_t**2)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        std = 1.0 / math.sqrt(self.hidden_size)
+        for w in self.parameters():
+            w.data.uniform_(-std, std)
+            
+    @torch.compile
+    def forward(
+        self, input_seq: Tensor, state: Tuple[Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
+        nseq, batch_size, nx = input_seq.shape
+        epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device, dtype=input_seq.dtype)
+        
+        inputs = input_seq.unbind(0)
+        outputs = torch.jit.annotate(List[Tensor], [])
+        hx, cx = state
+        
+        for i in range(len(inputs)):
+            eps = epss[i]
+            x = inputs[i]
+            
+            inp = torch.cat((x, hx), dim=1)
+            # inp = inp.unsqueeze(0)
+            # inp = inp.expand((5,-1,-1))
+            # yy = torch.bmm(inp, self.weight_encoder) 
+            # yy = yy.unbind(0)
+            # mean_, logvar_, ingate, forgetgate, cellgate = yy
+            
+            yy = torch.mm(inp, self.weight_encoder) 
+            mean_, logvar_, ingate, forgetgate, cellgate = yy.chunk(5,1)
+            
+            z = mean_ + eps * torch.exp(0.5*logvar_)
+            outgate = torch.sigmoid(z)
+            ingate = torch.sigmoid(ingate)
+            forgetgate = torch.sigmoid(forgetgate)
+            cellgate = torch.tanh(cellgate)
+    
+            cx = (forgetgate * cx) + (ingate * cellgate)
+
+            hx = outgate * torch.tanh(cx)
+        
+            outputs += [hx]
+
+        state =  (hx, cx)
+
+        return torch.stack(outputs), state
+
 class GLU(nn.Module):
     """ The static nonlinearity used in the S4 paper"""
     def __init__(self,  nseq, nneur, layernorm=True, dropout=0, expand_factor=2):
