@@ -437,6 +437,61 @@ def CRPS(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, alpha=1.0, return_low_
         return CRPS, MSE, ens_var
 
 
+def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps):
+    """
+    Calculate Continuous Ranked Probability Score (CRPS)
+
+    Parameters:
+    - y_pred (torch.Tensor): Prediction tensor.   (nens*batch,30,4)
+      Needs to be transposed to (batch, nens, 30*4)
+    - y (torch.Tensor): Ground truth tensor.  (batch,30,4)
+      needs to be reshaped to (batch,1,30*4) 
+
+    Returns:
+    - Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: CRPS and its components.
+    """ 
+    # y:  ntime*nbatch,      nseq, ny 
+    # yp: ntime*nbatch*nens, nseq, ny 
+    import scoringrules as sr
+    ns,seq_size,feature_size = y.shape
+    batch_size = ns // timesteps
+    ens_size = y_pred.shape[0] // (timesteps*batch_size)          
+    y_pred = torch.reshape(y_pred, (timesteps, ens_size, batch_size, seq_size*feature_size))
+    y_pred = torch.transpose(y_pred, 1, 2) # time, batch, ens, seq_size*feature_size))
+    y_pred = torch.reshape(y_pred, (timesteps*batch_size, ens_size, seq_size*feature_size))
+
+    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps, ens_size, batch_size, -1))
+    y_sfc_pred = torch.transpose(y_sfc_pred, 1, 2) # time, batch, ens, nx_sfc))
+    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps*batch_size, ens_size, -1))
+    y_pred = torch.cat((y_pred, y_sfc_pred), axis=-1)
+
+    y     = torch.reshape(y,     (timesteps*batch_size, seq_size*feature_size))
+    y_sfc = torch.reshape(y_sfc, (timesteps*batch_size, -1))
+    y = torch.cat((y, y_sfc), axis=-1)
+    # print("y shape and dev", y.shape, y.device, "pred", y_pred.shape, y_pred.device)
+    CRPS = sr.crps_ensemble(y, y_pred, m_axis=1, backend='torch', estimator='fair')
+    CRPS = CRPS.mean()
+    # print("CRPS shape", CRPS.shape)
+    y       = y.reshape((timesteps*batch_size,1,-1))
+    y_pred  = y_pred.reshape((timesteps*batch_size,ens_size,-1))
+
+    eps = 1 / ens_size
+
+    # cdist
+    # x1 (Tensor) – input tensor of shape B×P×M
+    # x2 (Tensor) – input tensor of shape B×R×M
+    # ypred (batch,nens,30*4)   y  (batch,1,30*4)   
+    # cdist out term1 (batch,1,nens)
+    # cdist out term2 (batch, nens, nens)   
+    MSE       = torch.cdist(y, y_pred).mean()  # B, 1, nens  --> (1)
+    cmean_out = torch.cdist(y_pred, y_pred) # B, nens, nens
+    ens_var = ( (1-eps)* cmean_out.mean(0).sum() ) / (ens_size * (ens_size - 1)) 
+    MSE         /= y_pred.size(-1) ** 0.5
+    ens_var     /= y_pred.size(-1) ** 0.5
+    
+
+    return CRPS, MSE, ens_var
+
 def CRPS_l1(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
     """
     Calculate Continuous Ranked Probability Score.
@@ -510,7 +565,7 @@ def CRPS_l1(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
     loss = skill - 0.5 * spread
     return loss, skill, spread
 
-def CRPS3(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
+def CRPS_anemoi(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
     """
     Calculate Continuous Ranked Probability Score.
 
@@ -667,7 +722,8 @@ def CRPS4(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, return_low_var_inds=F
 
 def get_CRPS(beta): 
     def customCRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps):
-        # return CRPS3(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, beta)
-        return CRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, beta)
+        # return CRPS_anemoi(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, beta)
+        # return CRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, beta)
+        return CRPS_scoringrules(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps)
 
     return customCRPS

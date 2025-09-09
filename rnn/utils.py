@@ -608,7 +608,7 @@ class train_or_eval_one_epoch:
             self.metrics['det_skill'] =  epoch_det_skill / k
             self.metrics['spread_skill_ratio'] =  epoch_spreadskill / k
             if self.use_ensemble:
-                self.metrics['dt_ens_std']  += epoch_dt_std / k
+                self.metrics['dt_ens_std']  = epoch_dt_std / k
         self.metrics["h_conservation"] =  epoch_hcon / k
         self.metrics["water_conservation"] =  epoch_wcon / k
 
