@@ -727,3 +727,13 @@ def get_CRPS(beta):
         return CRPS_scoringrules(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps)
 
     return customCRPS
+
+def get_GEL(_lambda):
+  def GEL(y_true, y_true_sfc, y_pred, y_pred_sfc, _lambda):
+    # implement GEL from 
+    # https://www.sciencedirect.com/science/article/pii/S0169809525004119
+    ntot = y_true.nelement()
+    expterm = 1 / ntot * 1
+    loss = torch.pow(2, expterm)
+    return loss 
+  return GEL 

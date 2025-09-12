@@ -268,6 +268,7 @@ class train_or_eval_one_epoch:
         epoch_bias_lev_tot = 0.0; epoch_bias_perlev= 0.0
         epoch_mae_lev_clw = 0.0; epoch_mae_lev_cli = 0.0
         epoch_rmse_perlev = 0.0; epoch_prec_std_frac = 0.0
+        epoch_prec_99p_ratio = 0.0; epoch_tend_99p_ratio = 0.0
         epoch_dt_std = 0.0
         t_comp =0 
         t0_it = time.time()
@@ -536,13 +537,25 @@ class train_or_eval_one_epoch:
                             prec_true = sfc_true[3,:]
                             epoch_R2precc += np.corrcoef((prec_pred,prec_true))[0,1]
                             epoch_prec_std_frac += prec_pred.std()/prec_true.std()
+                            
+                            pp = np.percentile(prec_true,99.9)
+                            epoch_prec_99p_ratio += prec_pred[prec_pred>pp].size / prec_true[prec_true>pp].size
+                            
                             # epoch_prec_perc_frac += np.percentile(prec_pred,99.9)/np.percentile(prec_true,99.9)
 
                             #print("R2 numpy", r2_np, "R2 torch", self.metric_R2_precc(ypo_sfc[:,3:4], yto_sfc[:,3:4]) )
 
                             ypo_lay = ypo_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
                             yto_lay = yto_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
-
+                            
+                            percentile_ratios = np.zeros(self.ny_pp)
+                            for ip in range(self.ny_pp):
+                                tend_true = yto_lay[:,:,ip]
+                                tend_pred = ypo_lay[:,:,ip]
+                                pp = np.percentile(tend_true,99.9)
+                                percentile_ratios[ip] = tend_pred[tend_pred>pp].size / tend_true[tend_true>pp].size
+                            epoch_tend_99p_ratio += np.mean(percentile_ratios)
+                                
                             epoch_r2_lev += metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay)**2
 
                             epoch_mae_lev_clw +=  np.nanmean(np.abs(ypo_lay[:,:,2] - yto_lay[:,:,2]),axis=0)
@@ -646,6 +659,9 @@ class train_or_eval_one_epoch:
         self.metrics['R2_FLWDS'] = epoch_R2flwds / k
         self.metrics['R2_NETSW'] = epoch_R2netsw / k
         self.metrics['prec_std_frac'] = epoch_prec_std_frac / k 
+        self.metrics['99p_ratio_prec'] = epoch_prec_99p_ratio / k 
+        self.metrics['99p_ratio_tend'] = epoch_tend_99p_ratio / k 
+
         self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
         self.metrics['mae_cli'] = np.nanmean(epoch_mae_lev_cli / k)
         
