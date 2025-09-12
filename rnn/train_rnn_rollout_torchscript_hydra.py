@@ -481,6 +481,8 @@ def main(cfg: DictConfig):
                     output_prune = cfg.output_prune,
                     use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem,
+                    ar_noise_mode = cfg.ar_noise_mode,
+                    ar_tau = cfg.ar_tau,
                     use_surface_memory=cfg.use_surface_memory)#,
     elif cfg.model_type=="physrad":
         from models_rad import LSTM_autoreg_torchscript_physrad

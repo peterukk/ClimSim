@@ -2539,7 +2539,7 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         del rnn1_input
 
         rnn1out = torch.flip(rnn1out, [0])
-        if self.use_ar_noise and not self.two_eps_variables:
+        if self.use_ar_noise and (not self.two_eps_variables) and (eps_prev.dim() == 3):
             eps_prev2 = torch.flip(eps_prev, [0])
 
         inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
@@ -2617,7 +2617,8 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
     use_lstm: Final[bool]
     diagnose_precip: Final[bool]
     use_surface_memory: Final[bool]
-
+    use_ar_noise: Final[bool]
+    two_eps_variables: Final[bool]
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
@@ -2630,6 +2631,8 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
                 use_ensemble=True,
                 use_lstm=True,
                 use_surface_memory=False,
+                ar_noise_mode=0,
+                ar_tau = 0.85,
                 nh_mem=64):
 
         super(halfstochastic_RNN_autoreg_torchscript, self).__init__()
@@ -2660,6 +2663,28 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         self.nonlin = nn.Tanh()
         self.relu = nn.ReLU()
         self.use_lstm=use_lstm
+        self.ar_noise_mode = ar_noise_mode 
+        # 0 : Fully uncorrelated noise. The sampled noise (eps) used in the stochastic RNN has no temporal correlation, is
+        # redrawn at every vertical level and for each RNN. Therefore no need to keep track of it outside the model
+        # 1: Eps has temporal correlation (correlation time scale set by tau_t), 
+        # but no vertical correlation (eps has a vertical dimension) and is not shared by the two RNNs 
+        # 2: Eps has temporal correlation and no vertical correlation, but is shared between the two RNNs
+        # 3: Fully correlated noise: temporal correlation, and eps is shared between the two RNN models and at all vertical levels
+        if self.ar_noise_mode>0:
+            self.use_ar_noise = True
+        else:
+            self.use_ar_noise = False
+        if self.ar_noise_mode==1:
+            # self.two_eps_variables=True 
+            raise NotImplementedError("two eps variables for halfstochastic model makes no sense") # need mlp here too for custom nh_mem
+        else:
+            self.two_eps_variables=False
+        if self.use_ar_noise:
+            print("Using autoregressive (AR) noise")
+            tau_t = torch.tensor(ar_tau) #torch.tensor(0.85)
+            tau_e = torch.sqrt(1 - tau_t**2)
+            self.register_buffer('tau_t', tau_t)
+            self.register_buffer('tau_e', tau_e)
         yscale_lev = torch.from_numpy(out_scale).to(device)
         yscale_sca = torch.from_numpy(out_sfc_scale).to(device)
         xmean_lev  = torch.from_numpy(xmean_lev).to(device)
@@ -2707,7 +2732,12 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         use_bias=False
         self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=False) 
         if self.use_lstm:
-            self.rnn2      = MyStochasticLSTMLayer4(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)
+            if self.use_ar_noise:
+                rnn_layer = MyStochasticLSTMLayer3_ar
+            else:
+                # rnn_layer = MyStochasticLSTMLayer3
+                rnn_layer = MyStochasticLSTMLayer4
+            self.rnn2      = rnn_layer(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)
             self.mlp_surface2    = nn.Linear(self.nx_sfc, self.nh_rnn1)
             self.mlp_toa2        = nn.Linear(2, self.nh_rnn2)
         else:
@@ -2778,7 +2808,14 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         inputs_main   = inp_list[0]
         inputs_aux    = inp_list[1]
         rnn1_mem      = inp_list[2]
-        
+        if self.use_ar_noise:
+            eps_prev  = inp_list[3]
+            if self.two_eps_variables:
+                if eps_prev.shape[0]==2:
+                    eps_prev2 = eps_prev[1]
+                    eps_prev = eps_prev[0]
+                else:
+                    raise NotImplementedError("two_eps_variables was set to True but only one was provided")
         if self.use_ensemble:
             inputs_main = inputs_main.unsqueeze(0)
             inputs_aux = inputs_aux.unsqueeze(0)
@@ -2827,9 +2864,17 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
             cx2 = self.mlp_toa(inputs_toa)
             cx2 = self.nonlin(cx2)
             hidden = (hx2, cx2)
-            out, states = self.rnn2(rnn1out, hidden)
+            # out, states = self.rnn2(rnn1out, hidden)
+            if self.use_ar_noise:
+                out, states = self.rnn2(rnn1out, hidden, eps_prev)
+            else:
+                out, state = self.rnn2(rnn1out, hidden)
         else:
-            out = self.rnn2(rnn1out, hx2)
+            # out = self.rnn2(rnn1out, hx2)
+            if self.use_ar_noise:
+                out = self.rnn2(rnn1out, hx2, eps_prev)
+            else:
+                out = self.rnn2(rnn1out, hx2)   
         del rnn1out 
         
         last_hidden = out[-1,:]
@@ -2865,8 +2910,15 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
 
         out_sfc = self.relu(out_sfc)
 
-        return out, out_sfc, rnn1_mem
-    
+        if self.use_ar_noise:
+            eps_prev = self.tau_t * eps_prev + self.tau_e * torch.randn_like(eps_prev) #eps
+            if self.two_eps_variables:
+              eps_prev2 = self.tau_t * eps_prev2 + self.tau_e * torch.randn_like(eps_prev)
+              eps_prev = torch.stack((eps_prev,eps_prev2))
+            return out, out_sfc, rnn1_mem, eps_prev
+        else:
+            return out, out_sfc, rnn1_mem
+            
 class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
     use_initial_mlp: Final[bool]
     use_intermediate_mlp: Final[bool]

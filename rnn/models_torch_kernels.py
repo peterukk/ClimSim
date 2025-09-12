@@ -1062,10 +1062,7 @@ class MyStochasticLSTMLayer4(jit.ScriptModule):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
-
         self.weight_encoder =  Parameter(torch.randn((hidden_size+input_size, 5*hidden_size)))
-        # self.weight_encoder =  Parameter(torch.randn((5,hidden_size+input_size, hidden_size)))
-
         self.use_bias = use_bias
         self.tau_t = torch.tensor(0.5)
         self.tau_e = torch.sqrt(1 - self.tau_t**2)
