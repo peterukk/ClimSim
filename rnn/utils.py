@@ -538,8 +538,8 @@ class train_or_eval_one_epoch:
                             epoch_R2precc += np.corrcoef((prec_pred,prec_true))[0,1]
                             epoch_prec_std_frac += prec_pred.std()/prec_true.std()
                             
-                            # pp = np.percentile(prec_true,99.9)
-                            pp = np.percentile(prec_true,99.8)
+                            pp = np.percentile(prec_true,99.9)
+                            # pp = np.percentile(prec_true,99.8)
                             epoch_prec_99p_ratio += prec_pred[prec_pred>pp].size / prec_true[prec_true>pp].size
 
                             ypo_lay = ypo_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
