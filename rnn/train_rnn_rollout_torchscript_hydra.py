@@ -463,7 +463,8 @@ def main(cfg: DictConfig):
                     use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem,
                     ar_noise_mode = cfg.ar_noise_mode,
-                    ar_tau = cfg.ar_tau)#,
+                    ar_tau = cfg.ar_tau,
+                    use_surface_memory=cfg.use_surface_memory)#,
     elif cfg.model_type=="partiallystochasticRNN":
         model = halfstochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
@@ -479,7 +480,8 @@ def main(cfg: DictConfig):
                     add_pres = cfg.add_pres,
                     output_prune = cfg.output_prune,
                     use_ensemble = use_ensemble,
-                    nh_mem = cfg.nh_mem)#,
+                    nh_mem = cfg.nh_mem,
+                    use_surface_memory=cfg.use_surface_memory)#,
     elif cfg.model_type=="physrad":
         from models_rad import LSTM_autoreg_torchscript_physrad
         model = LSTM_autoreg_torchscript_physrad(hyam,hybm,hyai,hybi,

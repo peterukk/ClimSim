@@ -2614,6 +2614,8 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
     separate_radiation: Final[bool]
     use_lstm: Final[bool]
     diagnose_precip: Final[bool]
+    use_surface_memory: Final[bool]
+
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
@@ -2625,6 +2627,7 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
                 output_prune=False,
                 use_ensemble=True,
                 use_lstm=True,
+                use_surface_memory=False,
                 nh_mem=64):
 
         super(halfstochastic_RNN_autoreg_torchscript, self).__init__()
@@ -2655,7 +2658,6 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         self.nonlin = nn.Tanh()
         self.relu = nn.ReLU()
         self.use_lstm=use_lstm
-
         yscale_lev = torch.from_numpy(out_scale).to(device)
         yscale_sca = torch.from_numpy(out_sfc_scale).to(device)
         xmean_lev  = torch.from_numpy(xmean_lev).to(device)
@@ -2677,6 +2679,9 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
             self.nh_mem = nh_mem
         else:
             self.nh_mem = self.nneur[1]
+        self.use_surface_memory = use_surface_memory
+        if self.use_surface_memory:
+            self.nh_mem = self.nh_mem + 2 
         print("Building det + stochastic RNN that feeds its hidden memory at t0,z0 to its inputs at t1,z0")
  
         print("Initial mlp: {}, intermediate mlp: {}".format(self.use_initial_mlp, self.use_intermediate_mlp))
@@ -2845,7 +2850,11 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         eps = torch.randn_like(sfc_mean_)
         sigma = torch.exp(0.5*sfc_logvar_)
         out_sfc = sfc_mean_ + eps * sigma
-
+        if self.use_surface_memory:
+            prec = torch.reshape(out_sfc,(-1,1,2))
+            prec = torch.repeat_interleave(prec,self.nlev,dim=1)
+            rnn1_mem = torch.cat((rnn1_mem,prec),dim=2)
+            
         out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
 
         out_sfc = self.relu(out_sfc)
