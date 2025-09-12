@@ -471,6 +471,8 @@ def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     # print("y shape and dev", y.shape, y.device, "pred", y_pred.shape, y_pred.device)
     CRPS = sr.crps_ensemble(y, y_pred, m_axis=1, backend='torch', estimator='fair')
     CRPS = CRPS.mean()
+    # CRPS = CRPS.sum(dim=-1).mean()
+
     # print("CRPS shape", CRPS.shape)
     y       = y.reshape((timesteps*batch_size,1,-1))
     y_pred  = y_pred.reshape((timesteps*batch_size,ens_size,-1))
