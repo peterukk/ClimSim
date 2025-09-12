@@ -2587,9 +2587,11 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         sigma = torch.exp(0.5*sfc_logvar_)
         out_sfc = sfc_mean_ + eps * sigma
         if self.use_surface_memory:
+            # print("rnn1 mem shape 0", rnn1_mem.shape)
             prec = torch.reshape(out_sfc,(-1,1,2))
             prec = torch.repeat_interleave(prec,self.nlev,dim=1)
-            rnn1_mem = torch.cat((rnn1_mem,prec),dim=2)
+            rnn1_mem = torch.cat((rnn1_mem[:,:,0:self.nh_mem-2:],prec),dim=2)
+            # print("rnn1 mem shape 1", rnn1_mem.shape)
 
         out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
 
@@ -2682,6 +2684,7 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         self.use_surface_memory = use_surface_memory
         if self.use_surface_memory:
             self.nh_mem = self.nh_mem + 2 
+            print("Using surface memory, updated nh_mem", self.nh_mem)
         print("Building det + stochastic RNN that feeds its hidden memory at t0,z0 to its inputs at t1,z0")
  
         print("Initial mlp: {}, intermediate mlp: {}".format(self.use_initial_mlp, self.use_intermediate_mlp))
@@ -2692,6 +2695,7 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         print("nx rnn1", self.nx_rnn1, "nh rnn1", self.nh_rnn1)
         print("nx rnn2", self.nx_rnn2, "nh rnn2", self.nh_rnn2)  
         print("nx sfc", self.nx_sfc)
+        print("nh mem", self.nh_mem)
 
         if self.use_initial_mlp:
             print("use initial mpl on, nx {} nh {}".format(nx,self.nneur[0]))
@@ -2851,10 +2855,12 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         sigma = torch.exp(0.5*sfc_logvar_)
         out_sfc = sfc_mean_ + eps * sigma
         if self.use_surface_memory:
+            # print("rnn1 mem shape 0", rnn1_mem.shape)
             prec = torch.reshape(out_sfc,(-1,1,2))
             prec = torch.repeat_interleave(prec,self.nlev,dim=1)
-            rnn1_mem = torch.cat((rnn1_mem,prec),dim=2)
-            
+            rnn1_mem = torch.cat((rnn1_mem[:,:,0:self.nh_mem-2:],prec),dim=2)
+            # print("rnn1 mem shape 1", rnn1_mem.shape)
+
         out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
 
         out_sfc = self.relu(out_sfc)
