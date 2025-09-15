@@ -601,8 +601,8 @@ class train_or_eval_one_epoch:
                     t_comp = 0
                 if len(prec_pred_daily) ==72:
                     # daily precipitation accumulation
-                    prec_pred_daily = np.concat(prec_pred_daily)
-                    prec_true_daily = np.concat(prec_true_daily)
+                    prec_pred_daily = np.nansum(np.reshape(np.concat(prec_pred_daily),(72,-1)),axis=0)
+                    prec_true_daily = np.nansum(np.reshape(np.concat(prec_true_daily),(72,-1)),axis=0)
                     pp = np.percentile(prec_true_daily,99.9)
                     epoch_prec_99p_day += prec_pred_daily[prec_pred_daily>pp].size / prec_true_daily[prec_true_daily>pp].size
                     k2 += 1 
