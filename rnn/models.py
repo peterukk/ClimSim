@@ -2499,11 +2499,11 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
                 else:
                     raise NotImplementedError("two_eps_variables was set to True but only one was provided")
         if self.use_ensemble:
+            ensemble_size = rnn1_mem.shape[0] // inputs_main.shape[0]
             inputs_main = inputs_main.unsqueeze(0)
             inputs_aux = inputs_aux.unsqueeze(0)
             # inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
             # inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
-            ensemble_size = rnn1_mem.shape[0] // inputs_main.shape[0]
             inputs_main = torch.repeat_interleave(inputs_main,repeats=ensemble_size,dim=0)
             inputs_aux = torch.repeat_interleave(inputs_aux,repeats=ensemble_size,dim=0)
             inputs_main = inputs_main.flatten(0,1)
@@ -2826,9 +2826,9 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
                 else:
                     raise NotImplementedError("two_eps_variables was set to True but only one was provided")
         if self.use_ensemble:
+            ensemble_size = rnn1_mem.shape[0] // inputs_main.shape[0]
             inputs_main = inputs_main.unsqueeze(0)
             inputs_aux = inputs_aux.unsqueeze(0)
-            ensemble_size = rnn1_mem.shape[0] // inputs_main.shape[0]
             inputs_main = torch.repeat_interleave(inputs_main,repeats=ensemble_size,dim=0)
             inputs_aux = torch.repeat_interleave(inputs_aux,repeats=ensemble_size,dim=0)
             # inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
