@@ -269,6 +269,8 @@ class train_or_eval_one_epoch:
         epoch_mae_lev_clw = 0.0; epoch_mae_lev_cli = 0.0
         epoch_rmse_perlev = 0.0; epoch_prec_std_frac = 0.0
         epoch_prec_99p_ratio = 0.0; epoch_tend_99p_ratio = 0.0
+        epoch_prec_99p_day = 0.0
+        prec_true_daily = 0.0; prec_pred_daily = 0.0
         epoch_dt_std = 0.0
         t_comp =0 
         t0_it = time.time()
@@ -541,6 +543,8 @@ class train_or_eval_one_epoch:
                             pp = np.percentile(prec_true,99.9)
                             # pp = np.percentile(prec_true,99.8)
                             epoch_prec_99p_ratio += prec_pred[prec_pred>pp].size / prec_true[prec_true>pp].size
+                            prec_pred_daily += prec_pred
+                            prec_true_daily += prec_true
 
                             ypo_lay = ypo_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
                             yto_lay = yto_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
@@ -595,6 +599,12 @@ class train_or_eval_one_epoch:
                     running_bias = 0.0
                     t0_it = time.time()
                     t_comp = 0
+                if j % 72 ==0:
+                    # daily precipitation accumulation
+                    pp = np.percentile(prec_true_daily,99.9)
+                    epoch_prec_99p_day += prec_pred_daily[prec_pred_daily>pp].size / prec_true_daily[prec_true_daily>pp].size
+                    k2 += 1 
+                    prec_pred_daily = 0.0; prec_true_daily = 0.0
                 j += 1
 
             # if i>0:
@@ -657,6 +667,7 @@ class train_or_eval_one_epoch:
         self.metrics['R2_NETSW'] = epoch_R2netsw / k
         self.metrics['prec_std_frac'] = epoch_prec_std_frac / k 
         self.metrics['99p_ratio_prec'] = epoch_prec_99p_ratio / k 
+        self.metrics['99p_ratio_precday'] = epoch_prec_99p_day / k 
         self.metrics['99p_ratio_tend'] = epoch_tend_99p_ratio / k 
 
         self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
