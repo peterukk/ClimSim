@@ -2300,6 +2300,7 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
     use_ar_noise: Final[bool]
     two_eps_variables: Final[bool]
     use_surface_memory: Final[bool]
+    # ensemble_size: Final[int]
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
@@ -2311,6 +2312,7 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
                 output_prune=False,
                 use_memory=False,
                 use_ensemble=True,
+                # ensemble_size=2,
                 use_lstm=True,
                 nh_mem=64,
                 ar_noise_mode=0,
@@ -2336,6 +2338,7 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
 
         self.use_memory= use_memory
         self.use_ensemble = use_ensemble
+        # self.ensemble_size = ensemble_size
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
         else:
@@ -2498,8 +2501,11 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         if self.use_ensemble:
             inputs_main = inputs_main.unsqueeze(0)
             inputs_aux = inputs_aux.unsqueeze(0)
-            inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
-            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
+            # inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
+            # inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
+            ensemble_size = rnn1_mem.shape[0] // inputs_main.shape[0]
+            inputs_main = torch.repeat_interleave(inputs_main,repeats=ensemble_size,dim=0)
+            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=ensemble_size,dim=0)
             inputs_main = inputs_main.flatten(0,1)
             inputs_aux = inputs_aux.flatten(0,1)
                     
@@ -2619,6 +2625,7 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
     use_surface_memory: Final[bool]
     use_ar_noise: Final[bool]
     two_eps_variables: Final[bool]
+    # ensemble_size: Final[int]
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
@@ -2629,6 +2636,7 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
                 add_pres=False,
                 output_prune=False,
                 use_ensemble=True,
+                # ensemble_size = 2,
                 use_lstm=True,
                 use_surface_memory=False,
                 ar_noise_mode=0,
@@ -2655,6 +2663,7 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         self.nx_rnn2 = self.nneur[0]
         self.nh_rnn2 = self.nneur[1]
         self.use_ensemble = use_ensemble
+        # self.ensemble_size = ensemble_size
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
         else:
@@ -2819,10 +2828,11 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         if self.use_ensemble:
             inputs_main = inputs_main.unsqueeze(0)
             inputs_aux = inputs_aux.unsqueeze(0)
-            # inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
-            # inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
-            inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
-            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
+            ensemble_size = rnn1_mem.shape[0] // inputs_main.shape[0]
+            inputs_main = torch.repeat_interleave(inputs_main,repeats=ensemble_size,dim=0)
+            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=ensemble_size,dim=0)
+            # inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
+            # inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
             inputs_main = inputs_main.flatten(0,1)
             inputs_aux = inputs_aux.flatten(0,1)
             # print("shape inp main", inputs_main.shape)
