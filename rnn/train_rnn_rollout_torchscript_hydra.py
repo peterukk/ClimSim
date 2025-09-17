@@ -800,8 +800,17 @@ def main(cfg: DictConfig):
     # scripted_model = torch . jit . script ( model )
     # scripted_model = scripted_model.eval()
     # scripted_model.save(save_file_torch)
-    
-    for epoch in range(cfg.num_epochs):
+
+    # load from checkpoint of it exists
+    start_epoch=0
+    if len(cfg.checkpoint_path)>0:
+        checkpoint = torch.load(cfg.checkpoint_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint['epoch']
+
+    for epoch in range(start_epoch, cfg.num_epochs):
         t0 = time.time()
         
         if cfg.timestep_scheduling:
@@ -812,6 +821,7 @@ def main(cfg: DictConfig):
         print("Epoch {} Training rollout timesteps: {} ".format(epoch+1, timesteps))
 
         if cfg.timestepped_optimizer and (timesteps==(tsteps_old+1)):
+
             # print("Timestepped optimizer turned on, doubling learning rate upon increased time window")
             # for g in optimizer.param_groups:
             #     g['lr'] = 2*g['lr']
@@ -926,6 +936,7 @@ def main(cfg: DictConfig):
                             'epoch': epoch,
                             'model_state_dict': model.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict(),
+                            'scheduler_state_dict': lr_scheduler.state_dict(),
                             'val_loss': val_loss,
                             }, SAVE_PATH)  
                 scripted_model = torch . jit . script ( model )
