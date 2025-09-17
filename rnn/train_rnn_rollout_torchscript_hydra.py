@@ -670,7 +670,7 @@ def main(cfg: DictConfig):
             print("Setting beta to", beta_initial)
         else:
             loss_fn = metrics.get_CRPS(cfg.beta)
-     elif cfg.loss_fn_type == "variogram_score":
+    elif cfg.loss_fn_type == "variogram_score":
         loss_fn = metrics.variogram_score   
     else:
         raise NotImplementedError("loss_fn {} not implemented".format(cfg.loss_fn_type))

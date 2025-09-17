@@ -498,7 +498,7 @@ class train_or_eval_one_epoch:
                     if j>loss_update_start_index:
                         with torch.no_grad():
                             epoch_loss      += loss.item()
-                            if self.cfg.loss_fn_type =="CRPS":
+                            if self.cfg.loss_fn_type in ["CRPS","variogram_score"]: 
                                 huber, mse, mae       = self.metrics_det(targets_lay, targets_sfc, preds_lay, preds_sfc)
 
                             epoch_huber += huber.item()
