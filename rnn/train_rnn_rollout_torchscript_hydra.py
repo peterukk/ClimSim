@@ -365,8 +365,8 @@ def main(cfg: DictConfig):
     if cfg.ensemble_size>1:
         use_ensemble = True 
         # cfg.ensemble_size = 2
-        if cfg.loss_fn_type != "CRPS":
-            raise NotImplementedError("To train stochastic RNN, use CRPS loss")
+        if cfg.loss_fn_type not in ["CRPS","variogram_score"]:
+            raise NotImplementedError("To train stochastic RNN, use CRPS or variogram loss")
     else:
         use_ensemble = False
         # cfg.ensemble_size = 1
@@ -670,6 +670,8 @@ def main(cfg: DictConfig):
             print("Setting beta to", beta_initial)
         else:
             loss_fn = metrics.get_CRPS(cfg.beta)
+     elif cfg.loss_fn_type == "variogram_score":
+        loss_fn = metrics.variogram_score   
     else:
         raise NotImplementedError("loss_fn {} not implemented".format(cfg.loss_fn_type))
         

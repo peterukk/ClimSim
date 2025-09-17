@@ -404,7 +404,7 @@ class train_or_eval_one_epoch:
 
                     with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
                         
-                        if self.cfg.loss_fn_type == "CRPS":
+                        if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
                             loss = lossf(targets_lay, targets_sfc, preds_lay, preds_sfc, timesteps)
                             loss, det_skill, ens_var = loss
                         else:
@@ -476,7 +476,7 @@ class train_or_eval_one_epoch:
    
                         optim.zero_grad()
                         loss = loss.detach()
-                        if self.cfg.loss_fn_type == "CRPS":
+                        if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
                             det_skill = det_skill.detach(); ens_var = ens_var.detach()
                         else: 
                             huber = huber.detach(); mse = mse.detach(); mae = mae.detach()
@@ -492,7 +492,8 @@ class train_or_eval_one_epoch:
                     running_energy  += h_con.item()
                     running_water   += water_con.item()
                     running_bias    += raw_bias_lev.item() 
-                    if self.cfg.loss_fn_type == "CRPS": running_var += ens_var.item() 
+                    if self.cfg.loss_fn_type in ["CRPS","variogram_score"]: 
+                        running_var += ens_var.item() 
                     #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
                     if j>loss_update_start_index:
                         with torch.no_grad():
@@ -508,7 +509,7 @@ class train_or_eval_one_epoch:
                             epoch_hcon  += h_con.item()
                             epoch_wcon  += water_con.item()
                             
-                            if self.cfg.loss_fn_type == "CRPS":
+                            if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
                                 epoch_ens_var += ens_var.item()
                                 epoch_det_skill += det_skill.item()
                                 epoch_spreadskill += ens_var.item() / det_skill.item()
@@ -585,7 +586,7 @@ class train_or_eval_one_epoch:
 
                     r2raw = self.metric_R2.compute()
 
-                    if self.cfg.loss_fn_type == "CRPS": 
+                    if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
                         running_var = running_var / fac
 
                         print("[{:d}, {:d}] Loss: {:.2e} var {:.2e} h-con: {:.2e}  w-con: {:.2e}  MBE: {:.2e}  R2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
@@ -625,7 +626,7 @@ class train_or_eval_one_epoch:
         self.metrics['mean_squared_error'] = epoch_mse / k
         self.metrics['huber'] = epoch_huber / k
 
-        if self.cfg.loss_fn_type == "CRPS": 
+        if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
             self.metrics['ens_var'] =  epoch_ens_var / k
             self.metrics['det_skill'] =  epoch_det_skill / k
             self.metrics['spread_skill_ratio'] =  epoch_spreadskill / k
