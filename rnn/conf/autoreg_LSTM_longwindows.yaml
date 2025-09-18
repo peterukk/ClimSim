@@ -1,24 +1,25 @@
-tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_gzip8_chunk1_subset.h5
-#tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_nocompress_chunk3.h5
+tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedyear_nocompress_chunk3.h5
+# tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_gzip8_chunk1_subset.h5
+# tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_nocompress_chunk3.h5
 #tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedyear_nocompress_chunk3.h5
 val_data_fname: data_v4_rnn_nonorm_year8_nocompress_chunk3.h5
-#tr_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
-#val_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
-tr_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
-val_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
+tr_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
+val_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
+#tr_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
+#val_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
 #tr_data_dir: "/gpfs/projects/ehpc272/low_res_expanded/"
 #val_data_dir: "/gpfs/projects/ehpc272/low_res_expanded/"
 #tr_data_dir: "/data/ClimSim/"
 #val_data_dir: "/data/ClimSim/"
 
-
+checkpoint_path: ""
 
 # cache option: during the first epoch, as the data is loaded it is put in shared (RAM) memory, 
 # from which it is loaded in subsequent epochs
 # this allows to use multiple workers and fast RAM memory without copying the data to each worker, 
 # which is especially useful on systems without SSDs. If the data is on a fast SSD, there is no need
 # to put the data in memory assuming multiple workers and prefetching is used
-cache: false
+cache: true
 val_cache: false 
 num_workers: 4
 chunksize_train: 24
@@ -49,6 +50,8 @@ use_water_loss: true
 w_wcon: 6.0e7
 use_bias_loss: false
 w_bias: 1.0e5
+use_precip_accum_loss: false 
+wprec_bias: 1.66e12
 output_prune: true
 qinput_prune: true
 rh_prune: true

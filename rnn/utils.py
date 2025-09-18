@@ -449,7 +449,12 @@ class train_or_eval_one_epoch:
                         water_con_t     = self.metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)#,printdebug=True)
                         water_con       = torch.mean(torch.square(water_con_p - water_con_t))
                         del water_con_p, water_con_t
-                        
+
+                        # precipitation accumulation
+                        precip_sum_mse  = metrics.precip_sum_mse(yto_sfc, ypo_sfc, timesteps)
+                        if self.cfg.use_precip_accum_loss:
+                            loss = loss + self.cfg.wprec_bias*precip_sum_mse
+
                         # if cfg.use_bias_loss:
                         raw_bias_lev, raw_bias_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc )
                         raw_bias_lev = torch.nanmean(raw_bias_lev)

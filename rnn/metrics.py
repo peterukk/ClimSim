@@ -163,7 +163,14 @@ def get_metrics_flatten(weights):
 def mse(y_true, y_pred):
     mse = torch.mean(torch.square(y_pred- y_true))
     return mse
-
+    
+def precip_sum_mse(yto_sfc, ypo_sfc, timesteps):
+    div = 1/(timesteps**2)
+    prec_sum_true = torch.sum(torch.reshape(yto_sfc[:,3],(timesteps,-1)),0)
+    prec_sum_pred = torch.sum(torch.reshape(ypo_sfc[:,3],(timesteps,-1)),0)
+    mse = div*torch.mean(torch.square(prec_sum_true - prec_sum_pred))
+    # print("precip mse", mse)
+    return mse 
 # def energy_metric(yto, ypo, sp, hyai,hybi):
     
 #     cp = torch.tensor(1004.0)
@@ -720,7 +727,7 @@ def CRPS4(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, return_low_var_inds=F
     else:
         return CRPS, MSE, ens_var
 
-def variogram_score(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps):
+def variogram_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     # y:  ntime*nbatch,      nseq, ny 
     # yp: ntime*nbatch*nens, nseq, ny 
     # sr.vs_ensemble needs 
@@ -742,8 +749,8 @@ def variogram_score(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps):
     y_sfc = torch.reshape(y_sfc, (timesteps*batch_size, -1))
     y = torch.cat((y, y_sfc), axis=-1)
 
-    # CRPS = sr.vs_ensemble(y, y_pred, p=0.5, backend='torch', estimator='fair')
-    CRPS = sr.vs_ensemble(y, y_pred, p=0.5, backend='torch', estimator='nrg')
+    CRPS = sr.vs_ensemble(y, y_pred, p=0.5, backend='torch', estimator='fair')
+    # CRPS = sr.vs_ensemble(y, y_pred, p=0.5, backend='torch')#, estimator='nrg')
 
     # CRPS = CRPS.mean()
     CRPS = CRPS.sum(dim=-1).mean()
