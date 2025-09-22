@@ -782,12 +782,48 @@ def get_CRPS(beta):
 
     return customCRPS
 
-def get_GEL(_lambda):
-  def GEL(y_true, y_true_sfc, y_pred, y_pred_sfc, _lambda):
+def get_GEL_precip(_lambda):
+  def precip_sum_GEL(yto_sfc, ypo_sfc, timesteps):
+    div = 1/(timesteps)
+    prec_sum_true = div*torch.sum(torch.reshape(yto_sfc[:,3],(timesteps,-1)),0)
+    prec_sum_pred = div*torch.sum(torch.reshape(ypo_sfc[:,3],(timesteps,-1)),0)
     # implement GEL from 
     # https://www.sciencedirect.com/science/article/pii/S0169809525004119
-    ntot = y_true.nelement()
-    expterm = 1 / ntot * 1
+    ntot = prec_sum_true.nelement()
+    # eps = 1e-7 #torch.finfo(torch.float32).eps
+    eps = torch.finfo(torch.float32).eps
+
+    fac = 10000
+    beta = torch.square(fac*prec_sum_pred+eps) / (fac*prec_sum_true+eps)
+    alpha = (fac*prec_sum_pred+eps) / (fac*prec_sum_true+eps)
+    # print("true min max", torch.min(fac*prec_sum_true+eps).item(), torch.max(fac*prec_sum_true+eps).item())
+    # print("pred min max", torch.min(fac*prec_sum_pred+eps).item(), torch.max(fac*prec_sum_pred+eps).item())
+
+    # print("alpha min max", torch.min(alpha).item(), torch.max(alpha).item())
+    # print("beta min max", torch.min(beta).item(), torch.max(beta).item())
+    # beta =  torch.clamp(beta, min=1e-6) 
+    beta =  torch.clamp(beta, min=eps) 
+
+    logterm = alpha*torch.log(beta)
+    # diff = beta - logterm
+    # print("diff min max", torch.min(diff).item(), torch.max(diff).item(), "shape", diff.shape)
+    # print("sum", torch.sum(beta - logterm).item())
+    expterm = (1 / (_lambda*ntot)) * (torch.sum(beta - logterm))
     loss = torch.pow(2, expterm)
+    # print("loss", loss.item())
+
     return loss 
-  return GEL 
+  return precip_sum_GEL 
+
+# def get_GEL(_lambda):
+#   def GEL(y_true, y_true_sfc, y_pred, y_pred_sfc, _lambda):
+#     # implement GEL from 
+#     # https://www.sciencedirect.com/science/article/pii/S0169809525004119
+#     ntot = y_true.nelement()
+#     beta = torch.square(y_pred_sfc) / y_true_sfc
+#     alpha = 
+#     expterm = (1 / (_lambda*ntot)) * (torch.sum())
+#     loss = torch.pow(2, expterm)
+#     return loss 
+#   return GEL 
+

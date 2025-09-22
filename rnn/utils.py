@@ -241,6 +241,8 @@ class train_or_eval_one_epoch:
         self.metric_h_con = metric_h_con
         self.metric_water_con = metric_water_con
         self.metric_R2 =  R2Score().to(self.device) 
+        gel_lambda_prec = 250.0
+        self.metric_precip_gel = metrics.get_GEL_precip(gel_lambda_prec)
         # The computed values of various metrics are stored at the end
         self.metrics = {}
         
@@ -269,7 +271,8 @@ class train_or_eval_one_epoch:
         epoch_mae_lev_clw = 0.0; epoch_mae_lev_cli = 0.0
         epoch_rmse_perlev = 0.0; epoch_prec_std_frac = 0.0
         epoch_prec_99p_ratio = 0.0; epoch_tend_99p_ratio = 0.0
-        epoch_prec_99p_day = 0.0; epoch_prec_99p_hour = 0.0; epoch_accumprec = 0.0
+        epoch_prec_99p_day = 0.0; epoch_prec_99p_hour = 0.0
+        epoch_prec_1p_day = 0.0; epoch_accumprec = 0.0; epoch_prec_gel = 0.0
         prec_true_daily = []; prec_pred_daily = []
         prec_true_hourly = []; prec_pred_hourly = []
         epoch_dt_std = 0.0
@@ -454,8 +457,12 @@ class train_or_eval_one_epoch:
                         # precipitation accumulation
                         precip_sum_mse  = metrics.precip_sum_mse(yto_sfc, ypo_sfc, timesteps)
                         if self.cfg.use_precip_accum_loss:
-                            loss = loss + self.cfg.wprec_bias*precip_sum_mse
-
+                            loss = loss + self.cfg.w_precmse*precip_sum_mse
+                            
+                        precip_sum_gel  = self.metric_precip_gel(yto_sfc, ypo_sfc, timesteps)
+                        if self.cfg.use_precip_gel_loss:
+                            loss = loss + self.cfg.w_precgel*precip_sum_mse
+                            
                         # if cfg.use_bias_loss:
                         raw_bias_lev, raw_bias_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc )
                         raw_bias_lev = torch.nanmean(raw_bias_lev)
@@ -489,6 +496,7 @@ class train_or_eval_one_epoch:
                         h_con = h_con.detach() 
                         water_con = water_con.detach()
                         precip_sum_mse = precip_sum_mse.detach()
+                        precip_sum_gel = precip_sum_gel.detach()
                         # if self.cfg.lr_scheduler=="OneCycleLR":
                         #     lr_scheduler.step()
                           
@@ -499,7 +507,9 @@ class train_or_eval_one_epoch:
                     running_energy  += h_con.item()
                     running_water   += water_con.item()
                     running_bias    += raw_bias_lev.item() 
-                    running_precip  += precip_sum_mse.item() 
+                    # running_precip  += precip_sum_mse.item() 
+                    running_precip  += precip_sum_gel.item() 
+
                     if self.cfg.loss_fn_type in ["CRPS","variogram_score"]: 
                         running_var += ens_var.item() 
                     #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
@@ -517,7 +527,8 @@ class train_or_eval_one_epoch:
                             epoch_hcon  += h_con.item()
                             epoch_wcon  += water_con.item()
                             epoch_accumprec += precip_sum_mse.item()
-                            
+                            epoch_prec_gel += precip_sum_gel.item()
+
                             if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
                                 epoch_ens_var += ens_var.item()
                                 epoch_det_skill += det_skill.item()
@@ -615,7 +626,11 @@ class train_or_eval_one_epoch:
                     prec_true_daily = np.nansum(np.reshape(np.concat(prec_true_daily),(72,-1)),axis=0)
                     pp = np.percentile(prec_true_daily,99.9)
                     epoch_prec_99p_day += prec_pred_daily[prec_pred_daily>pp].size / prec_true_daily[prec_true_daily>pp].size
-                    prec_pred_daily = []; prec_true_daily = []
+                    # prec_pred_daily = []; prec_true_daily = []
+                    
+                    pp = np.percentile(prec_true_daily,0.1)
+                    epoch_prec_1p_day += prec_pred_daily[prec_pred_daily<pp].size / prec_true_daily[prec_true_daily<pp].size
+                    prec_pred_daily = []; prec_true_daily = []          
                 if len(prec_pred_hourly) ==3:
                     # hourly precipitation accumulation 99.9th percentile, ratio of predicted occurrences to true
                     prec_pred_hourly = np.nansum(np.reshape(np.concat(prec_pred_hourly),(72,-1)),axis=0)
@@ -688,7 +703,9 @@ class train_or_eval_one_epoch:
         self.metrics['99p_ratio_prec'] = epoch_prec_99p_ratio / k 
         self.metrics['99p_ratio_precday'] = epoch_prec_99p_day / k 
         self.metrics['99p_ratio_prechour'] = epoch_prec_99p_hour / k 
+        self.metrics['1p_ratio_precday'] = epoch_prec_1p_day / k 
         self.metrics['99p_ratio_tend'] = epoch_tend_99p_ratio / k 
+        self.metrics['gel_precsum'] = epoch_prec_gel / k 
 
         self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
         self.metrics['mae_cli'] = np.nanmean(epoch_mae_lev_cli / k)
