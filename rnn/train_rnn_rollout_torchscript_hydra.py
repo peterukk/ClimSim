@@ -198,8 +198,8 @@ def main(cfg: DictConfig):
 
 
     if cfg.include_prev_outputs:
-        if not cfg.output_norm_per_level:
-            raise NotImplementedError("Only level-specific norm coefficients saved for previous tendency outputs")
+        # if not cfg.output_norm_per_level:
+        #     raise NotImplementedError("Only level-specific norm coefficients saved for previous tendency outputs")
 
         vars_2D_inp.append('state_t_prvphy')
         vars_2D_inp.append('state_q0001_prvphy')
@@ -270,6 +270,13 @@ def main(cfg: DictConfig):
                     5.00182069e+04, 6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
             else:
                 raise NotImplementedError()
+        if cfg.krasnopolsky_scaling:
+            ymean_lev = np.repeat(np.array([-1.8267360e-06, -2.9296985e-09,  8.0729937e-12, -2.2609501e-12,
+                    3.1241700e-07,  7.8532585e-09], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            # yscale_lev = np.repeat(np.array([42800.73,42800.73,42800.73,42800.73, 
+            #         42800.73,42800.73], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            yscale_lev = np.stack((yscale_lev,ymean_lev))
+
             
     if cfg.input_norm_per_level:
         xmax_lev = input_max[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
@@ -300,6 +307,16 @@ def main(cfg: DictConfig):
                    -4.69117053e-02, -4.92735580e-03, -1.11688621e-06, -4.69117053e-02,
                     9.70113589e-09,  1.78764156e-10,  3.65223324e-10], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
             xmean_lev = np.repeat(np.zeros((15), dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        if cfg.include_prev_outputs:
+            xmax_lev_prevout = np.repeat(np.array([1.6314061e-03, 8.9240649e-07, 2.0485280e-07, 4.7505119e-07,
+                   1.1354494e-03], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            
+            xmin_lev_prevout = np.repeat(np.array([-1.3457362e-03, -9.0609535e-07, -1.1949140e-07, -2.0962088e-07,
+                   -1.3081296e-03], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            xmean_lev_prevout = np.repeat(np.zeros((5), dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            xmax_lev = np.concatenate((xmax_lev, xmax_lev_prevout),axis=1)
+            xmin_lev = np.concatenate((xmin_lev, xmin_lev_prevout),axis=1)
+            xmean_lev = np.concatenate((xmean_lev, xmean_lev_prevout),axis=1)
 
     weights=None 
     
