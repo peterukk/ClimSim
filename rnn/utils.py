@@ -241,7 +241,8 @@ class train_or_eval_one_epoch:
         self.metric_h_con = metric_h_con
         self.metric_water_con = metric_water_con
         self.metric_R2 =  R2Score().to(self.device) 
-        gel_lambda_prec = 250.0
+        # gel_lambda_prec = 250.0
+        gel_lambda_prec = cfg.gel_lambda_prec
         self.metric_precip_gel = metrics.get_GEL_precip(gel_lambda_prec)
         # The computed values of various metrics are stored at the end
         self.metrics = {}
@@ -272,13 +273,13 @@ class train_or_eval_one_epoch:
         epoch_rmse_perlev = 0.0; epoch_prec_std_frac = 0.0
         epoch_prec_99p_ratio = 0.0; epoch_tend_99p_ratio = 0.0
         epoch_prec_99p_day = 0.0; epoch_prec_99p_hour = 0.0
-        epoch_prec_1p_day = 0.0; epoch_accumprec = 0.0; epoch_prec_gel = 0.0
+        epoch_prec_50p_day = 0.0; epoch_accumprec = 0.0; epoch_prec_gel = 0.0
         prec_true_daily = []; prec_pred_daily = []
         prec_true_hourly = []; prec_pred_hourly = []
         epoch_dt_std = 0.0
         t_comp =0 
         t0_it = time.time()
-        j = 0; k = 0; k2=2    
+        j = 0; k = 0; k2=0; k3 = 0    
         device = self.device
         # torch.cuda.memory._record_memory_history(enabled='all')
 
@@ -628,9 +629,10 @@ class train_or_eval_one_epoch:
                     epoch_prec_99p_day += prec_pred_daily[prec_pred_daily>pp].size / prec_true_daily[prec_true_daily>pp].size
                     # prec_pred_daily = []; prec_true_daily = []
                     
-                    pp = np.percentile(prec_true_daily,0.1)
-                    epoch_prec_1p_day += prec_pred_daily[prec_pred_daily<pp].size / prec_true_daily[prec_true_daily<pp].size
-                    prec_pred_daily = []; prec_true_daily = []          
+                    pp = np.percentile(prec_true_daily,50.0)
+                    epoch_prec_50p_day += prec_pred_daily[prec_pred_daily<pp].size / prec_true_daily[prec_true_daily<pp].size
+                    prec_pred_daily = []; prec_true_daily = [] 
+                    k2 += 1    
                 if len(prec_pred_hourly) ==3:
                     # hourly precipitation accumulation 99.9th percentile, ratio of predicted occurrences to true
                     prec_pred_hourly = np.nansum(np.reshape(np.concat(prec_pred_hourly),(72,-1)),axis=0)
@@ -638,6 +640,7 @@ class train_or_eval_one_epoch:
                     pp = np.percentile(prec_true_hourly,99.9)
                     epoch_prec_99p_hour += prec_pred_hourly[prec_pred_hourly>pp].size / prec_true_hourly[prec_true_hourly>pp].size
                     prec_pred_hourly = []; prec_true_hourly = []   
+                    k3 += 1
                 j += 1
 
             # if i>0:
@@ -701,10 +704,10 @@ class train_or_eval_one_epoch:
         self.metrics['R2_NETSW'] = epoch_R2netsw / k
         self.metrics['prec_std_frac'] = epoch_prec_std_frac / k 
         self.metrics['99p_ratio_prec'] = epoch_prec_99p_ratio / k 
-        self.metrics['99p_ratio_precday'] = epoch_prec_99p_day / k 
-        self.metrics['99p_ratio_prechour'] = epoch_prec_99p_hour / k 
-        self.metrics['1p_ratio_precday'] = epoch_prec_1p_day / k 
+        self.metrics['99p_ratio_precday'] = epoch_prec_99p_day / k2
+        self.metrics['50p_ratio_precday'] = epoch_prec_50p_day / k2
         self.metrics['99p_ratio_tend'] = epoch_tend_99p_ratio / k 
+        self.metrics['99p_ratio_prechour'] = epoch_prec_99p_hour / k3
         self.metrics['gel_precsum'] = epoch_prec_gel / k 
 
         self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
