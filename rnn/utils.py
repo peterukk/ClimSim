@@ -257,7 +257,7 @@ class train_or_eval_one_epoch:
     def eval_one_epoch(self, lossf, optim, epoch, timesteps=1, lr_scheduler=None):
         report_freq = self.report_freq
         running_loss = 0.0; running_energy = 0.0; running_water = 0.0
-        running_var=0.0; running_bias = 0.0
+        running_var=0.0; running_bias = 0.0; running_precip=0.0
         epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0; epoch_mae = 0.0
         epoch_R2precc = 0.0; epoch_R2netsw = 0.0; epoch_R2flwds = 0.0
         epoch_hcon = 0.0; epoch_wcon = 0.0
@@ -269,8 +269,9 @@ class train_or_eval_one_epoch:
         epoch_mae_lev_clw = 0.0; epoch_mae_lev_cli = 0.0
         epoch_rmse_perlev = 0.0; epoch_prec_std_frac = 0.0
         epoch_prec_99p_ratio = 0.0; epoch_tend_99p_ratio = 0.0
-        epoch_prec_99p_day = 0.0
+        epoch_prec_99p_day = 0.0; epoch_prec_99p_hour = 0.0; epoch_accumprec = 0.0
         prec_true_daily = []; prec_pred_daily = []
+        prec_true_hourly = []; prec_pred_hourly = []
         epoch_dt_std = 0.0
         t_comp =0 
         t0_it = time.time()
@@ -468,7 +469,7 @@ class train_or_eval_one_epoch:
                             loss = loss + self.cfg.w_hcon*h_con
 
                         if self.cfg.use_water_loss:
-                            loss = loss + self.cfg.w_wcon * water_con
+                            loss = loss + timesteps*self.cfg.w_wcon * water_con
                             
                     if self.train:
                         if self.cfg.use_scaler:
@@ -487,6 +488,7 @@ class train_or_eval_one_epoch:
                             huber = huber.detach(); mse = mse.detach(); mae = mae.detach()
                         h_con = h_con.detach() 
                         water_con = water_con.detach()
+                        precip_sum_mse = precip_sum_mse.detach()
                         # if self.cfg.lr_scheduler=="OneCycleLR":
                         #     lr_scheduler.step()
                           
@@ -497,6 +499,7 @@ class train_or_eval_one_epoch:
                     running_energy  += h_con.item()
                     running_water   += water_con.item()
                     running_bias    += raw_bias_lev.item() 
+                    running_precip  += precip_sum_mse.item() 
                     if self.cfg.loss_fn_type in ["CRPS","variogram_score"]: 
                         running_var += ens_var.item() 
                     #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
@@ -513,6 +516,7 @@ class train_or_eval_one_epoch:
                         
                             epoch_hcon  += h_con.item()
                             epoch_wcon  += water_con.item()
+                            epoch_accumprec += precip_sum_mse.item()
                             
                             if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
                                 epoch_ens_var += ens_var.item()
@@ -549,8 +553,8 @@ class train_or_eval_one_epoch:
                             pp = np.percentile(prec_true,99.9)
                             # pp = np.percentile(prec_true,99.8)
                             epoch_prec_99p_ratio += prec_pred[prec_pred>pp].size / prec_true[prec_true>pp].size
-                            prec_pred_daily.append(prec_pred)
-                            prec_true_daily.append(prec_true) 
+                            prec_pred_daily.append(prec_pred); prec_true_daily.append(prec_true) 
+                            prec_pred_hourly.append(prec_pred); prec_true_hourly.append(prec_true) 
 
                             ypo_lay = ypo_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
                             yto_lay = yto_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
@@ -588,31 +592,37 @@ class train_or_eval_one_epoch:
                     running_energy = running_energy / fac
                     running_water = running_water / fac
                     running_bias = running_bias / fac
-
+                    running_precip = running_precip / fac
                     r2raw = self.metric_R2.compute()
 
                     if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
                         running_var = running_var / fac
 
-                        print("[{:d}, {:d}] Loss: {:.2e} var {:.2e} h-con: {:.2e}  w-con: {:.2e}  MBE: {:.2e}  R2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
-                                                        j+1, running_loss,running_var, running_energy,running_water, running_bias,r2raw, elaps, t_comp), flush=True)
+                        print("[{:d}, {:d}] Loss: {:.2e} var {:.2e} h-con: {:.2e}  w-con: {:.2e}  accumprec: {:.2e}  R2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
+                                                        j+1, running_loss,running_var, running_energy,running_water, running_precip,r2raw, elaps, t_comp), flush=True)
                         running_var = 0.0
                     else:
-                        print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  MBE: {:.2e}  R2: {:.2f},  took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
-                                                        j+1, running_loss,running_energy,running_water,running_bias, r2raw, elaps, t_comp), flush=True)
+                        print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  accumprec: {:.2e}  R2: {:.2f},  took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
+                                                        j+1, running_loss,running_energy,running_water,running_precip, r2raw, elaps, t_comp), flush=True)
                     running_loss = 0.0
                     running_energy = 0.0; running_water=0.0
-                    running_bias = 0.0
+                    running_bias = 0.0; running_precip=0.0
                     t0_it = time.time()
                     t_comp = 0
                 if len(prec_pred_daily) ==72:
-                    # daily precipitation accumulation
+                    # daily precipitation accumulation 99.9th percentile, ratio of predicted occurrences to true
                     prec_pred_daily = np.nansum(np.reshape(np.concat(prec_pred_daily),(72,-1)),axis=0)
                     prec_true_daily = np.nansum(np.reshape(np.concat(prec_true_daily),(72,-1)),axis=0)
                     pp = np.percentile(prec_true_daily,99.9)
                     epoch_prec_99p_day += prec_pred_daily[prec_pred_daily>pp].size / prec_true_daily[prec_true_daily>pp].size
-                    k2 += 1 
                     prec_pred_daily = []; prec_true_daily = []
+                if len(prec_pred_hourly) ==3:
+                    # hourly precipitation accumulation 99.9th percentile, ratio of predicted occurrences to true
+                    prec_pred_hourly = np.nansum(np.reshape(np.concat(prec_pred_hourly),(72,-1)),axis=0)
+                    prec_true_hourly = np.nansum(np.reshape(np.concat(prec_true_hourly),(72,-1)),axis=0)
+                    pp = np.percentile(prec_true_hourly,99.9)
+                    epoch_prec_99p_hour += prec_pred_hourly[prec_pred_hourly>pp].size / prec_true_hourly[prec_true_hourly>pp].size
+                    prec_pred_hourly = []; prec_true_hourly = []   
                 j += 1
 
             # if i>0:
@@ -639,6 +649,7 @@ class train_or_eval_one_epoch:
                 self.metrics['dt_ens_std']  = epoch_dt_std / k
         self.metrics["h_conservation"] =  epoch_hcon / k
         self.metrics["water_conservation"] =  epoch_wcon / k
+        self.metrics["precip_accum_mse"] = epoch_accumprec / k
 
         self.metrics["bias_lev"] = epoch_bias_lev / k 
         self.metrics["bias_lev_noabs"] = epoch_bias_lev_tot / k 
@@ -676,6 +687,7 @@ class train_or_eval_one_epoch:
         self.metrics['prec_std_frac'] = epoch_prec_std_frac / k 
         self.metrics['99p_ratio_prec'] = epoch_prec_99p_ratio / k 
         self.metrics['99p_ratio_precday'] = epoch_prec_99p_day / k 
+        self.metrics['99p_ratio_prechour'] = epoch_prec_99p_hour / k 
         self.metrics['99p_ratio_tend'] = epoch_tend_99p_ratio / k 
 
         self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
