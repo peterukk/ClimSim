@@ -20,6 +20,7 @@ import time
 from metrics import corrcoeff_pairs_batchfirst 
 import matplotlib
 import matplotlib.pyplot as plt
+import random
 # from pickle import dump
 
 lbd_qi_lev = np.array([10000000.        , 10000000.        , 10000000.        ,
@@ -220,7 +221,7 @@ class train_or_eval_one_epoch:
                  device, dtype,
                  cfg, 
                  metrics_det, metric_h_con, metric_water_con, 
-                 batch_size = 384, train=True,):
+                 batch_size = 384, train=True, replay=False):
         super().__init__()
         self.loader = dataloader
         self.batch_size = batch_size
@@ -233,6 +234,12 @@ class train_or_eval_one_epoch:
         if self.cfg.use_scaler:
             # scaler = torch.amp.GradScaler(autocast = True)
             self.scaler = torch.amp.GradScaler(self.device.type)
+        if self.train:
+            self.replay = self.cfg.train_replay 
+        else:
+            self.replay = self.cfg.val_replay
+        if (not self.cfg.include_prev_outputs) and self.replay in ["full", "mixed"]:
+            raise NotImplementedError()
         # if self.cfg.mp_mode>0:
         self.ny_pp = 6 # Regardless of MP constraint, 6 postprocessed output features per level
         # Loss functions to be computed, possibly part of overall loss
@@ -294,6 +301,7 @@ class train_or_eval_one_epoch:
             targets_lay = []; targets_sfc = [] 
             x_sfc = [];  x_lay_raw = []
             yto_lay = []; yto_sfc = []
+            inds_rnd = 0; prev_outputs = 0 
             rnn1_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev_mem, self.model.nh_mem, device=device)
             loss_update_start_index = 60
         else:
@@ -351,11 +359,22 @@ class train_or_eval_one_epoch:
                 target_sfc0 = targets_sfc_chk[ichunk]
                 yto_lay0 = yto_lay_chk[ichunk]
                 yto_sfc0 = yto_sfc_chk[ichunk]
-                # print("shape xlay 0", x_lay0.shape)
 
                 tcomp0= time.time()               
                 
                 with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
+                    if j>timesteps:
+                      if self.replay=="full":
+                        x_lay0 = torch.cat((x_lay0[:,:,0:-5], prev_outputs),dim=2)
+                      elif self.replay=="mixed":
+                        # x_lay0[:,:,-5:] = preds_lay0[:,:,0:5]
+                        # x_lay0 = torch.cat((x_lay0[:,:,0:-5], prev_outputs),dim=2)
+                        # use random_inds here
+                        x_lay0_new = torch.clone(x_lay0)
+                        # print("shape x0", x_lay0.shape, "[rnd], ", x_lay0_new[inds_rnd].shape)
+                        x_lay0_new[inds_rnd,:,-5:] = prev_outputs[inds_rnd,:,0:5]
+                        x_lay0 = x_lay0_new
+
                     inp_list = [x_lay0, x_sfc0]
                     if self.cfg.autoregressive:
                         inp_list.append(rnn1_mem)
@@ -379,7 +398,10 @@ class train_or_eval_one_epoch:
                                 preds_lay0, preds_sfc0, rnn1_mem = outs
                     else:
                         preds_lay0, preds_sfc0 = outs
-
+                    prev_outputs = preds_lay0[:,:,0:5].float()
+                    # print("prevP", prev_outputs[:,:,0].detach().cpu().numpy().mean(), "prevT", target_lay0[:,:,0].detach().cpu().numpy().mean())
+                    # print("prevT x", x_lay0[:,:,-5].detach().cpu().numpy().mean())
+                    
                 if self.cfg.autoregressive:
                     # In the autoregressive training case are gathering many time steps before computing loss
                     preds_lay.append(preds_lay0); preds_sfc.append(preds_sfc0)
@@ -503,7 +525,8 @@ class train_or_eval_one_epoch:
                           
                     ypo_lay = ypo_lay.detach(); ypo_sfc = ypo_sfc.detach()
                     yto_lay = yto_lay.detach(); yto_sfc = yto_sfc.detach()
-                        
+                    prev_outputs = prev_outputs.detach()
+     
                     running_loss    += loss.item()
                     running_energy  += h_con.item()
                     running_water   += water_con.item()
@@ -594,7 +617,12 @@ class train_or_eval_one_epoch:
                         x_lay_raw = []; yto_lay = []; yto_sfc = []
                         x_sfc = []
                         rnn1_mem = rnn1_mem.detach()
-                        
+                        # now pick random indices comprising 50% of total indices, where we will use past predictions instead of past truth
+                        # random_inds =
+                        inds_all = list(np.arange(self.batch_size))
+                        nrandom = self.batch_size//2
+                        inds_rnd = random.sample(inds_all, nrandom)
+
                 t_comp += time.time() - tcomp0
                 # # print statistics 
                 if j % report_freq == (report_freq-1): # print every 200 minibatches

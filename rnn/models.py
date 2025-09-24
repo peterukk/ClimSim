@@ -677,7 +677,8 @@ class LSTM_autoreg_torchscript(nn.Module):
             # else:
             out[:,0:12,1:] = out[:,0:12,1:].clone().zero_()
         
-        out_sfc = self.mlp_surface_output(final_sfc_inp)
+        if not (self.physical_precip and self.separate_radiation):
+            out_sfc = self.mlp_surface_output(final_sfc_inp)
         
         # print("shape out", out.shape)
         
@@ -722,7 +723,8 @@ class LSTM_autoreg_torchscript(nn.Module):
             # print("shape 1", out_sfc_rad.shape, "2", out_sfc.shape)
             out_sfc_rad = torch.squeeze(out_sfc_rad)
             # rad predicts everything except PRECSC, PRECC
-            out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
+            if not self.physical_precip:
+                out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
             
         # if self.diagnose_precip: 
         #   dT_precip = out[:,:,5]
@@ -822,11 +824,11 @@ class LSTM_autoreg_torchscript(nn.Module):
           temp_sfc = (inputs_main[:,-1,0:1]*self.xdiv_lev[-1,0:1]) + self.xmean_lev[-1,0:1]
           snowfrac = self.temperature_scaling_precip(temp_sfc)
           precsc = snowfrac*precc
-          # apply norm
-          # print("dTp", torch.sum(dT_precip,1)[1].item(), "dqv", torch.sum(dqv_precip,1)[1].item(), "dqn_precip", torch.sum(dqn_precip,1)[1].item() )
-          # print("precc 1", precc[1].item(), "precsc", precsc[1].item())
 
-          out_sfc =  torch.cat((out_sfc[:,0:2], precsc, precc, out_sfc[:,2:]),dim=1)    
+          if self.separate_radiation:
+              out_sfc =  torch.cat((out_sfc_rad[:,0:2], precsc, precc, out_sfc_rad[:,2:]),dim=1)
+          else:
+              out_sfc =  torch.cat((out_sfc[:,0:2], precsc, precc, out_sfc[:,2:]),dim=1)    
         
         # else:
         out_sfc = self.relu(out_sfc)

@@ -1,16 +1,15 @@
 tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedyear_nocompress_chunk3.h5
 # tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_gzip8_chunk1_subset.h5
 # tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_nocompress_chunk3.h5
-#tr_data_fname: train_v4_rnn_nonorm_febtofeb_y1-7_stackedyear_nocompress_chunk3.h5
 val_data_fname: data_v4_rnn_nonorm_year8_nocompress_chunk3.h5
-tr_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
-val_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
+# tr_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
+# val_data_dir: "/data/phys-climsim/low-res-expanded/train/preprocessed/"
 #tr_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
 #val_data_dir: "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/"
 #tr_data_dir: "/gpfs/projects/ehpc272/low_res_expanded/"
 #val_data_dir: "/gpfs/projects/ehpc272/low_res_expanded/"
-#tr_data_dir: "/data/ClimSim/"
-#val_data_dir: "/data/ClimSim/"
+tr_data_dir: "/data/ClimSim/"
+val_data_dir: "/data/ClimSim/"
 
 checkpoint_path: ""
 
@@ -24,7 +23,6 @@ val_cache: false
 num_workers: 4
 chunksize_train: 24
 chunksize_val: 14
-
 batch_size_tr: 3840
 batch_size_val: 384
 val_epoch_start: 0
@@ -39,6 +37,18 @@ physical_precip: false
 input_norm_per_level: true
 output_norm_per_level: true
 new_nolev_scaling: false
+output_prune: true
+qinput_prune: true
+rh_prune: true
+remove_past_sfc_inputs: true
+v4_to_v5_inputs: false
+include_prev_inputs: false
+include_prev_outputs: false
+train_replay: "none" 
+val_replay: "none"
+use_surface_memory: false
+snowhice_fix: true
+
 # loss_fn_type: mse
 loss_fn_type: huber
 use_energy_loss: true
@@ -54,16 +64,7 @@ use_precip_accum_loss: false
 w_precmse: 1.66e12
 use_precip_gel_loss: false 
 w_precgel: 0.001
-gel_lambda_prec: 200.0
-output_prune: true
-qinput_prune: true
-rh_prune: true
-remove_past_sfc_inputs: true
-v4_to_v5_inputs: false
-include_prev_inputs: false
-include_prev_outputs: false
-use_surface_memory: false
-snowhice_fix: true
+gel_lambda_prec: 20.0
 
 nh_mem: 16
 nneur:
@@ -113,4 +114,3 @@ rollout_schedule:
 - 5
 - 6
 - 6
-swap_true_mem_with_pred_epoch: 0
