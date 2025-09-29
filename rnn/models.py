@@ -345,6 +345,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
+            # should we include large-scale tendencies from the lowest level here?
         else:
             self.nx_rnn1 = nx
                 
@@ -1504,7 +1505,6 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
     add_pres: Final[bool]
     output_prune: Final[bool]
     use_ensemble: Final[bool]
-    ensemble_size: Final[int]
     # use_memory: Final[bool]
     # separate_radiation: Final[bool]
     # diagnose_precip: Final[bool]
@@ -1521,7 +1521,6 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
                 use_memory=False,
                 separate_radiation=False,
                 use_ensemble=False,
-                ensemble_size=2,
                 coeff_stochastic = 0.0,
                 nh_mem=16):
         super(LSTM_autoreg_torchscript_perturb, self).__init__()
@@ -1548,7 +1547,7 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         self.nh_rnn4 = self.nneur[1]
         # self.use_memory= use_memory
         self.use_ensemble = use_ensemble
-        self.ensemble_size = ensemble_size
+        # self.ensemble_size = ensemble_size
 
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
@@ -2500,17 +2499,7 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
                     eps_prev = eps_prev[0]
                 else:
                     raise NotImplementedError("two_eps_variables was set to True but only one was provided")
-        if self.use_ensemble:
-            ensemble_size = rnn1_mem.shape[0] // inputs_main.shape[0]
-            inputs_main = inputs_main.unsqueeze(0)
-            inputs_aux = inputs_aux.unsqueeze(0)
-            # inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
-            # inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
-            inputs_main = torch.repeat_interleave(inputs_main,repeats=ensemble_size,dim=0)
-            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=ensemble_size,dim=0)
-            inputs_main = inputs_main.flatten(0,1)
-            inputs_aux = inputs_aux.flatten(0,1)
-                    
+
         if self.add_pres:
             sp = torch.unsqueeze(inputs_aux[:,0:1],1)
             # undo scaling
@@ -2555,7 +2544,7 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         hx2 = self.nonlin(hx2)
         
         if self.use_lstm:
-            cx2 = self.mlp_toa(inputs_toa)
+            cx2 = self.mlp_toa2(inputs_toa)
             cx2 = self.nonlin(cx2)
             hidden = (hx2, cx2)
             if self.use_ar_noise:
@@ -2827,17 +2816,6 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
                     eps_prev = eps_prev[0]
                 else:
                     raise NotImplementedError("two_eps_variables was set to True but only one was provided")
-        if self.use_ensemble:
-            ensemble_size = rnn1_mem.shape[0] // inputs_main.shape[0]
-            inputs_main = inputs_main.unsqueeze(0)
-            inputs_aux = inputs_aux.unsqueeze(0)
-            inputs_main = torch.repeat_interleave(inputs_main,repeats=ensemble_size,dim=0)
-            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=ensemble_size,dim=0)
-            # inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
-            # inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
-            inputs_main = inputs_main.flatten(0,1)
-            inputs_aux = inputs_aux.flatten(0,1)
-            # print("shape inp main", inputs_main.shape)
                     
         if self.add_pres:
             sp = torch.unsqueeze(inputs_aux[:,0:1],1)
@@ -2873,7 +2851,7 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         hx2 = self.mlp_toa(inputs_toa)
         hx2 = self.nonlin(hx2)
         if self.use_lstm:
-            cx2 = self.mlp_toa(inputs_toa)
+            cx2 = self.mlp_toa2(inputs_toa)
             cx2 = self.nonlin(cx2)
             hidden = (hx2, cx2)
             # out, states = self.rnn2(rnn1out, hidden)
@@ -2930,6 +2908,239 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
             return out, out_sfc, rnn1_mem, eps_prev
         else:
             return out, out_sfc, rnn1_mem
+        
+class barelystochastic_RNN_autoreg_torchscript(nn.Module):
+    use_initial_mlp: Final[bool]
+    use_intermediate_mlp: Final[bool]
+    add_pres: Final[bool]
+    output_prune: Final[bool]
+    use_ensemble: Final[bool]
+    separate_radiation: Final[bool]
+    diagnose_precip: Final[bool]
+    use_surface_memory: Final[bool]
+    def __init__(self, hyam, hybm,  hyai, hybi,
+                out_scale, out_sfc_scale, 
+                xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
+                device,
+                nlev=60, nx = 4, nx_sfc=3, ny = 4, ny_sfc=3, nneur=(64,64), 
+                use_initial_mlp=False, 
+                use_intermediate_mlp=True,
+                add_pres=False,
+                output_prune=False,
+                use_ensemble=True,
+                use_surface_memory=False,
+                ar_tau = 0.85,
+                nh_mem=64):
+
+        super(barelystochastic_RNN_autoreg_torchscript, self).__init__()
+        self.ny = ny 
+        self.ny0 = ny 
+        self.nlev = nlev 
+        self.nlev_mem = nlev
+        self.nx_sfc = nx_sfc 
+        self.ny_sfc = ny_sfc
+        self.ny_sfc0 = ny_sfc
+        self.nneur = nneur 
+        self.use_initial_mlp=use_initial_mlp
+        self.output_prune = output_prune
+        self.add_pres = add_pres
+        if self.add_pres:
+            self.preslay = LayerPressure(hyam,hybm)
+            nx = nx +1
+        self.nx = nx
+        self.nh_rnn1 = self.nneur[0] # first LSTM predicts mu and sigma, used to draw from a distribution at each height
+        self.nx_rnn2 = self.nneur[0] // 2
+        self.nh_rnn2 = self.nneur[1]
+        self.use_ensemble = use_ensemble
+        if self.use_initial_mlp:
+            self.nx_rnn1 = self.nneur[0]
+        else:
+            self.nx_rnn1 = nx
+        self.nonlin = nn.Tanh()
+        self.relu = nn.ReLU()
+        yscale_lev = torch.from_numpy(out_scale).to(device)
+        yscale_sca = torch.from_numpy(out_sfc_scale).to(device)
+        xmean_lev  = torch.from_numpy(xmean_lev).to(device)
+        xmean_sca  = torch.from_numpy(xmean_sca).to(device)
+        xdiv_lev   = torch.from_numpy(xdiv_lev).to(device)
+        xdiv_sca   = torch.from_numpy(xdiv_sca).to(device)
+        
+        self.register_buffer('yscale_lev', yscale_lev)
+        self.register_buffer('yscale_sca', yscale_sca)
+        self.register_buffer('xmean_lev', xmean_lev)
+        self.register_buffer('xmean_sca', xmean_sca)
+        self.register_buffer('xdiv_lev', xdiv_lev)
+        self.register_buffer('xdiv_sca', xdiv_sca)
+        self.register_buffer('hyai', hyai)
+        self.register_buffer('hybi', hybi)
+        self.use_intermediate_mlp=use_intermediate_mlp
+            
+        if self.use_intermediate_mlp:
+            self.nh_mem = nh_mem
+        else:
+            self.nh_mem = self.nneur[1]
+        self.use_surface_memory = use_surface_memory
+        if self.use_surface_memory:
+            self.nh_mem = self.nh_mem + 2 
+            print("Using surface memory, updated nh_mem", self.nh_mem)
+        print("Building det + stochastic RNN that feeds its hidden memory at t0,z0 to its inputs at t1,z0")
+ 
+        print("Initial mlp: {}, intermediate mlp: {}".format(self.use_initial_mlp, self.use_intermediate_mlp))
+ 
+        self.nx_rnn1 = self.nx_rnn1 + self.nh_mem
+        self.nh_rnn1 = self.nneur[0]
+        
+        print("nx rnn1", self.nx_rnn1, "nh rnn1", self.nh_rnn1)
+        print("nx rnn2", self.nx_rnn2, "nh rnn2", self.nh_rnn2)  
+        print("nx sfc", self.nx_sfc)
+        print("nh mem", self.nh_mem)
+
+        if self.use_initial_mlp:
+            print("use initial mpl on, nx {} nh {}".format(nx,self.nneur[0]))
+            self.mlp_initial = nn.Linear(nx, self.nneur[0])
+
+        self.mlp_surface    = nn.Linear(self.nx_sfc, self.nh_rnn1)
+        self.mlp_toa        = nn.Linear(2, self.nh_rnn2)
+        
+        use_bias=False
+        self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=False) 
+        self.rnn2      = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=False) 
+
+        nh_rnn = self.nh_rnn2
+
+        if self.use_intermediate_mlp: 
+            self.mlp_latent = nn.Linear(nh_rnn, self.nh_mem)
+            self.mlp_output = nn.Linear(self.nh_mem, self.ny0)
+        else:
+            self.mlp_output = nn.Linear(nh_rnn, self.ny0)
+            
+        self.ny_sfc_prec = 2
+        self.ny_sfc_rad = self.ny_sfc - self.ny_sfc_prec
+        self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc_rad)
+        self.mlp_surface_output_mu = nn.Linear(nneur[-1], self.ny_sfc_prec)
+        self.mlp_surface_output_sigma = nn.Linear(nneur[-1], self.ny_sfc_prec)
+
+    def temperature_scaling(self, T_raw):
+        liquid_ratio = (T_raw - 253.16) * 0.05 
+        liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
+        return liquid_ratio
+
+    def temperature_scaling_precip(self, temp_surface):
+        snow_frac = (283.3 - temp_surface) /  14.6
+        snow_frac = F.hardtanh(snow_frac, 0.0, 1.0)
+        return snow_frac 
+    
+    def postprocessing(self, out, out_sfc):
+        out             = out / self.yscale_lev
+        out_sfc         = out_sfc / self.yscale_sca
+        return out, out_sfc
+        
+    def pp_mp(self, out, out_sfc, x_denorm):
+        out_denorm      = out / self.yscale_lev
+        out_sfc_denorm  = out_sfc / self.yscale_sca
+        T_before        = x_denorm[:,:,0:1]
+        qliq_before     = x_denorm[:,:,2:3]
+        qice_before     = x_denorm[:,:,3:4]   
+        qn_before       = qliq_before + qice_before 
+        T_new           = T_before  + out_denorm[:,:,0:1]*1200
+        liq_frac_constrained    = self.temperature_scaling(T_new)
+        #                            dqn
+        qn_new      = qn_before + out_denorm[:,:,2:3]*1200  
+        qliq_new    = liq_frac_constrained*qn_new
+        qice_new    = (1-liq_frac_constrained)*qn_new
+        dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
+        dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
+        out_denorm  = torch.cat((out_denorm[:,:,0:2], dqliq, dqice, out_denorm[:,:,3:]),dim=2)
+        
+        return out_denorm, out_sfc_denorm
+    
+    def forward(self, inp_list : List[Tensor]):
+        inputs_main   = inp_list[0]
+        inputs_aux    = inp_list[1]
+        rnn1_mem      = inp_list[2]
+        if self.use_ar_noise:
+            eps_prev  = inp_list[3]
+            if self.two_eps_variables:
+                if eps_prev.shape[0]==2:
+                    eps_prev2 = eps_prev[1]
+                    eps_prev = eps_prev[0]
+                else:
+                    raise NotImplementedError("two_eps_variables was set to True but only one was provided")
+                    
+        if self.add_pres:
+            sp = torch.unsqueeze(inputs_aux[:,0:1],1)
+            # undo scaling
+            sp = sp*35451.17 + 98623.664
+            pres  = self.preslay(sp)
+            inputs_main = torch.cat((inputs_main,pres),dim=2)
+
+            
+        if self.use_initial_mlp:
+            inputs_main = self.mlp_initial(inputs_main)
+            inputs_main = self.nonlin(inputs_main)  
+            
+        inputs_main = torch.cat((inputs_main,rnn1_mem), dim=2)
+            
+        rnn1_input =  torch.flip(inputs_main, [1])
+
+        inputs_sfc = inputs_aux
+        hx = self.mlp_surface(inputs_sfc)
+        hx = self.nonlin(hx)
+        cx = self.mlp_surface2(inputs_sfc)
+        # cx = self.nonlin(cx)
+        # cx = torch.randn_like()
+
+        hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
+
+        rnn1out, states = self.rnn1(rnn1_input, hidden)
+        
+        rnn1out = torch.flip(rnn1out, [0])
+
+        inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
+        hx2 = self.mlp_toa(inputs_toa)
+        hx2 = self.nonlin(hx2)
+        cx2 = self.mlp_toa(inputs_toa)
+        cx2 = self.nonlin(cx2)
+        hidden = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
+
+        # out, states = self.rnn2(rnn1out, hidden)
+        mean_, logvar_ = rnn1out.chunk(2,2)
+        del rnn1out 
+        eps = torch.randn_like(mean_)
+        sigma = torch.exp(0.5*logvar_)
+        rnn2in = mean_ + eps * sigma
+        out, state = self.rnn2(rnn2in, hidden)
+        
+        last_hidden = out[-1,:]
+        
+        if self.use_intermediate_mlp: 
+            out = self.mlp_latent(out)
+          
+        rnn1_mem = out
+      
+        out = self.mlp_output(out)
+
+        if self.output_prune:
+            out[:,0:12,1:] = out[:,0:12,1:].clone().zero_()
+        
+        out_sfc_rad = self.mlp_surface_output(last_hidden)
+
+        sfc_mean_ = self.mlp_surface_output_mu(last_hidden)
+        sfc_logvar_ = self.mlp_surface_output_sigma(last_hidden)
+
+        eps = torch.randn_like(sfc_mean_)
+        sigma = torch.exp(0.5*sfc_logvar_)
+        out_sfc = sfc_mean_ + eps * sigma
+        if self.use_surface_memory:
+            prec = torch.reshape(out_sfc,(-1,1,2))
+            prec = torch.repeat_interleave(prec,self.nlev,dim=1)
+            rnn1_mem = torch.cat((rnn1_mem[:,:,0:self.nh_mem-2:],prec),dim=2)
+
+        out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
+
+        out_sfc = self.relu(out_sfc)
+
+        return out, out_sfc, rnn1_mem
             
 class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
     use_initial_mlp: Final[bool]
@@ -3133,7 +3344,7 @@ class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
         hx2 = self.mlp_toa(inputs_toa)
         hx2 = self.nonlin(hx2)
         if self.use_lstm:
-            cx2 = self.mlp_toa(inputs_toa)
+            cx2 = self.mlp_toa2(inputs_toa)
             cx2 = self.nonlin(cx2)
             hidden = (hx2, cx2)
             rnn2out, states = self.rnn2(rnn1out, hidden)
@@ -3175,7 +3386,6 @@ class LSTM_torchscript(nn.Module):
     add_thetae: Final[bool]
     add_stochastic_layer: Final[bool]
     output_prune: Final[bool]
-    ensemble_size: Final[int]
     concat: Final[bool]
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
@@ -3189,7 +3399,6 @@ class LSTM_torchscript(nn.Module):
                 concat=False,
                 add_stochastic_layer=False,
                 output_prune=False,
-                ensemble_size=1,
                 coeff_stochastic = 0.0,
                 nh_mem=16):
         super(LSTM_torchscript, self).__init__()
@@ -3213,7 +3422,6 @@ class LSTM_torchscript(nn.Module):
         self.nx_rnn2 = self.nneur[0]
         self.nh_rnn2 = self.nneur[1]
         self.concat=concat
-        self.ensemble_size = ensemble_size
         self.add_stochastic_layer = add_stochastic_layer
         self.coeff_stochastic = coeff_stochastic
         self.nonlin = nn.Tanh()
@@ -3321,13 +3529,13 @@ class LSTM_torchscript(nn.Module):
         return out_denorm, out_sfc_denorm
     
     def forward(self, inputs_main, inputs_aux):
-        if self.ensemble_size>0:
-            inputs_main = inputs_main.unsqueeze(0)
-            inputs_aux = inputs_aux.unsqueeze(0)
-            inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
-            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
-            inputs_main = inputs_main.flatten(0,1)
-            inputs_aux = inputs_aux.flatten(0,1)
+        # if self.ensemble_size>0:
+        #     inputs_main = inputs_main.unsqueeze(0)
+        #     inputs_aux = inputs_aux.unsqueeze(0)
+        #     inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
+        #     inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
+        #     inputs_main = inputs_main.flatten(0,1)
+        #     inputs_aux = inputs_aux.flatten(0,1)
                     
         batch_size = inputs_main.shape[0]
         # print("shape inputs main", inputs_main.shape)

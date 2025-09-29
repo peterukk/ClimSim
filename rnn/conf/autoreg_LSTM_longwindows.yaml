@@ -27,7 +27,7 @@ batch_size_tr: 3840
 batch_size_val: 384
 val_epoch_start: 0
 
-model_file_checkpoint: None
+model_file_checkpoint: ""
 
 autoregressive: true
 ar_noise_mode: 0
@@ -46,6 +46,7 @@ include_prev_inputs: false
 include_prev_outputs: false
 train_replay: "none" 
 val_replay: "none"
+gradual_mixing_end_epoch: 0
 use_surface_memory: false
 snowhice_fix: true
 
@@ -65,6 +66,8 @@ w_precmse: 1.66e12
 use_precip_gel_loss: false 
 w_precgel: 0.001
 gel_lambda_prec: 20.0
+use_gel_loss: false 
+w_gel: 0.01
 
 nh_mem: 16
 nneur:

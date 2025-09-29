@@ -251,6 +251,7 @@ class train_or_eval_one_epoch:
         # gel_lambda_prec = 250.0
         gel_lambda_prec = cfg.gel_lambda_prec
         self.metric_precip_gel = metrics.get_GEL_precip(gel_lambda_prec)
+        self.metric_gel = metrics.get_GEL(250.0)
         # The computed values of various metrics are stored at the end
         self.metrics = {}
         
@@ -267,17 +268,17 @@ class train_or_eval_one_epoch:
     def eval_one_epoch(self, lossf, optim, epoch, timesteps=1, lr_scheduler=None):
         report_freq = self.report_freq
         running_loss = 0.0; running_energy = 0.0; running_water = 0.0
-        running_var=0.0; running_bias = 0.0; running_precip=0.0
+        running_var=0.0; running_det=0.0; running_bias = 0.0; running_precip=0.0; running_gel = 0.0
         epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0; epoch_mae = 0.0
         epoch_R2precc = 0.0; epoch_R2netsw = 0.0; epoch_R2flwds = 0.0
-        epoch_hcon = 0.0; epoch_wcon = 0.0
+        epoch_hcon = 0.0; epoch_wcon = 0.0; epoch_gel = 0.0
         epoch_ens_var = 0.0; epoch_det_skill = 0.0; epoch_spreadskill = 0.0
         epoch_r2_lev = 0.0
         epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
         epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
         epoch_bias_lev_tot = 0.0; epoch_bias_perlev= 0.0
         epoch_mae_lev_clw = 0.0; epoch_mae_lev_cli = 0.0
-        epoch_rmse_perlev = 0.0; epoch_prec_std_frac = 0.0
+        epoch_rmse_perlev = 0.0; epoch_prec_std_frac = 0.0; epoch_hum_std_ratio = 0.0
         epoch_prec_99p_ratio = 0.0; epoch_tend_99p_ratio = 0.0
         epoch_prec_99p_day = 0.0; epoch_prec_99p_hour = 0.0
         epoch_prec_50p_day = 0.0; epoch_accumprec = 0.0; epoch_prec_gel = 0.0
@@ -286,7 +287,8 @@ class train_or_eval_one_epoch:
         epoch_dt_std = 0.0
         t_comp =0 
         t0_it = time.time()
-        j = 0; k = 0; k2=0; k3 = 0    
+        j = 0; k = 0; k2=0; k3 = 0 
+        mixing_frac = 0.0
         device = self.device
         # torch.cuda.memory._record_memory_history(enabled='all')
 
@@ -360,7 +362,27 @@ class train_or_eval_one_epoch:
                 yto_lay0 = yto_lay_chk[ichunk]
                 yto_sfc0 = yto_sfc_chk[ichunk]
 
-                tcomp0= time.time()               
+                tcomp0= time.time()     
+                # print("true min max", torch.min(target_lay0[:,:]).item(), torch.max(target_lay0[:,:]).item(), "std", torch.std(target_lay0[:,:]).item())
+                # print("true mean", torch.mean(torch.abs(target_lay0)).item())
+                # print("true sfc mean", torch.mean(torch.abs(target_sfc0)).item())
+
+                # print("true min max 0", torch.min(target_lay0[:,:,0]).item(), torch.max(target_lay0[:,:,0]).item(), "std", torch.std(target_lay0[:,:,0]).item())
+                # print("true min max 1", torch.min(target_lay0[:,:,1]).item(), torch.max(target_lay0[:,:,1]).item(), "std", torch.std(target_lay0[:,:,1]).item())
+                # print("true min max 2", torch.min(target_lay0[:,:,2]).item(), torch.max(target_lay0[:,:,2]).item(), "std", torch.std(target_lay0[:,:,2]).item())
+                # print("true min max 3", torch.min(target_lay0[:,:,3]).item(), torch.max(target_lay0[:,:,3]).item(), "std", torch.std(target_lay0[:,:,3]).item())
+                # print("true min max 4", torch.min(target_lay0[:,:,4]).item(), torch.max(target_lay0[:,:,4]).item(), "std", torch.std(target_lay0[:,:,4]).item())
+                # print("true min max 5", torch.min(target_lay0[:,:,5]).item(), torch.max(target_lay0[:,:,5]).item(), "std", torch.std(target_lay0[:,:,5]).item())
+                # print("true  sfcmin max ", torch.min(target_sfc0[:,:]).item(), torch.max(target_sfc0[:,:]).item(), "std", torch.std(yto_sfc0[:,:]).item())
+
+                if self.use_ensemble:
+                  x_lay0 = x_lay0.unsqueeze(0)
+                  x_lay0 = torch.repeat_interleave(x_lay0,repeats=self.cfg.ensemble_size,dim=0)
+                  x_lay0 = x_lay0.flatten(0,1)
+                  x_sfc0 = x_sfc0.unsqueeze(0)
+                  x_sfc0 = torch.repeat_interleave(x_sfc0,repeats=self.cfg.ensemble_size,dim=0)
+                  x_sfc0 = x_sfc0.flatten(0,1)
+                  # print("shape inp main", inputs_main.shape)          
                 
                 with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
                     if j>timesteps:
@@ -401,7 +423,18 @@ class train_or_eval_one_epoch:
                     prev_outputs = preds_lay0[:,:,0:5].float()
                     # print("prevP", prev_outputs[:,:,0].detach().cpu().numpy().mean(), "prevT", target_lay0[:,:,0].detach().cpu().numpy().mean())
                     # print("prevT x", x_lay0[:,:,-5].detach().cpu().numpy().mean())
-                    
+                    # print("pred min max 0", torch.min(preds_lay0[:,:]).item(), torch.max(preds_lay0[:,:]).item(), "std", torch.std(preds_lay0[:,:]).item())
+                    # print("pred mean", torch.mean(torch.abs(preds_lay0)).item())
+                    # print("pred sfc mean", torch.mean(torch.abs(preds_sfc0)).item())
+
+                    # print("pred min max 0", torch.min(preds_lay0[:,:,0]).item(), torch.max(preds_lay0[:,:,0]).item(), "std", torch.std(preds_lay0[:,:,0]).item())
+                    # print("pred min max 1", torch.min(preds_lay0[:,:,1]).item(), torch.max(preds_lay0[:,:,1]).item(), "std", torch.std(preds_lay0[:,:,1]).item())
+                    # print("pred min max 2", torch.min(preds_lay0[:,:,2]).item(), torch.max(preds_lay0[:,:,2]).item(), "std", torch.std(preds_lay0[:,:,2]).item())
+                    # print("pred min max 3", torch.min(preds_lay0[:,:,3]).item(), torch.max(preds_lay0[:,:,3]).item(), "std", torch.std(preds_lay0[:,:,3]).item())
+                    # print("pred min max 4", torch.min(preds_lay0[:,:,4]).item(), torch.max(preds_lay0[:,:,4]).item(), "std", torch.std(preds_lay0[:,:,4]).item())
+                    # print("pred min max 5", torch.min(preds_lay0[:,:,5]).item(), torch.max(preds_lay0[:,:,5]).item(), "std", torch.std(preds_lay0[:,:,5]).item())
+                    # print("pred  sfc min max ", torch.min(preds_sfc0[:,:]).item(), torch.max(preds_sfc0[:,:]).item(), "std", torch.std(preds_sfc0[:,:]).item())
+
                 if self.cfg.autoregressive:
                     # In the autoregressive training case are gathering many time steps before computing loss
                     preds_lay.append(preds_lay0); preds_sfc.append(preds_sfc0)
@@ -409,8 +442,6 @@ class train_or_eval_one_epoch:
                     x_sfc.append(x_sfc0)
                     x_lay_raw.append(x_lay_raw0)
                     yto_lay.append(yto_lay0); yto_sfc.append(yto_sfc0)
-
-
                 else:
                     preds_lay = preds_lay0; preds_sfc = preds_sfc0
                     targets_lay = target_lay0; targets_sfc = target_sfc0
@@ -450,7 +481,9 @@ class train_or_eval_one_epoch:
                             preds_lay = torch.reshape(preds_lay[:,0,:,:], shape=targets_lay.shape)
                             preds_sfc = torch.reshape(preds_sfc, (timesteps, self.cfg.ensemble_size, self.batch_size,  self.model.ny_sfc))
                             preds_sfc = torch.reshape(preds_sfc[:,0,:], shape=targets_sfc.shape)
-                                          
+                            x_sfc = torch.reshape(x_sfc,(timesteps, self.cfg.ensemble_size, self.batch_size, -1))
+                            x_sfc = torch.reshape(x_sfc[:,0,:,:], (timesteps*self.batch_size,-1))
+
                         if self.use_mp_constraint:
                             ypo_lay, ypo_sfc = self.model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
                             # with torch.no_grad(): 
@@ -472,8 +505,10 @@ class train_or_eval_one_epoch:
                         h_con           = self.metric_h_con(yto_lay, ypo_lay, surf_pres_denorm, 1) #timesteps)
                         
                         # Water conservation metric (computed over multiple timesteps since the CRM has precipitation storage not exposed to NN)
-                        water_con_p     = self.metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)
-                        water_con_t     = self.metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)#,printdebug=True)
+                        # water_con_p     = self.metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)
+                        # water_con_t     = self.metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)#,printdebug=True)
+                        water_con_p     = self.metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, 1)
+                        water_con_t     = self.metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, 1)#,printdebug=True)
                         water_con       = torch.mean(torch.square(water_con_p - water_con_t))
                         del water_con_p, water_con_t
 
@@ -486,21 +521,24 @@ class train_or_eval_one_epoch:
                         if self.cfg.use_precip_gel_loss:
                             loss = loss + self.cfg.w_precgel*precip_sum_mse
                             
-                        # if cfg.use_bias_loss:
-                        raw_bias_lev, raw_bias_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc )
-                        raw_bias_lev = torch.nanmean(raw_bias_lev)
-                        if self.cfg.use_bias_loss:
-                            loss = loss + self.cfg.w_bias*raw_bias_lev
-                        del raw_bias_sfc
-
-                        # if epoch>4:
+                        targets_lay2 = targets_lay[:,12:]; preds_lay2 = preds_lay[:,12:]
+                        gel_lev        = self.metric_gel(targets_lay2, preds_lay2)
+                        if self.cfg.use_gel_loss and j>loss_update_start_index:
+                            loss = loss + self.cfg.w_gel*gel_lev
                             
+                        raw_bias_lev, raw_bias_sfc = metrics.compute_absolute_biases(targets_lay2, targets_sfc, preds_lay2, preds_sfc)
+                        bias_tot = torch.cat((raw_bias_lev, raw_bias_sfc))
+                        bias_tot = torch.nanmean(bias_tot)
+                        if self.cfg.use_bias_loss:
+                            loss = loss + self.cfg.w_bias*(bias_tot**2)
+                                                    
                         if self.cfg.use_energy_loss: 
                             loss = loss + self.cfg.w_hcon*h_con
 
                         if self.cfg.use_water_loss:
-                            loss = loss + timesteps*self.cfg.w_wcon * water_con
-                            
+                            # loss = loss + timesteps*self.cfg.w_wcon * water_con
+                            loss = loss + self.cfg.w_wcon * water_con
+
                     if self.train:
                         if self.cfg.use_scaler:
                             self.scaler.scale(loss).backward(retain_graph=True)
@@ -520,8 +558,7 @@ class train_or_eval_one_epoch:
                         water_con = water_con.detach()
                         precip_sum_mse = precip_sum_mse.detach()
                         precip_sum_gel = precip_sum_gel.detach()
-                        # if self.cfg.lr_scheduler=="OneCycleLR":
-                        #     lr_scheduler.step()
+                        gel_lev = gel_lev.detach()
                           
                     ypo_lay = ypo_lay.detach(); ypo_sfc = ypo_sfc.detach()
                     yto_lay = yto_lay.detach(); yto_sfc = yto_sfc.detach()
@@ -530,12 +567,14 @@ class train_or_eval_one_epoch:
                     running_loss    += loss.item()
                     running_energy  += h_con.item()
                     running_water   += water_con.item()
-                    running_bias    += raw_bias_lev.item() 
-                    # running_precip  += precip_sum_mse.item() 
-                    running_precip  += precip_sum_gel.item() 
+                    running_bias    += bias_tot.item() 
+                    running_precip  += precip_sum_mse.item() 
+                    # running_precip  += precip_sum_gel.item() 
+                    running_gel     += gel_lev.item() 
 
                     if self.cfg.loss_fn_type in ["CRPS","variogram_score"]: 
                         running_var += ens_var.item() 
+                        running_det += det_skill.item() 
                     #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
                     if j>loss_update_start_index:
                         with torch.no_grad():
@@ -546,8 +585,7 @@ class train_or_eval_one_epoch:
                             epoch_huber += huber.item()
                             epoch_mse += mse.item()
                             epoch_mae += mae.item()
-                            # epoch_mae       += metrics.mean_absolute_error(targets_lay, preds_lay)
-                        
+                            epoch_gel += gel_lev.item()                 
                             epoch_hcon  += h_con.item()
                             epoch_wcon  += water_con.item()
                             epoch_accumprec += precip_sum_mse.item()
@@ -595,11 +633,14 @@ class train_or_eval_one_epoch:
                             yto_lay = yto_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
                             
                             percentile_ratios = np.zeros(self.ny_pp)
+                            std_ratios = np.zeros(self.ny_pp)
                             for ip in range(self.ny_pp):
                                 tend_true = yto_lay[:,:,ip]
                                 tend_pred = ypo_lay[:,:,ip]
                                 pp = np.percentile(tend_true,99.9)
                                 percentile_ratios[ip] = tend_pred[tend_pred>pp].size / tend_true[tend_true>pp].size
+                                std_ratios[ip] = np.std(tend_pred) / np.std(tend_true)
+                            epoch_hum_std_ratio += np.mean(std_ratios[1:-2])
                             epoch_tend_99p_ratio += np.mean(percentile_ratios)
                                 
                             epoch_r2_lev += metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay)**2
@@ -620,8 +661,15 @@ class train_or_eval_one_epoch:
                         # now pick random indices comprising 50% of total indices, where we will use past predictions instead of past truth
                         # random_inds =
                         inds_all = list(np.arange(self.batch_size))
-                        nrandom = self.batch_size//2
-                        inds_rnd = random.sample(inds_all, nrandom)
+                        if self.cfg.gradual_mixing_end_epoch != 0: # enable gradual mixing
+                            # e.g. if end_epoch is 50, 
+                            # ep=10 --> 20% of convective memory should be previous predictions, 80% should be previous true tendencies
+                            # ep=50 --> 100% should be previous predictions
+                            mixing_frac = min(epoch/self.cfg.gradual_mixing_end_epoch,1.0)
+                            nrandom = int(mixing_frac * self.batch_size)
+                        else:
+                            nrandom = self.batch_size//2
+                        inds_rnd = np.sort(random.sample(inds_all, nrandom))
 
                 t_comp += time.time() - tcomp0
                 # # print statistics 
@@ -633,20 +681,22 @@ class train_or_eval_one_epoch:
                     running_water = running_water / fac
                     running_bias = running_bias / fac
                     running_precip = running_precip / fac
+                    running_gel = running_gel / fac
+
                     r2raw = self.metric_R2.compute()
 
                     if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
                         running_var = running_var / fac
-
-                        print("[{:d}, {:d}] Loss: {:.2e} var {:.2e} h-con: {:.2e}  w-con: {:.2e}  accumprec: {:.2e}  R2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
-                                                        j+1, running_loss,running_var, running_energy,running_water, running_precip,r2raw, elaps, t_comp), flush=True)
-                        running_var = 0.0
+                        running_det = running_det / fac
+                        print("[{:d}, {:d}] Loss: {:.2e} var: {:.2e} det: {:.2e} h: {:.2e}  w: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
+                                                        j+1, running_loss,running_var, running_det, running_energy,running_water, running_precip, running_bias, r2raw, elaps, t_comp), flush=True)
+                        running_var = 0.0; running_det = 0.0
                     else:
-                        print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  accumprec: {:.2e}  R2: {:.2f},  took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
-                                                        j+1, running_loss,running_energy,running_water,running_precip, r2raw, elaps, t_comp), flush=True)
+                        print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f},  took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
+                                                        j+1, running_loss,running_energy,running_water,running_precip, running_bias, r2raw, elaps, t_comp), flush=True)
                     running_loss = 0.0
                     running_energy = 0.0; running_water=0.0
-                    running_bias = 0.0; running_precip=0.0
+                    running_bias = 0.0; running_precip=0.0; running_gel = 0.0
                     t0_it = time.time()
                     t_comp = 0
                 if len(prec_pred_daily) ==72:
@@ -696,6 +746,7 @@ class train_or_eval_one_epoch:
         self.metrics["h_conservation"] =  epoch_hcon / k
         self.metrics["water_conservation"] =  epoch_wcon / k
         self.metrics["precip_accum_mse"] = epoch_accumprec / k
+        self.metrics['gel'] = epoch_gel / k
 
         self.metrics["bias_lev"] = epoch_bias_lev / k 
         self.metrics["bias_lev_noabs"] = epoch_bias_lev_tot / k 
@@ -710,9 +761,8 @@ class train_or_eval_one_epoch:
 
         self.metrics['mean_absolute_error'] = epoch_mae / k
         #self.metrics['ks'] =  epoch_ks / k2
-        self.metrics['R2'] = self.metric_R2.compute()
         
-        
+        self.metrics['R2'] = self.metric_R2.compute()        
         self.metrics['R2_lev'] = epoch_r2_lev / k
         self.metrics['R2_heating'] = epoch_r2_lev[:,0].mean() / k
         # self.metrics['R2_moistening'] =  epoch_r2_lev[:,1].mean() / k
@@ -737,6 +787,7 @@ class train_or_eval_one_epoch:
         self.metrics['99p_ratio_tend'] = epoch_tend_99p_ratio / k 
         self.metrics['99p_ratio_prechour'] = epoch_prec_99p_hour / k3
         self.metrics['gel_precsum'] = epoch_prec_gel / k 
+        self.metrics['moisture_std_ratio'] = epoch_hum_std_ratio / k
 
         self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
         self.metrics['mae_cli'] = np.nanmean(epoch_mae_lev_cli / k)
@@ -758,6 +809,8 @@ class train_or_eval_one_epoch:
                                                             self.metrics['R2_heating'],
                                                             R2_moistening, # self.metrics['R2_moistening'],                                                              
                                                             self.metrics['R2_precc'] ))
+        if (self.replay == "mixed") and (self.cfg.gradual_mixing_end_epoch != 0):
+            print("Gradual mixing was on, {}% of previous tendencies used as convective memory came from predictions".format(100*mixing_frac))
         
         del loss, h_con, water_con
         if self.cfg.autoregressive:

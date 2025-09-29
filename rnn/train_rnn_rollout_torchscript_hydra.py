@@ -192,10 +192,8 @@ def main(cfg: DictConfig):
         vars_2D_outp.remove('ptend_q0002')
         vars_2D_outp.remove('ptend_q0003')
         vars_2D_outp.insert(2,"ptend_qn")
-        if not cfg.output_norm_per_level:
-            raise NotImplementedError("output_norm_per_level=false not compatible with mp_mode !=0")
-
-
+        # if not cfg.output_norm_per_level:
+        #     raise NotImplementedError("output_norm_per_level=false not compatible with mp_mode !=0")
 
     if cfg.include_prev_outputs:
         # if not cfg.output_norm_per_level:
@@ -270,12 +268,14 @@ def main(cfg: DictConfig):
                     5.00182069e+04, 6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
             else:
                 raise NotImplementedError()
-        if cfg.krasnopolsky_scaling:
-            ymean_lev = np.repeat(np.array([-1.8267360e-06, -2.9296985e-09,  8.0729937e-12, -2.2609501e-12,
-                    3.1241700e-07,  7.8532585e-09], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            # yscale_lev = np.repeat(np.array([42800.73,42800.73,42800.73,42800.73, 
-            #         42800.73,42800.73], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            yscale_lev = np.stack((yscale_lev,ymean_lev))
+        else:
+            raise NotImplementedError()
+        # if cfg.krasnopolsky_scaling:
+        #     ymean_lev = np.repeat(np.array([-1.8267360e-06, -2.9296985e-09,  8.0729937e-12, -2.2609501e-12,
+        #             3.1241700e-07,  7.8532585e-09], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        #     # yscale_lev = np.repeat(np.array([42800.73,42800.73,42800.73,42800.73, 
+        #     #         42800.73,42800.73], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        #     yscale_lev = np.stack((yscale_lev,ymean_lev))
 
             
     if cfg.input_norm_per_level:
@@ -586,10 +586,10 @@ def main(cfg: DictConfig):
     infostr = summary(model)
     num_params = infostr.total_params
     
-    if cfg.model_file_checkpoint != "None":
-        print("Loading existing model checkpoint from {}".format(cfg.model_file_checkpoint))
-        checkpoint = torch.load("saved_models/"+cfg.model_file_checkpoint, weights_only=True)
-        model.load_state_dict(checkpoint['model_state_dict'])
+    # if cfg.model_file_checkpoint != "None":
+    #     print("Loading existing model checkpoint from {}".format(cfg.model_file_checkpoint))
+    #     checkpoint = torch.load("saved_models/"+cfg.model_file_checkpoint, weights_only=True)
+    #     model.load_state_dict(checkpoint['model_state_dict'])
     
     # if cfg.use_scaler:
     #     # scaler = torch.amp.GradScaler(autocast = True)
@@ -822,13 +822,14 @@ def main(cfg: DictConfig):
 
     # load from checkpoint of it exists
     start_epoch=0
-    if len(cfg.checkpoint_path)>0:
-        checkpoint = torch.load(cfg.checkpoint_path)
+    if len(cfg.model_file_checkpoint)>0:
+        print("lading existing model from {}".format(cfg.model_file_checkpoint))
+        checkpoint = torch.load("saved_models/"+cfg.model_file_checkpoint)
         model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        print("Scheduler state dict:", lr_scheduler.state_dict())
-        start_epoch = checkpoint['epoch']
+        if not cfg.only_load_model:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            start_epoch = checkpoint['epoch']
 
     for epoch in range(start_epoch, cfg.num_epochs):
         t0 = time.time()
@@ -911,7 +912,8 @@ def main(cfg: DictConfig):
             logged_metrics['epoch'] = epoch
             wandb.log(logged_metrics)
         
-        if (bool(epoch%2) and (epoch>=cfg.val_epoch_start)):
+        # if (bool(epoch%2) and (epoch>=cfg.val_epoch_start)):
+        if (epoch>=cfg.val_epoch_start):
             print("VALIDATION..")
             val_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps)
             if val_runner.loader.dataset.cache:

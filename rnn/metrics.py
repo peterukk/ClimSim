@@ -815,15 +815,41 @@ def get_GEL_precip(_lambda):
     return loss 
   return precip_sum_GEL 
 
-# def get_GEL(_lambda):
-#   def GEL(y_true, y_true_sfc, y_pred, y_pred_sfc, _lambda):
-#     # implement GEL from 
-#     # https://www.sciencedirect.com/science/article/pii/S0169809525004119
-#     ntot = y_true.nelement()
-#     beta = torch.square(y_pred_sfc) / y_true_sfc
-#     alpha = 
-#     expterm = (1 / (_lambda*ntot)) * (torch.sum())
-#     loss = torch.pow(2, expterm)
-#     return loss 
-#   return GEL 
+def get_GEL(_lambda):
+  target = 2**(1/_lambda)
+  def GEL(yto_lay, ypo_lay):
+    # implement GEL from 
+    # https://www.sciencedirect.com/science/article/pii/S0169809525004119
+    ntot = yto_lay.nelement()
+    # eps = 1e-7 #torch.finfo(torch.float32).eps
+    eps = torch.finfo(torch.float32).eps
+
+    # fac = 10000
+    fac = 1e-5
+    # eps = 0
+    ypo = fac*ypo_lay+eps
+    yto = fac*yto_lay+eps
+    beta = torch.square(ypo) / (yto)
+    alpha = ypo / yto
+    # print("true min max", torch.min(yto).item(), torch.max(yto).item())
+    # print("pred min max", torch.min(ypo).item(), torch.max(ypo).item())
+
+    # print("alpha min max", torch.min(alpha).item(), torch.max(alpha).item())
+    # print("beta min max", torch.min(beta).item(), torch.max(beta).item())
+    # beta =  torch.clamp(beta, min=1e-6) 
+    beta =  torch.clamp(beta, min=eps) 
+
+    logterm = alpha*torch.log(beta)
+    # diff = beta - logterm
+    # print("diff min max", torch.min(diff).item(), torch.max(diff).item(), "shape", diff.shape)
+    # print("sum", torch.sum(beta - logterm).item())
+    expterm = (1 / (_lambda*ntot)) * (torch.nansum(beta - logterm))
+    loss = torch.pow(2, expterm)
+    # print("loss", loss.item())
+    loss =  torch.clamp(loss, max=100.0) 
+    loss = torch.abs(target - loss)
+    # print("loss", loss.item())
+    return loss 
+  return GEL 
+
 
