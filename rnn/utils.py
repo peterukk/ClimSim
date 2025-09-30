@@ -539,6 +539,9 @@ class train_or_eval_one_epoch:
                             # loss = loss + timesteps*self.cfg.w_wcon * water_con
                             loss = loss + self.cfg.w_wcon * water_con
 
+                        if self.cfg.use_det_loss and self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
+                            loss = loss + self.cfg.w_det * (det_skill**2)
+
                     if self.train:
                         if self.cfg.use_scaler:
                             self.scaler.scale(loss).backward(retain_graph=True)

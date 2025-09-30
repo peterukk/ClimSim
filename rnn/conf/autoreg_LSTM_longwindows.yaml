@@ -68,6 +68,8 @@ w_precgel: 0.001
 gel_lambda_prec: 20.0
 use_gel_loss: false 
 w_gel: 0.01
+use_det_loss: false 
+w_det: 2e1 
 
 nh_mem: 16
 nneur:
