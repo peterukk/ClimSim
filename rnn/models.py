@@ -235,8 +235,6 @@ class LSTM_autoreg_torchscript(nn.Module):
     add_pres: Final[bool]
     add_stochastic_layer: Final[bool]
     output_prune: Final[bool]
-    # ensemble_size: Final[int]
-    use_ensemble: Final[bool]
     separate_radiation: Final[bool]
     # predict_flux: Final[bool]
     use_third_rnn: Final[bool]
@@ -260,7 +258,6 @@ class LSTM_autoreg_torchscript(nn.Module):
                 repeat_mu=False,
                 separate_radiation=False,
                 use_third_rnn=False,
-                use_ensemble=False,
                 mp_mode=0,
                 # diagnose_precip=False,
                 # diagnose_precip_v2=False,
@@ -268,7 +265,6 @@ class LSTM_autoreg_torchscript(nn.Module):
                 predict_liq_ratio=False,
                 concat=False,
                 # predict_flux=False,
-                # ensemble_size=1,
                 coeff_stochastic = 0.0,
                 nh_mem=16):
         super(LSTM_autoreg_torchscript, self).__init__()
@@ -327,8 +323,6 @@ class LSTM_autoreg_torchscript(nn.Module):
         if self.repeat_mu:
             nx = nx + 1
         self.separate_radiation=separate_radiation
-        self.use_ensemble = use_ensemble
-
         if self.separate_radiation:
             # self.nlev = 50
             self.nlev_mem = 50
@@ -349,7 +343,6 @@ class LSTM_autoreg_torchscript(nn.Module):
         else:
             self.nx_rnn1 = nx
                 
-        # self.ensemble_size = ensemble_size
         self.add_stochastic_layer = add_stochastic_layer
         self.coeff_stochastic = coeff_stochastic
         self.nonlin = nn.Tanh()
@@ -539,18 +532,6 @@ class LSTM_autoreg_torchscript(nn.Module):
         inputs_main   = inp_list[0]
         inputs_aux    = inp_list[1]
         rnn1_mem      = inp_list[2]
-
-        if self.use_ensemble:
-            inputs_main = inputs_main.unsqueeze(0)
-            inputs_aux = inputs_aux.unsqueeze(0)
-            # inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
-            # inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
-            inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
-            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
-            inputs_main = inputs_main.flatten(0,1)
-            inputs_aux = inputs_aux.flatten(0,1)
-            # print("shape inp main", inputs_main.shape)
-                    
         batch_size = inputs_main.shape[0]
         # print("shape inputs main", inputs_main.shape)
         if self.add_pres:
@@ -844,7 +825,6 @@ class LiquidNN_autoreg_torchscript(nn.Module):
     add_pres: Final[bool]
     add_stochastic_layer: Final[bool]
     output_prune: Final[bool]
-    use_ensemble: Final[bool]
     separate_radiation: Final[bool]
     use_third_rnn: Final[bool]
     diagnose_precip: Final[bool]
@@ -863,7 +843,6 @@ class LiquidNN_autoreg_torchscript(nn.Module):
                 add_stochastic_layer=False,
                 output_prune=False,
                 repeat_mu=False,
-                use_ensemble=False,
                 concat=False,
                 coeff_stochastic = 0.0,
                 nh_mem=16):
@@ -895,7 +874,6 @@ class LiquidNN_autoreg_torchscript(nn.Module):
         self.repeat_mu = repeat_mu
         if self.repeat_mu:
             nx = nx + 1
-        self.use_ensemble = use_ensemble
 
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
@@ -1022,15 +1000,6 @@ class LiquidNN_autoreg_torchscript(nn.Module):
         inputs_main   = inp_list[0]
         inputs_aux    = inp_list[1]
         rnn1_mem      = inp_list[2]
-
-        if self.use_ensemble:
-            inputs_main = inputs_main.unsqueeze(0)
-            inputs_aux = inputs_aux.unsqueeze(0)
-            inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
-            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
-            inputs_main = inputs_main.flatten(0,1)
-            inputs_aux = inputs_aux.flatten(0,1)
-            # print("shape inp main", inputs_main.shape)
                     
         batch_size = inputs_main.shape[1]
         if self.add_pres:
@@ -1125,8 +1094,6 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
     add_pres: Final[bool]
     add_stochastic_layer: Final[bool]
     output_prune: Final[bool]
-    # ensemble_size: Final[int]
-    use_ensemble: Final[bool]
     use_memory: Final[bool]
     # separate_radiation: Final[bool]
     # predict_flux: Final[bool]
@@ -1145,11 +1112,9 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
                 output_prune=False,
                 use_memory=False,
                 # separate_radiation=False,
-                use_ensemble=False,
                 # diagnose_precip=False,
                 concat=False,
                 # predict_flux=False,
-                # ensemble_size=1,
                 coeff_stochastic = 0.0,
                 nh_mem=16):
         super(LSTM_autoreg_torchscript_mp, self).__init__()
@@ -1184,14 +1149,12 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
 
         self.concat=concat
         self.use_memory= use_memory
-        self.use_ensemble = use_ensemble
 
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
         else:
             self.nx_rnn1 = nx
                 
-        # self.ensemble_size = ensemble_size
         self.add_stochastic_layer = add_stochastic_layer
         self.coeff_stochastic = coeff_stochastic
         self.nonlin = nn.Tanh()
@@ -1333,17 +1296,6 @@ class LSTM_autoreg_torchscript_mp(nn.Module):
         return out_denorm, out_sfc_denorm
     
     def forward(self, inputs_main, inputs_aux, rnn1_mem):
-        # if self.ensemble_size>0:
-        if self.use_ensemble:
-            inputs_main = inputs_main.unsqueeze(0)
-            inputs_aux = inputs_aux.unsqueeze(0)
-            # inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
-            # inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
-            inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
-            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
-            inputs_main = inputs_main.flatten(0,1)
-            inputs_aux = inputs_aux.flatten(0,1)
-            # print("shape inp main", inputs_main.shape)
                     
         batch_size = inputs_main.shape[0]
         # print("shape inputs main", inputs_main.shape)
@@ -1504,7 +1456,6 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
     # use_intermediate_mlp: Final[bool]
     add_pres: Final[bool]
     output_prune: Final[bool]
-    use_ensemble: Final[bool]
     # use_memory: Final[bool]
     # separate_radiation: Final[bool]
     # diagnose_precip: Final[bool]
@@ -1520,7 +1471,6 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
                 output_prune=False,
                 use_memory=False,
                 separate_radiation=False,
-                use_ensemble=False,
                 coeff_stochastic = 0.0,
                 nh_mem=16):
         super(LSTM_autoreg_torchscript_perturb, self).__init__()
@@ -1546,9 +1496,6 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         self.nx_rnn4 = self.nneur[1]
         self.nh_rnn4 = self.nneur[1]
         # self.use_memory= use_memory
-        self.use_ensemble = use_ensemble
-        # self.ensemble_size = ensemble_size
-
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
         else:
@@ -1667,14 +1614,6 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         return out_denorm, out_sfc_denorm
     
     def forward(self, inputs_main, inputs_aux, rnn1_mem):
-        # if self.ensemble_size>0:
-        if self.use_ensemble:
-            inputs_main = inputs_main.unsqueeze(0)
-            inputs_aux = inputs_aux.unsqueeze(0)
-            inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
-            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
-            inputs_main = inputs_main.flatten(0,1)
-            inputs_aux = inputs_aux.flatten(0,1)
         # print("shape inp main", inputs_main.shape)
                     
         batch_size = inputs_main.shape[0]
@@ -1773,7 +1712,6 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
     add_pres: Final[bool]
     add_stochastic_layer: Final[bool]
     output_prune: Final[bool]
-    use_ensemble: Final[bool]
     use_memory: Final[bool]
     mp_constraint: Final[bool]
 
@@ -1788,7 +1726,6 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
                 add_stochastic_layer=False,
                 output_prune=False,
                 use_memory=False,
-                use_ensemble=False,
                 coeff_stochastic = 0.0,
                 nh_mem=16,
                 mp_mode=0):
@@ -1812,7 +1749,6 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         self.nh_rnn2 = self.nneur[1]
 
         self.use_memory= use_memory
-        self.use_ensemble = use_ensemble
         if mp_mode==0:
           self.mp_constraint=False 
         elif mp_mode==1:
@@ -1843,7 +1779,6 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         self.ny_sfc_rad = 4
         self.ny_sfc_crm = 2
             
-        # self.ensemble_size = ensemble_size
         self.add_stochastic_layer = add_stochastic_layer
         self.coeff_stochastic = coeff_stochastic
         self.nonlin = nn.Tanh()
@@ -2030,17 +1965,6 @@ class LSTM_autoreg_torchscript_radflux(nn.Module):
         
         incflux = inputs_aux[:,1:2] # TOA flux * cos_sza
 
-        if self.use_ensemble:
-            inputs_main = inputs_main.unsqueeze(0)
-            inputs_aux = inputs_aux.unsqueeze(0)
-            # inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
-            # inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
-            inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
-            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
-            inputs_main = inputs_main.flatten(0,1)
-            inputs_aux = inputs_aux.flatten(0,1)
-            # print("shape inp main", inputs_main.shape)
-                    
         batch_size = inputs_main.shape[0]
         # print("shape inputs main", inputs_main.shape)
         if self.add_pres:
@@ -2295,13 +2219,11 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
     use_intermediate_mlp: Final[bool]
     add_pres: Final[bool]
     output_prune: Final[bool]
-    use_ensemble: Final[bool]
     use_memory: Final[bool]
     use_lstm: Final[bool]
     use_ar_noise: Final[bool]
     two_eps_variables: Final[bool]
     use_surface_memory: Final[bool]
-    # ensemble_size: Final[int]
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
@@ -2312,8 +2234,6 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
                 add_pres=False,
                 output_prune=False,
                 use_memory=False,
-                use_ensemble=True,
-                # ensemble_size=2,
                 use_lstm=True,
                 nh_mem=64,
                 ar_noise_mode=0,
@@ -2338,8 +2258,6 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         self.nh_rnn2 = self.nneur[1]
 
         self.use_memory= use_memory
-        self.use_ensemble = use_ensemble
-        # self.ensemble_size = ensemble_size
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
         else:
@@ -2609,14 +2527,12 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
     use_intermediate_mlp: Final[bool]
     add_pres: Final[bool]
     output_prune: Final[bool]
-    use_ensemble: Final[bool]
     separate_radiation: Final[bool]
     use_lstm: Final[bool]
     diagnose_precip: Final[bool]
     use_surface_memory: Final[bool]
     use_ar_noise: Final[bool]
     two_eps_variables: Final[bool]
-    # ensemble_size: Final[int]
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
@@ -2626,8 +2542,6 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
                 use_intermediate_mlp=True,
                 add_pres=False,
                 output_prune=False,
-                use_ensemble=True,
-                # ensemble_size = 2,
                 use_lstm=True,
                 use_surface_memory=False,
                 ar_noise_mode=0,
@@ -2653,8 +2567,6 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         self.nh_rnn1 = self.nneur[0]
         self.nx_rnn2 = self.nneur[0]
         self.nh_rnn2 = self.nneur[1]
-        self.use_ensemble = use_ensemble
-        # self.ensemble_size = ensemble_size
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
         else:
@@ -2914,7 +2826,6 @@ class barelystochastic_RNN_autoreg_torchscript(nn.Module):
     use_intermediate_mlp: Final[bool]
     add_pres: Final[bool]
     output_prune: Final[bool]
-    use_ensemble: Final[bool]
     separate_radiation: Final[bool]
     diagnose_precip: Final[bool]
     use_surface_memory: Final[bool]
@@ -2927,7 +2838,6 @@ class barelystochastic_RNN_autoreg_torchscript(nn.Module):
                 use_intermediate_mlp=True,
                 add_pres=False,
                 output_prune=False,
-                use_ensemble=True,
                 use_surface_memory=False,
                 ar_tau = 0.85,
                 nh_mem=64):
@@ -2951,7 +2861,6 @@ class barelystochastic_RNN_autoreg_torchscript(nn.Module):
         self.nh_rnn1 = self.nneur[0] # first LSTM predicts mu and sigma, used to draw from a distribution at each height
         self.nx_rnn2 = self.nneur[0] // 2
         self.nh_rnn2 = self.nneur[1]
-        self.use_ensemble = use_ensemble
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
         else:
@@ -3114,7 +3023,7 @@ class barelystochastic_RNN_autoreg_torchscript(nn.Module):
         out = self.mlp_output(out)
 
         if self.output_prune:
-            out[:,0:12,1:] = out[:,0:12,1:].clone().zero_()
+            out[:,0:12,1:] = out[:,0:12,1:].clone().zero_()      
         out_sfc_rad = self.mlp_surface_output(last_hidden)
 
         sfc_mean_ = self.mlp_surface_output_mu(last_hidden)
@@ -3139,7 +3048,6 @@ class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
     use_intermediate_mlp: Final[bool]
     add_pres: Final[bool]
     output_prune: Final[bool]
-    use_ensemble: Final[bool]
     use_memory: Final[bool]
     separate_radiation: Final[bool]
     use_lstm: Final[bool]
@@ -3153,7 +3061,6 @@ class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
                 add_pres=False,
                 output_prune=False,
                 use_memory=False,
-                use_ensemble=True,
                 use_lstm=True,
                 nh_mem=64):
         super(detLSTM_stochastic_RNN_autoreg_torchscript, self).__init__()
@@ -3174,7 +3081,6 @@ class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
         self.nh_rnn2 = self.nneur[1]
 
         self.use_memory= use_memory
-        self.use_ensemble = use_ensemble
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
         else:
@@ -3286,17 +3192,7 @@ class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
         return out_denorm, out_sfc_denorm
     
     def forward(self, inputs_main, inputs_aux, rnn1_mem):
-        if self.use_ensemble:
-            inputs_main = inputs_main.unsqueeze(0)
-            inputs_aux = inputs_aux.unsqueeze(0)
-            # inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
-            # inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
-            inputs_main = torch.repeat_interleave(inputs_main,repeats=2,dim=0)
-            inputs_aux = torch.repeat_interleave(inputs_aux,repeats=2,dim=0)
-            inputs_main = inputs_main.flatten(0,1)
-            inputs_aux = inputs_aux.flatten(0,1)
-            # print("shape inp main", inputs_main.shape)
-                    
+
         if self.add_pres:
             sp = torch.unsqueeze(inputs_aux[:,0:1],1)
             # undo scaling
@@ -3521,14 +3417,7 @@ class LSTM_torchscript(nn.Module):
         return out_denorm, out_sfc_denorm
     
     def forward(self, inputs_main, inputs_aux):
-        # if self.ensemble_size>0:
-        #     inputs_main = inputs_main.unsqueeze(0)
-        #     inputs_aux = inputs_aux.unsqueeze(0)
-        #     inputs_main = torch.repeat_interleave(inputs_main,repeats=self.ensemble_size,dim=0)
-        #     inputs_aux = torch.repeat_interleave(inputs_aux,repeats=self.ensemble_size,dim=0)
-        #     inputs_main = inputs_main.flatten(0,1)
-        #     inputs_aux = inputs_aux.flatten(0,1)
-                    
+
         batch_size = inputs_main.shape[0]
         # print("shape inputs main", inputs_main.shape)
         if self.add_pres:
