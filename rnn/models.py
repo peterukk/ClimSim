@@ -3003,8 +3003,8 @@ class barelystochastic_RNN_autoreg_torchscript(nn.Module):
         self.mlp_toa        = nn.Linear(2, self.nh_rnn2)
         
         use_bias=False
-        self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=False) 
-        self.rnn2      = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=False) 
+        self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True) 
+        self.rnn2      = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True) 
 
         nh_rnn = self.nh_rnn2
 
@@ -3058,15 +3058,7 @@ class barelystochastic_RNN_autoreg_torchscript(nn.Module):
         inputs_main   = inp_list[0]
         inputs_aux    = inp_list[1]
         rnn1_mem      = inp_list[2]
-        if self.use_ar_noise:
-            eps_prev  = inp_list[3]
-            if self.two_eps_variables:
-                if eps_prev.shape[0]==2:
-                    eps_prev2 = eps_prev[1]
-                    eps_prev = eps_prev[0]
-                else:
-                    raise NotImplementedError("two_eps_variables was set to True but only one was provided")
-                    
+
         if self.add_pres:
             sp = torch.unsqueeze(inputs_aux[:,0:1],1)
             # undo scaling
@@ -3086,9 +3078,10 @@ class barelystochastic_RNN_autoreg_torchscript(nn.Module):
         inputs_sfc = inputs_aux
         hx = self.mlp_surface(inputs_sfc)
         hx = self.nonlin(hx)
-        cx = self.mlp_surface2(inputs_sfc)
+        # print("shape hx", hx.shape, "inpsfc", inputs_sfc.shape)
+        # cx = self.mlp_surface2(inputs_sfc)
         # cx = self.nonlin(cx)
-        # cx = torch.randn_like()
+        cx = torch.randn_like(hx)
 
         hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
 
@@ -3103,16 +3096,16 @@ class barelystochastic_RNN_autoreg_torchscript(nn.Module):
         cx2 = self.nonlin(cx2)
         hidden = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
 
-        # out, states = self.rnn2(rnn1out, hidden)
         mean_, logvar_ = rnn1out.chunk(2,2)
         del rnn1out 
         eps = torch.randn_like(mean_)
         sigma = torch.exp(0.5*logvar_)
-        rnn2in = mean_ + eps * sigma
-        out, state = self.rnn2(rnn2in, hidden)
+        sigma = mean_ + eps * sigma
+        out, states = self.rnn2(sigma, hidden)
         
-        last_hidden = out[-1,:]
-        
+        # last_hidden = out[-1,:]
+        last_hidden = states[0].squeeze()
+
         if self.use_intermediate_mlp: 
             out = self.mlp_latent(out)
           
@@ -3122,7 +3115,6 @@ class barelystochastic_RNN_autoreg_torchscript(nn.Module):
 
         if self.output_prune:
             out[:,0:12,1:] = out[:,0:12,1:].clone().zero_()
-        
         out_sfc_rad = self.mlp_surface_output(last_hidden)
 
         sfc_mean_ = self.mlp_surface_output_mu(last_hidden)
@@ -3135,7 +3127,7 @@ class barelystochastic_RNN_autoreg_torchscript(nn.Module):
             prec = torch.reshape(out_sfc,(-1,1,2))
             prec = torch.repeat_interleave(prec,self.nlev,dim=1)
             rnn1_mem = torch.cat((rnn1_mem[:,:,0:self.nh_mem-2:],prec),dim=2)
-
+        # print("out sfc rad", out_sfc_rad.shape, "out_sfc", out_sfc.shape)
         out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
 
         out_sfc = self.relu(out_sfc)

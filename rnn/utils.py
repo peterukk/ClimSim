@@ -221,7 +221,7 @@ class train_or_eval_one_epoch:
                  device, dtype,
                  cfg, 
                  metrics_det, metric_h_con, metric_water_con, 
-                 batch_size = 384, train=True, replay=False):
+                 batch_size = 384, train=True, model_is_stochastic=False):
         super().__init__()
         self.loader = dataloader
         self.batch_size = batch_size
@@ -264,7 +264,13 @@ class train_or_eval_one_epoch:
             self.use_mp_constraint=True
         else:
             self.use_mp_constraint=False 
-                
+
+        # if self.cfg.loss_fn_type in ["CRPS","variogram_score","energy_score","ds_score"]:
+        #     self.model_is_stochastic=True 
+        # else:
+        #     self.model_is_stochastic=False 
+        self.model_is_stochastic = model_is_stochastic 
+
     def eval_one_epoch(self, lossf, optim, epoch, timesteps=1, lr_scheduler=None):
         report_freq = self.report_freq
         running_loss = 0.0; running_energy = 0.0; running_water = 0.0
@@ -284,7 +290,7 @@ class train_or_eval_one_epoch:
         epoch_prec_50p_day = 0.0; epoch_accumprec = 0.0; epoch_prec_gel = 0.0
         prec_true_daily = []; prec_pred_daily = []
         prec_true_hourly = []; prec_pred_hourly = []
-        epoch_dt_std = 0.0
+        epoch_dt_std = 0.0; epoch_dq_std = 0.0
         t_comp =0 
         t0_it = time.time()
         j = 0; k = 0; k2=0; k3 = 0 
@@ -462,7 +468,7 @@ class train_or_eval_one_epoch:
 
                     with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
                         
-                        if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
+                        if self.model_is_stochastic:
                             loss = lossf(targets_lay, targets_sfc, preds_lay, preds_sfc, timesteps)
                             loss, det_skill, ens_var = loss
                         else:
@@ -478,6 +484,7 @@ class train_or_eval_one_epoch:
                             # use only first member from here on 
                             preds_lay = torch.reshape(preds_lay, (timesteps, self.cfg.ensemble_size, self.batch_size,  self.model.nlev,  self.model.ny))
                             dt_std    = torch.mean(torch.std(preds_lay[:,:,:,:,0], dim=1)).detach()
+                            dq_std    = torch.mean(torch.std(preds_lay[:,:,:,:,1], dim=1)).detach()
                             preds_lay = torch.reshape(preds_lay[:,0,:,:], shape=targets_lay.shape)
                             preds_sfc = torch.reshape(preds_sfc, (timesteps, self.cfg.ensemble_size, self.batch_size,  self.model.ny_sfc))
                             preds_sfc = torch.reshape(preds_sfc[:,0,:], shape=targets_sfc.shape)
@@ -539,7 +546,7 @@ class train_or_eval_one_epoch:
                             # loss = loss + timesteps*self.cfg.w_wcon * water_con
                             loss = loss + self.cfg.w_wcon * water_con
 
-                        if self.cfg.use_det_loss and self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
+                        if self.model_is_stochastic:
                             loss = loss + self.cfg.w_det * (det_skill**2)
 
                     if self.train:
@@ -553,7 +560,7 @@ class train_or_eval_one_epoch:
    
                         optim.zero_grad()
                         loss = loss.detach()
-                        if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
+                        if self.model_is_stochastic:
                             det_skill = det_skill.detach(); ens_var = ens_var.detach()
                         else: 
                             huber = huber.detach(); mse = mse.detach(); mae = mae.detach()
@@ -575,14 +582,14 @@ class train_or_eval_one_epoch:
                     # running_precip  += precip_sum_gel.item() 
                     running_gel     += gel_lev.item() 
 
-                    if self.cfg.loss_fn_type in ["CRPS","variogram_score"]: 
+                    if self.model_is_stochastic: 
                         running_var += ens_var.item() 
                         running_det += det_skill.item() 
                     #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
                     if j>loss_update_start_index:
                         with torch.no_grad():
                             epoch_loss      += loss.item()
-                            if self.cfg.loss_fn_type in ["CRPS","variogram_score"]: 
+                            if self.model_is_stochastic: 
                                 huber, mse, mae       = self.metrics_det(targets_lay, targets_sfc, preds_lay, preds_sfc)
 
                             epoch_huber += huber.item()
@@ -594,12 +601,13 @@ class train_or_eval_one_epoch:
                             epoch_accumprec += precip_sum_mse.item()
                             epoch_prec_gel += precip_sum_gel.item()
 
-                            if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
+                            if self.model_is_stochastic:
                                 epoch_ens_var += ens_var.item()
                                 epoch_det_skill += det_skill.item()
                                 epoch_spreadskill += ens_var.item() / det_skill.item()
                                 if self.use_ensemble:
                                     epoch_dt_std += dt_std.item()
+                                    epoch_dq_std += dq_std.item()
                             biases_lev, biases_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc, numpy=True)
                             epoch_bias_lev += np.mean(biases_lev)
                             epoch_bias_heating += biases_lev[0]
@@ -688,7 +696,7 @@ class train_or_eval_one_epoch:
 
                     r2raw = self.metric_R2.compute()
 
-                    if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
+                    if self.model_is_stochastic:
                         running_var = running_var / fac
                         running_det = running_det / fac
                         print("[{:d}, {:d}] Loss: {:.2e} var: {:.2e} det: {:.2e} h: {:.2e}  w: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
@@ -740,12 +748,13 @@ class train_or_eval_one_epoch:
         self.metrics['mean_squared_error'] = epoch_mse / k
         self.metrics['huber'] = epoch_huber / k
 
-        if self.cfg.loss_fn_type in ["CRPS","variogram_score"]:
+        if self.model_is_stochastic:
             self.metrics['ens_var'] =  epoch_ens_var / k
             self.metrics['det_skill'] =  epoch_det_skill / k
             self.metrics['spread_skill_ratio'] =  epoch_spreadskill / k
             if self.use_ensemble:
                 self.metrics['dt_ens_std']  = epoch_dt_std / k
+                self.metrics['dq_ens_std']  = epoch_dq_std / k
         self.metrics["h_conservation"] =  epoch_hcon / k
         self.metrics["water_conservation"] =  epoch_wcon / k
         self.metrics["precip_accum_mse"] = epoch_accumprec / k

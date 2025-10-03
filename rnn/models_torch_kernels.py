@@ -1073,6 +1073,7 @@ class MyStochasticLSTMLayer4(jit.ScriptModule):
         for w in self.parameters():
             w.data.uniform_(-std, std)
             
+    # @torch.compile(options={"epilogue_fusion": True})
     @torch.compile
     def forward(
         self, input_seq: Tensor, state: Tuple[Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
@@ -1082,7 +1083,6 @@ class MyStochasticLSTMLayer4(jit.ScriptModule):
         inputs = input_seq.unbind(0)
         outputs = torch.jit.annotate(List[Tensor], [])
         hx, cx = state
-        
         for i in range(len(inputs)):
             eps = epss[i]
             x = inputs[i]
@@ -1096,17 +1096,18 @@ class MyStochasticLSTMLayer4(jit.ScriptModule):
             
             yy = torch.mm(inp, self.weight_encoder) 
             mean_, logvar_, ingate, forgetgate, cellgate = yy.chunk(5,1)
-            
-            z = mean_ + eps * torch.exp(0.5*logvar_)
-            outgate = torch.sigmoid(z)
+            # z = mean_ + eps * torch.exp(0.5*logvar_)
+            # outgate = torch.sigmoid(z)
+            hx = torch.sigmoid(mean_ + eps * torch.exp(0.5*logvar_))
             ingate = torch.sigmoid(ingate)
             forgetgate = torch.sigmoid(forgetgate)
             cellgate = torch.tanh(cellgate)
     
             cx = (forgetgate * cx) + (ingate * cellgate)
 
-            hx = outgate * torch.tanh(cx)
-        
+            hx = hx * torch.tanh(cx)
+            # hx = outgate * torch.tanh(cx)
+
             outputs += [hx]
 
         state =  (hx, cx)
