@@ -604,9 +604,9 @@ class train_or_eval_one_epoch:
                             epoch_wcon  += water_con.item()
                             epoch_accumprec += precip_sum_mse.item()
                             epoch_prec_gel += precip_sum_gel.item()
-                            err_dq_ens1 = dq_true - dq_ens1
-                            err_dq_ens2 = dq_true - dq_ens2 
-                            epoch_q_err_corr += np.corrcoef(err_dq_ens1.flatten(),err_dq_ens2.flatten())[0,1]
+                            err_dq_ens1 = dq_true.flatten() - dq_ens1.flatten()
+                            err_dq_ens2 = dq_true.flatten() - dq_ens2.flatten() 
+                            epoch_q_err_corr += np.corrcoef(err_dq_ens1,err_dq_ens2)[0,1]
 
                             if self.model_is_stochastic:
                                 epoch_ens_var += ens_var.item()
