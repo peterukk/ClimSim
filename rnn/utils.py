@@ -290,7 +290,7 @@ class train_or_eval_one_epoch:
         epoch_prec_50p_day = 0.0; epoch_accumprec = 0.0; epoch_prec_gel = 0.0
         prec_true_daily = []; prec_pred_daily = []
         prec_true_hourly = []; prec_pred_hourly = []
-        epoch_dt_std = 0.0; epoch_dq_std = 0.0
+        epoch_dt_std = 0.0; epoch_dq_std = 0.0; epoch_q_err_corr = 0.0
         t_comp =0 
         t0_it = time.time()
         j = 0; k = 0; k2=0; k3 = 0 
@@ -485,7 +485,11 @@ class train_or_eval_one_epoch:
                             preds_lay = torch.reshape(preds_lay, (timesteps, self.cfg.ensemble_size, self.batch_size,  self.model.nlev,  self.model.ny))
                             dt_std    = torch.mean(torch.std(preds_lay[:,:,:,:,0], dim=1)).detach()
                             dq_std    = torch.mean(torch.std(preds_lay[:,:,:,:,1], dim=1)).detach()
-                            preds_lay = torch.reshape(preds_lay[:,0,:,:], shape=targets_lay.shape)
+                            preds_lay1 = preds_lay[:,0,:,:]
+                            dq_ens1 = preds_lay1[:,:,:,1].detach().cpu().numpy()
+                            dq_ens2 = preds_lay[:,1,:,:,1].detach().cpu().numpy()
+                            dq_true = targets_lay[:,:,1].detach().cpu().numpy()
+                            preds_lay = torch.reshape(preds_lay1, shape=targets_lay.shape)
                             preds_sfc = torch.reshape(preds_sfc, (timesteps, self.cfg.ensemble_size, self.batch_size,  self.model.ny_sfc))
                             preds_sfc = torch.reshape(preds_sfc[:,0,:], shape=targets_sfc.shape)
                             x_sfc = torch.reshape(x_sfc,(timesteps, self.cfg.ensemble_size, self.batch_size, -1))
@@ -600,6 +604,9 @@ class train_or_eval_one_epoch:
                             epoch_wcon  += water_con.item()
                             epoch_accumprec += precip_sum_mse.item()
                             epoch_prec_gel += precip_sum_gel.item()
+                            err_dq_ens1 = dq_true - dq_ens1
+                            err_dq_ens2 = dq_true - dq_ens2 
+                            epoch_q_err_corr += np.corrcoef(err_dq_ens1.flatten(),err_dq_ens2.flatten())[0,1]
 
                             if self.model_is_stochastic:
                                 epoch_ens_var += ens_var.item()
@@ -724,8 +731,8 @@ class train_or_eval_one_epoch:
                     k2 += 1    
                 if len(prec_pred_hourly) ==3:
                     # hourly precipitation accumulation 99.9th percentile, ratio of predicted occurrences to true
-                    prec_pred_hourly = np.nansum(np.reshape(np.concat(prec_pred_hourly),(72,-1)),axis=0)
-                    prec_true_hourly = np.nansum(np.reshape(np.concat(prec_true_hourly),(72,-1)),axis=0)
+                    prec_pred_hourly = np.nansum(np.reshape(np.concat(prec_pred_hourly),(3,-1)),axis=0)
+                    prec_true_hourly = np.nansum(np.reshape(np.concat(prec_true_hourly),(3,-1)),axis=0)
                     pp = np.percentile(prec_true_hourly,99.9)
                     epoch_prec_99p_hour += prec_pred_hourly[prec_pred_hourly>pp].size / prec_true_hourly[prec_true_hourly>pp].size
                     prec_pred_hourly = []; prec_true_hourly = []   
@@ -797,9 +804,10 @@ class train_or_eval_one_epoch:
         self.metrics['99p_ratio_precday'] = epoch_prec_99p_day / k2
         self.metrics['50p_ratio_precday'] = epoch_prec_50p_day / k2
         self.metrics['99p_ratio_tend'] = epoch_tend_99p_ratio / k 
-        self.metrics['99p_ratio_prechour'] = epoch_prec_99p_hour / k3
+        # self.metrics['99p_ratio_prechour'] = epoch_prec_99p_hour / k3
         self.metrics['gel_precsum'] = epoch_prec_gel / k 
         self.metrics['moisture_std_ratio'] = epoch_hum_std_ratio / k
+        self.metrics['q_err_corr'] = epoch_q_err_corr  / k
 
         self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
         self.metrics['mae_cli'] = np.nanmean(epoch_mae_lev_cli / k)
