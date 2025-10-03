@@ -381,13 +381,15 @@ def main(cfg: DictConfig):
     # if cfg.add_stochastic_layer:
     if cfg.ensemble_size>1:
         use_ensemble = True 
+        is_stochastic = True
         # cfg.ensemble_size = 2
-        if cfg.loss_fn_type not in ["CRPS","variogram_score"]:
+        if cfg.loss_fn_type not in ["CRPS","variogram_score","energy_score","ds_score"]:
             raise NotImplementedError("To train stochastic RNN, use CRPS or variogram loss")
     else:
         use_ensemble = False
         # cfg.ensemble_size = 1
-        
+        is_stochastic = False 
+
     print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
     if len(cfg.nneur)==3:
       use_third_rnn = True 
@@ -415,7 +417,6 @@ def main(cfg: DictConfig):
                         output_prune = cfg.output_prune,
                         # repeat_mu = cfg.repeat_mu,
                         separate_radiation = cfg.separate_radiation,
-                        use_ensemble = use_ensemble,
                         physical_precip = cfg.physical_precip,
                         # diagnose_precip = diagnose_precip,
                         # diagnose_precip_v2 = diagnose_precip_v2,
@@ -454,7 +455,6 @@ def main(cfg: DictConfig):
                         add_pres = cfg.add_pres,
                         add_stochastic_layer = cfg.add_stochastic_layer, 
                         output_prune = cfg.output_prune,
-                        use_ensemble = use_ensemble,
                         concat = cfg.concat,
                         nh_mem = cfg.nh_mem)#,
     elif cfg.model_type in ["SLSTM", "SGRU"]: #cfg.model_type=="SRNN":
@@ -477,7 +477,6 @@ def main(cfg: DictConfig):
                     add_pres = cfg.add_pres,
                     output_prune = cfg.output_prune,
                     use_memory = cfg.autoregressive,
-                    use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem,
                     ar_noise_mode = cfg.ar_noise_mode,
                     ar_tau = cfg.ar_tau,
@@ -496,10 +495,25 @@ def main(cfg: DictConfig):
                     use_intermediate_mlp = cfg.use_intermediate_mlp,
                     add_pres = cfg.add_pres,
                     output_prune = cfg.output_prune,
-                    use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem,
                     ar_noise_mode = cfg.ar_noise_mode,
                     ar_tau = cfg.ar_tau,
+                    use_surface_memory=cfg.use_surface_memory)#,
+    elif cfg.model_type=="barelystochasticRNN":
+        model = barelystochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
+                    out_scale = yscale_lev,
+                    out_sfc_scale = yscale_sca, 
+                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                    device=device,
+                    nx = nx, nx_sfc=nx_sfc, 
+                    ny = ny, ny_sfc=ny_sfc, 
+                    nneur=cfg.nneur, 
+                    use_initial_mlp = cfg.use_initial_mlp,
+                    use_intermediate_mlp = cfg.use_intermediate_mlp,
+                    add_pres = cfg.add_pres,
+                    output_prune = cfg.output_prune,
+                    nh_mem = cfg.nh_mem,
                     use_surface_memory=cfg.use_surface_memory)#,
     elif cfg.model_type=="physrad":
         from models_rad import LSTM_autoreg_torchscript_physrad
@@ -517,7 +531,6 @@ def main(cfg: DictConfig):
                     add_pres = cfg.add_pres,
                     add_stochastic_layer = cfg.add_stochastic_layer, 
                     output_prune = cfg.output_prune,
-                    use_ensemble = use_ensemble,
                     use_third_rnn = use_third_rnn,
                     concat = cfg.concat,
                     nh_mem = cfg.nh_mem,
@@ -537,7 +550,6 @@ def main(cfg: DictConfig):
                     add_pres = cfg.add_pres,
                     output_prune = cfg.output_prune,
                     use_memory = cfg.autoregressive,
-                    use_ensemble = use_ensemble,
                     nh_mem = cfg.nh_mem,
                     mp_mode = cfg.mp_mode)
     elif cfg.model_type=="LSTM_sepmp":
@@ -557,7 +569,6 @@ def main(cfg: DictConfig):
                         output_prune = cfg.output_prune,
                         use_memory = cfg.autoregressive,
                         # separate_radiation = cfg.separate_radiation,
-                        use_ensemble = use_ensemble,
                         # diagnose_precip = diagnose_precip,
                         # use_third_rnn = use_third_rnn,
                         concat = cfg.concat,
@@ -689,6 +700,10 @@ def main(cfg: DictConfig):
             loss_fn = metrics.get_CRPS(cfg.beta)
     elif cfg.loss_fn_type == "variogram_score":
         loss_fn = metrics.variogram_score   
+    elif cfg.loss_fn_type == "energy_score":
+        loss_fn = metrics.energy_score   
+    elif cfg.loss_fn_type == "ds_score":
+        loss_fn = metrics.ds_score   
     else:
         raise NotImplementedError("loss_fn {} not implemented".format(cfg.loss_fn_type))
         
@@ -789,10 +804,10 @@ def main(cfg: DictConfig):
         )       
     
     
-    train_runner = train_or_eval_one_epoch(train_loader, model, device, dtype, 
-                                           cfg, metrics_det, metric_h_con, metric_water_con, batch_size_tr,  train=True)
-    val_runner = train_or_eval_one_epoch(val_loader, model, device, dtype, 
-                                         cfg, metrics_det, metric_h_con, metric_water_con, batch_size_val, train=False)
+    train_runner = train_or_eval_one_epoch(train_loader, model, device, dtype, cfg, metrics_det, 
+                                           metric_h_con, metric_water_con, batch_size_tr,  train=True, model_is_stochastic=is_stochastic)
+    val_runner = train_or_eval_one_epoch(val_loader, model, device, dtype, cfg, metrics_det,
+                                           metric_h_con, metric_water_con, batch_size_val, train=False, model_is_stochastic=is_stochastic)
     
     inpstr = "v5" if cfg.v4_to_v5_inputs else "v4"
     MODEL_STR =  '{}-{}_lr{}.neur{}-{}_x{}_mp{}_num{}'.format(cfg.model_type,
@@ -859,22 +874,6 @@ def main(cfg: DictConfig):
             elif cfg.optimizer == "soap":
                 from soap import SOAP
                 optimizer = SOAP(model.parameters(), lr = new_lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
-            else:
-                raise NotImplementedError()
-
-        if cfg.loss_fn_type == "CRPS" and cfg.crps_start_epoch>0 and (epoch==cfg.crps_start_epoch):
-            print("Decreasing beta to  ", cfg.beta, "and resetting optimizer")
-            loss_fn = metrics.get_CRPS(cfg.beta) 
-            if cfg.optimizer == "adam":
-                optimizer = torch.optim.Adam(model.parameters(), lr = cfg.lr)
-            elif cfg.optimizer == "adamw":
-                optimizer = torch.optim.AdamW(model.parameters(), lr = cfg.lr)
-            elif cfg.optimizer == "adamwschedulefree":
-                import schedulefree
-                optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=cfg.lr)
-            elif cfg.optimizer == "soap":
-                from soap import SOAP
-                optimizer = SOAP(model.parameters(), lr = cfg.lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
             else:
                 raise NotImplementedError()
 
@@ -951,7 +950,7 @@ def main(cfg: DictConfig):
                 save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
                 print("saving model to", SAVE_PATH)
                 # print("New best validation result obtained, saving model to", SAVE_PATH)
-                if cfg.loss_fn_type == "CRPS":
+                if is_stochastic:
                     model.use_ensemble=False
                 # model = model.to("cpu")
                 torch.save({
@@ -969,7 +968,7 @@ def main(cfg: DictConfig):
                 scripted_model = scripted_model.eval()
                 scripted_model.save(save_file_torch2)
                 best_val_loss = val_loss 
-                if cfg.loss_fn_type == "CRPS":
+                if is_stochastic:
                     model.use_ensemble=True
                 model = model.to(device)
                 print("model saved!")
