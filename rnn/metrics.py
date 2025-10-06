@@ -10,6 +10,7 @@ import numpy as np
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
 
 def corrcoeff_pairs_batchfirst(A, B):
     nb, nlev, nx = A.shape
@@ -171,49 +172,6 @@ def precip_sum_mse(yto_sfc, ypo_sfc, timesteps):
     mse = div*torch.mean(torch.square(prec_sum_true - prec_sum_pred))
     # print("precip mse", mse)
     return mse 
-# def energy_metric(yto, ypo, sp, hyai,hybi):
-    
-#     cp = torch.tensor(1004.0)
-#     Lv = torch.tensor(2.5104e6)
-#     Lf = torch.tensor(3.34e5)
-#     one_over_grav = torch.tensor(0.1020408163) # 1/9.8
-#     if len(yto.shape)==3:
-#         thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
-#                              + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
-    
-#         dT_pred = ypo[:,:,0]
-#         dq_pred = ypo[:,:,1] 
-        
-#         dT_true = yto[:,:,0]
-#         dq_true = yto[:,:,1]
-        
-#         dql_pred = ypo[:,:,2] 
-#         dql_true = yto[:,:,2] 
-        
-#         energy=torch.mean(torch.square(torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),1)
-#                                 -      torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),1)))
-#     else: 
-#         # time dimension included
-#                                        #      batch,time,1     (1,1,30)
-#         thick= one_over_grav *(sp * (hybi[1:61].view(1,1,-1)-hybi[0:60].view(1,1,-1)) 
-#              + torch.tensor(100000)*(hyai[1:61].view(1,1,-1)-hyai[0:60].view(1,1,-1)))
-#         dT_pred = ypo[:,:,:,0]
-#         dq_pred = ypo[:,:,:,1] 
-        
-#         dT_true = yto[:,:,:,0]
-#         dq_true = yto[:,:,:,1] 
-        
-#         dql_pred = ypo[:,:,:,2] 
-#         dql_true = yto[:,:,:,2] 
-        
-#         energy=torch.mean(torch.square(torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),2)
-#                                 -      torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),2)))
-#     return energy
-
-# def get_energy_metric(hyai, hybi):
-#     def energy(y_true, y_pred, sp):
-#         return energy_metric(y_true, y_pred, sp, hyai, hybi)
-#     return energy
 
 
 
@@ -353,6 +311,54 @@ def get_hybrid_loss(_lambda):
         return my_hybrid_loss(mse, energy, _lambda)
     return hybrid_loss
 
+def spread_skill_ratio(y, y_pred):
+    """Compute the spread-skill ratio (SSR) of an ensemble of predictions.
+    The SSR is defined as the ratio of the ensemble spread to the ensemble-mean RMSE.
+    ypred: (nb, nens, ny)
+    y: (nb, 1, ny)
+    """
+    n_mems = y_pred.shape[1]
+    # Compute the spread of the ensemble members.
+    # This is calculated as the square root of the average ensemble variance,
+    # which is different from the standard deviation of the ensemble.
+    # See Fortun et al. 2013 for more details why the square root of the average ensemble variance is adequate.
+
+    spread = torch.sqrt(torch.mean(y_pred.var(dim=1)))
+
+    # calculate skill as ensemble_mean RMSE
+    y_pred = y.mean(dim=1, keepdim=True)
+    rmse = torch.sqrt(torch.mean(torch.square(y_pred - y)))
+
+    # Add correction factor sqrt((M+1)/M); see https://doi.org/10.1175/JHM-D-14-0008.1), important for small ensemble sizes
+    spread *= ((n_mems + 1) / n_mems) ** 0.5
+    return spread, rmse
+
+def compute_spread_skill_ratio(y, y_sfc, y_pred, y_sfc_pred, timesteps):
+    """Compute the spread-skill ratio (SSR) of an ensemble of predictions.
+    The SSR is defined as the ratio of the ensemble spread to the ensemble-mean RMSE.
+    """
+    ns,seq_size,feature_size = y.shape
+    batch_size = ns // timesteps
+    ens_size = y_pred.shape[0] // (timesteps*batch_size)          
+    y_pred = torch.reshape(y_pred, (timesteps, ens_size, batch_size, seq_size*feature_size))
+    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps, ens_size, batch_size, -1))
+    y_pred = torch.cat((y_pred, y_sfc_pred), axis=-1)
+    
+    y = torch.reshape(y, (timesteps, batch_size,  seq_size*feature_size))
+    y_sfc = torch.reshape(y_sfc, (timesteps, batch_size, -1))
+    y = torch.cat((y, y_sfc),axis=-1)
+    # Compute the spread of the ensemble members.
+    # This is calculated as the square root of the average ensemble variance,
+    # which is different from the standard deviation of the ensemble.
+    # See Fortun et al. 2013 for more details why the square root of the average ensemble variance is adequate.
+    spread = torch.sqrt(torch.mean(y_pred.var(dim=1)))
+    # calculate skill as ensemble_mean RMSE
+    y_pred = y_pred.mean(dim=1)
+    rmse = torch.sqrt(torch.mean(torch.square(y_pred - y)))
+    # Add correction factor sqrt((M+1)/M); see https://doi.org/10.1175/JHM-D-14-0008.1), important for small ensemble sizes
+    spread *= ((ens_size + 1) / ens_size) ** 0.5
+    return spread, rmse
+
 def CRPS(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, alpha=1.0, return_low_var_inds=False):
     """
     Calculate Continuous Ranked Probability Score (CRPS)
@@ -429,6 +435,8 @@ def CRPS(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, alpha=1.0, return_low_
     ens_var     /= y_pred.size(-1) ** 0.5
     
     CRPS =  beta * 2 * MSE - ens_var # beta should be 1
+    
+    # ens_var, MSE = spread_skill_ratio(y, y_pred) # actually RMSE not MSE
 
     if return_low_var_inds:
         x = cmean_out[:,0,1]
@@ -571,7 +579,7 @@ def CRPS_anemoi(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
     spread = (-1*ens_var).mean()
     # In ECMWF ANEMOI code ( https://github.com/ecmwf/anemoi-core/blob/main/training/src/anemoi/training/losses/base.py ),
     # the loss is at this point SUMMED over the variable dimension
-    # loss = torch.sum(loss,dim=1)  # --> (batch)
+    loss = torch.sum(loss,dim=1)  # --> (batch)
     loss = torch.mean(loss)
    
     return loss, skill, spread
@@ -670,7 +678,7 @@ def CRPS4(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, return_low_var_inds=F
     else:
         return CRPS, MSE, ens_var
 
-def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps):
+def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps, sumvar=True):
     """
     Calculate Continuous Ranked Probability Score (CRPS)
 
@@ -683,6 +691,17 @@ def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     Returns:
     - Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: CRPS and its components.
     """ 
+    # def _crps_ensemble_fair(
+    #     obs: "Array", fct: "Array", backend: "Backend" = None
+    # ) -> "Array":
+    #     """Fair version of the CRPS estimator based on the energy form."""
+    #     B = backends.active if backend is None else backends[backend]
+    #     M: int = fct.shape[-1]
+    #     e_1 = B.sum(B.abs(obs[..., None] - fct), axis=-1) / M
+    #     e_2 = B.sum(
+    #         B.abs(fct[..., None] - fct[..., None, :]),
+    #         axis=(-1, -2),
+    #     ) / (M * (M - 1))
     # y:  ntime*nbatch,      nseq, ny 
     # yp: ntime*nbatch*nens, nseq, ny 
     import scoringrules as sr
@@ -703,8 +722,10 @@ def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     y = torch.cat((y, y_sfc), axis=-1)
     # print("y shape and dev", y.shape, y.device, "pred", y_pred.shape, y_pred.device)
     CRPS = sr.crps_ensemble(y, y_pred, m_axis=1, backend='torch', estimator='fair')
-    # CRPS = CRPS.mean()
-    CRPS = CRPS.sum(dim=-1).mean()
+    if sumvar:
+      CRPS = CRPS.sum(dim=-1).mean()
+    else:
+      CRPS = CRPS.mean()
 
     # print("CRPS shape", CRPS.shape)
     y       = y.reshape((timesteps*batch_size,1,-1))
@@ -867,11 +888,12 @@ def ds_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     
     return ds, MSE, ens_var
 
-def get_CRPS(beta): 
+# def get_CRPS(beta, sumvar): 
+def get_CRPS(sumvar): 
     def customCRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps):
-        # return CRPS_anemoi(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, beta)
+        # return CRPS_anemoi(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps)#, beta)
         # return CRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, beta)
-        return CRPS_scoringrules(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps)
+        return CRPS_scoringrules(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, sumvar)
 
     return customCRPS
 

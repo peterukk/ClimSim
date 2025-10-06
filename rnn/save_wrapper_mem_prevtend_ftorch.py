@@ -22,12 +22,12 @@ import gc
 sfc_vars_remove = (17, 18, 19, 20, 21)
 
 
-fpath_lbd_qn = "/media/peter/CrucialBX500/data/ClimSim/ClimSim/rnn/saved_models/lbd_qn.txt"
-fpath_lbd_qc = "/media/peter/CrucialBX500/data/ClimSim/ClimSim/rnn/saved_models/lbd_qc.txt"
-fpath_lbd_qi = "/media/peter/CrucialBX500/data/ClimSim/ClimSim/rnn/saved_models/lbd_qi.txt"
+fpath_lbd_qn = "saved_models/lbd_qn.txt"
+fpath_lbd_qc = "saved_models/lbd_qc.txt"
+fpath_lbd_qi = "saved_models/lbd_qi.txt"
 
-save_dir = "/media/peter/samlinux/soft/ClimSim-Online/climsim-online/shared_e3sm/saved_models/wrapper_ftorch/"
-
+#save_dir = "/media/peter/samlinux/soft/ClimSim-Online/climsim-online/shared_e3sm/saved_models/wrapper_ftorch/"
+save_dir = "/data/climsim-online/shared_e3sm/saved_models/wrapper_ftorch/"
 
 lbd_qn  =  np.loadtxt(fpath_lbd_qn, delimiter=",", dtype=np.float32)
 lbd_qc  =  np.loadtxt(fpath_lbd_qc, delimiter=",", dtype=np.float32)
@@ -111,7 +111,7 @@ qinput_prune, snowhice_fix, v5_input, nmem, nlev_mem, perturb = True, True, Fals
 model_path_script = fdir_bsc + "SRNN-Hidden_lr0.0007.neur144-144_xv4_mp0_num72844_script_cpu.pt"  # ar1_0.7
 qinput_prune, snowhice_fix, v5_input, nmem, nlev_mem, perturb = True, True, False, 16, 60, False
 
-model_path_script = "saved_models/partiallystochasticRNN-Hidden_lr0.0007.neur160-160_xv4_mp0_num40289_script_cpu.pt"
+model_path_script = "saved_models/partiallystochasticRNN-Hidden_lr0.0007.neur144-144_xv4_mp0_num70753_script_cpu.pt"
 qinput_prune, snowhice_fix, v5_input, nmem, nlev_mem, perturb = True, True, False, 16, 60, False
 
 # model_path_script = "saved_models/partiallystochasticRNN-Hidden_lr0.0007.neur144-144_xv4_mp0_num88532_script_cpu.pt"
@@ -425,7 +425,7 @@ else:
 if save:
     print("saving to ", save_file_torch)
     scripted_model.save(save_file_torch)
-
+    print("success")
 d
 # fpath_data = '/media/peter/samsung/data/ClimSim_low_res_expanded/data_v4_rnn_nonorm_year8.h5'
 # fpath_data = "/media/peter/CrucialP1/data/ClimSim/low_res_expanded/train_v4_rnn_nonorm_febtofeb_y1-7_stackedhalfyear_gzip8_chunk1_subset.h5"
