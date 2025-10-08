@@ -692,12 +692,13 @@ def main(cfg: DictConfig):
     elif cfg.loss_fn_type == "huber":
         loss_fn = metrics_det
     elif cfg.loss_fn_type == "CRPS":
-        if cfg.crps_start_epoch>0: 
-            beta_initial = 500.0
-            loss_fn = metrics.get_CRPS(beta_initial)
-            print("Setting beta to", beta_initial)
-        else:
-            loss_fn = metrics.get_CRPS(cfg.beta)
+        # if cfg.crps_start_epoch>0: 
+        #     beta_initial = 500.0
+        #     loss_fn = metrics.get_CRPS(beta_initial, cfg.crps_sumvar)
+        #     print("Setting beta to", beta_initial, "CRPS sum variables first:", cfg.crps_sumvar)
+        # else:
+        loss_fn = metrics.get_CRPS(cfg.crps_sumvar)
+        print("CRPS sum variables first:", cfg.crps_sumvar)
     elif cfg.loss_fn_type == "variogram_score":
         loss_fn = metrics.variogram_score   
     elif cfg.loss_fn_type == "energy_score":

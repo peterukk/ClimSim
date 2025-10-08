@@ -470,7 +470,7 @@ class train_or_eval_one_epoch:
                         
                         if self.model_is_stochastic:
                             loss = lossf(targets_lay, targets_sfc, preds_lay, preds_sfc, timesteps)
-                            loss, det_skill, ens_var = loss
+                            # loss, det_skill, ens_var = loss
                             ens_var, det_skill = metrics.compute_spread_skill_ratio(targets_lay, targets_sfc, preds_lay, preds_sfc, timesteps)
                         else:
                             loss = lossf(targets_lay, targets_sfc, preds_lay, preds_sfc)
