@@ -438,18 +438,18 @@ def CRPS(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, alpha=1.0, return_low_
     
     # ens_var, MSE = spread_skill_ratio(y, y_pred) # actually RMSE not MSE
 
-    if return_low_var_inds:
-        x = cmean_out[:,0,1]
-        q = torch.quantile(x, 0.05,  keepdim=False)
-        inds = x <= q
+    # if return_low_var_inds:
+    #     x = cmean_out[:,0,1]
+    #     q = torch.quantile(x, 0.05,  keepdim=False)
+    #     inds = x <= q
 
-        # print("shape cmean out", cmean_out.shape, "shape inds", inds.shape)
-        # print("cmean out 0, 01,   2048, 01", cmean_out[0,0,1], cmean_out[2048,0,1])
-        # return beta * 2 * MSE - ens_var, MSE, ens_var, inds
-        return CRPS,  MSE, ens_var, inds
+    #     # print("shape cmean out", cmean_out.shape, "shape inds", inds.shape)
+    #     # print("cmean out 0, 01,   2048, 01", cmean_out[0,0,1], cmean_out[2048,0,1])
+    #     # return beta * 2 * MSE - ens_var, MSE, ens_var, inds
+    #     return CRPS,  MSE, ens_var, inds
 
-    else:
-        return CRPS, MSE, ens_var
+    # else:
+    return CRPS#, MSE, ens_var
 
 
 def CRPS_l1(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
@@ -523,7 +523,7 @@ def CRPS_l1(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
 
     # # Compute weighted loss (spec_weight = 1 by default)
     loss = skill - 0.5 * spread
-    return loss, skill, spread
+    return loss#, skill, spread
 
 def CRPS_anemoi(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
     """
@@ -582,7 +582,7 @@ def CRPS_anemoi(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
     loss = torch.sum(loss,dim=1)  # --> (batch)
     loss = torch.mean(loss)
    
-    return loss, skill, spread
+    return loss#, skill, spread
 
 
 def CRPS4(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, return_low_var_inds=False):
@@ -665,18 +665,18 @@ def CRPS4(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, return_low_var_inds=F
     
     CRPS =  beta * 2 * MSE - ens_var # beta should be 1
 
-    if return_low_var_inds:
-        x = cmean_out[:,0,1]
-        q = torch.quantile(x, 0.05,  keepdim=False)
-        inds = x <= q
+    # if return_low_var_inds:
+    #     x = cmean_out[:,0,1]
+    #     q = torch.quantile(x, 0.05,  keepdim=False)
+    #     inds = x <= q
 
-        # print("shape cmean out", cmean_out.shape, "shape inds", inds.shape)
-        # print("cmean out 0, 01,   2048, 01", cmean_out[0,0,1], cmean_out[2048,0,1])
-        # return beta * 2 * MSE - ens_var, MSE, ens_var, inds
-        return CRPS,  MSE, ens_var, inds
+    #     # print("shape cmean out", cmean_out.shape, "shape inds", inds.shape)
+    #     # print("cmean out 0, 01,   2048, 01", cmean_out[0,0,1], cmean_out[2048,0,1])
+    #     # return beta * 2 * MSE - ens_var, MSE, ens_var, inds
+    #     return CRPS,  MSE, ens_var, inds
 
-    else:
-        return CRPS, MSE, ens_var
+    # else:
+    return CRPS#, MSE, ens_var
 
 def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps, sumvar=True):
     """
@@ -727,26 +727,25 @@ def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps, sumvar=True):
     else:
       CRPS = CRPS.mean()
 
-    # print("CRPS shape", CRPS.shape)
-    y       = y.reshape((timesteps*batch_size,1,-1))
-    y_pred  = y_pred.reshape((timesteps*batch_size,ens_size,-1))
+    # # print("CRPS shape", CRPS.shape)
+    # y       = y.reshape((timesteps*batch_size,1,-1))
+    # y_pred  = y_pred.reshape((timesteps*batch_size,ens_size,-1))
 
-    eps = 1 / ens_size
+    # eps = 1 / ens_size
 
-    # cdist
-    # x1 (Tensor) – input tensor of shape B×P×M
-    # x2 (Tensor) – input tensor of shape B×R×M
-    # ypred (batch,nens,30*4)   y  (batch,1,30*4)   
-    # cdist out term1 (batch,1,nens)
-    # cdist out term2 (batch, nens, nens)   
-    MSE       = torch.cdist(y, y_pred).mean()  # B, 1, nens  --> (1)
-    cmean_out = torch.cdist(y_pred, y_pred) # B, nens, nens
-    ens_var = ( (1-eps)* cmean_out.mean(0).sum() ) / (ens_size * (ens_size - 1)) 
-    MSE         /= y_pred.size(-1) ** 0.5
-    ens_var     /= y_pred.size(-1) ** 0.5
+    # # cdist
+    # # x1 (Tensor) – input tensor of shape B×P×M
+    # # x2 (Tensor) – input tensor of shape B×R×M
+    # # ypred (batch,nens,30*4)   y  (batch,1,30*4)   
+    # # cdist out term1 (batch,1,nens)
+    # # cdist out term2 (batch, nens, nens)   
+    # MSE       = torch.cdist(y, y_pred).mean()  # B, 1, nens  --> (1)
+    # cmean_out = torch.cdist(y_pred, y_pred) # B, nens, nens
+    # ens_var = ( (1-eps)* cmean_out.mean(0).sum() ) / (ens_size * (ens_size - 1)) 
+    # MSE         /= y_pred.size(-1) ** 0.5
+    # ens_var     /= y_pred.size(-1) ** 0.5
     
-
-    return CRPS, MSE, ens_var
+    return CRPS#, MSE, ens_var
 
 def variogram_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     # y:  ntime*nbatch,      nseq, ny 
@@ -777,23 +776,8 @@ def variogram_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     # print("variogram shape", vs.shape)
 
     vs = vs.mean()
-
-    y       = y.reshape((timesteps*batch_size,1,-1))
-    # y_pred  = y_pred.reshape((timesteps*batch_size,ens_size,-1))
-    eps = 1 / ens_size
-    # cdist
-    # x1 (Tensor) – input tensor of shape B×P×M
-    # x2 (Tensor) – input tensor of shape B×R×M
-    # ypred (batch,nens,30*4)   y  (batch,1,30*4)   
-    # cdist out term1 (batch,1,nens)
-    # cdist out term2 (batch, nens, nens)   
-    MSE       = torch.cdist(y, y_pred).mean()  # B, 1, nens  --> (1)
-    cmean_out = torch.cdist(y_pred, y_pred) # B, nens, nens
-    ens_var = ( (1-eps)* cmean_out.mean(0).sum() ) / (ens_size * (ens_size - 1)) 
-    MSE         /= y_pred.size(-1) ** 0.5
-    ens_var     /= y_pred.size(-1) ** 0.5
     
-    return vs, MSE, ens_var
+    return vs
 
 def energy_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     # y:  ntime*nbatch,      nseq, ny 
@@ -821,24 +805,8 @@ def energy_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     # es = sr.es_ensemble(y, y_pred, backend='torch') #, estimator='nrg')
     # print("es shape", CRPS.shape)
     es = es.mean()
-
-    # print("CRPS shape", CRPS.shape)
-    y       = y.reshape((timesteps*batch_size,1,-1))
-    # y_pred  = y_pred.reshape((timesteps*batch_size,ens_size,-1))
-    eps = 1 / ens_size
-    # cdist
-    # x1 (Tensor) – input tensor of shape B×P×M
-    # x2 (Tensor) – input tensor of shape B×R×M
-    # ypred (batch,nens,30*4)   y  (batch,1,30*4)   
-    # cdist out term1 (batch,1,nens)
-    # cdist out term2 (batch, nens, nens)   
-    MSE       = torch.cdist(y, y_pred).mean()  # B, 1, nens  --> (1)
-    cmean_out = torch.cdist(y_pred, y_pred) # B, nens, nens
-    ens_var = ( (1-eps)* cmean_out.mean(0).sum() ) / (ens_size * (ens_size - 1)) 
-    MSE         /= y_pred.size(-1) ** 0.5
-    ens_var     /= y_pred.size(-1) ** 0.5
     
-    return es, MSE, ens_var
+    return es
 
 def ds_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     # y:  ntime*nbatch,      nseq, ny 
@@ -866,27 +834,8 @@ def ds_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     # y = y + 1e-4
     ds = sr.dssmv_ensemble(y, y_pred,backend='torch')
     # ds = sr.error_spread_score(y, y_pred, m_axis=1,backend='torch')
-
-    # # print("ds shape", ds.shape)
-    # ds = ds.sum(dim=-1).mean()
-
-    # print("CRPS shape", CRPS.shape)
-    y       = y.reshape((timesteps*batch_size,1,-1))
-    # y_pred  = y_pred.reshape((timesteps*batch_size,ens_size,-1))
-    eps = 1 / ens_size
-    # cdist
-    # x1 (Tensor) – input tensor of shape B×P×M
-    # x2 (Tensor) – input tensor of shape B×R×M
-    # ypred (batch,nens,30*4)   y  (batch,1,30*4)   
-    # cdist out term1 (batch,1,nens)
-    # cdist out term2 (batch, nens, nens)   
-    MSE       = torch.cdist(y, y_pred).mean()  # B, 1, nens  --> (1)
-    cmean_out = torch.cdist(y_pred, y_pred) # B, nens, nens
-    ens_var = ( (1-eps)* cmean_out.mean(0).sum() ) / (ens_size * (ens_size - 1)) 
-    MSE         /= y_pred.size(-1) ** 0.5
-    ens_var     /= y_pred.size(-1) ** 0.5
     
-    return ds, MSE, ens_var
+    return ds
 
 # def get_CRPS(beta, sumvar): 
 def get_CRPS(sumvar): 
