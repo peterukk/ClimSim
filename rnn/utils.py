@@ -605,17 +605,15 @@ class train_or_eval_one_epoch:
                             epoch_wcon  += water_con.item()
                             epoch_accumprec += precip_sum_mse.item()
                             epoch_prec_gel += precip_sum_gel.item()
-                            err_dq_ens1 = dq_true.flatten() - dq_ens1.flatten()
-                            err_dq_ens2 = dq_true.flatten() - dq_ens2.flatten() 
-                            epoch_q_err_corr += np.corrcoef(err_dq_ens1,err_dq_ens2)[0,1]
-
                             if self.model_is_stochastic:
-                                epoch_ens_var += ens_var.item()
-                                epoch_det_skill += det_skill.item()
-                                epoch_spreadskill += ens_var.item() / det_skill.item()
-                                if self.use_ensemble:
-                                    epoch_dt_std += dt_std.item()
-                                    epoch_dq_std += dq_std.item()
+                              err_dq_ens1 = dq_true.flatten() - dq_ens1.flatten()
+                              err_dq_ens2 = dq_true.flatten() - dq_ens2.flatten() 
+                              epoch_q_err_corr += np.corrcoef(err_dq_ens1,err_dq_ens2)[0,1]
+                              epoch_ens_var += ens_var.item()
+                              epoch_det_skill += det_skill.item()
+                              epoch_spreadskill += ens_var.item() / det_skill.item()
+                              epoch_dt_std += dt_std.item()
+                              epoch_dq_std += dq_std.item()
                             biases_lev, biases_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc, numpy=True)
                             epoch_bias_lev += np.mean(biases_lev)
                             epoch_bias_heating += biases_lev[0]
@@ -760,9 +758,9 @@ class train_or_eval_one_epoch:
             self.metrics['ens_var'] =  epoch_ens_var / k
             self.metrics['det_skill'] =  epoch_det_skill / k
             self.metrics['spread_skill_ratio'] =  epoch_spreadskill / k
-            if self.use_ensemble:
-                self.metrics['dt_ens_std']  = epoch_dt_std / k
-                self.metrics['dq_ens_std']  = epoch_dq_std / k
+            self.metrics['dt_ens_std']  = epoch_dt_std / k
+            self.metrics['dq_ens_std']  = epoch_dq_std / k
+            self.metrics['q_err_corr'] = epoch_q_err_corr  / k
         self.metrics["h_conservation"] =  epoch_hcon / k
         self.metrics["water_conservation"] =  epoch_wcon / k
         self.metrics["precip_accum_mse"] = epoch_accumprec / k
@@ -808,7 +806,6 @@ class train_or_eval_one_epoch:
         # self.metrics['99p_ratio_prechour'] = epoch_prec_99p_hour / k3
         self.metrics['gel_precsum'] = epoch_prec_gel / k 
         self.metrics['moisture_std_ratio'] = epoch_hum_std_ratio / k
-        self.metrics['q_err_corr'] = epoch_q_err_corr  / k
 
         self.metrics['mae_clw'] = np.nanmean(epoch_mae_lev_clw / k)
         self.metrics['mae_cli'] = np.nanmean(epoch_mae_lev_cli / k)
