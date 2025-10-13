@@ -637,6 +637,94 @@ class MyStochasticGRULayer5_MLP_fused(jit.ScriptModule):
 
         return torch.stack(outputs), hidden
 
+class LayerNorm(nn.Module):
+    def __init__(self, nb_eps, nb_features, eps = 1e-5):
+        super(LayerNorm, self).__init__()
+        self.eps = eps
+        self.gain = Parameter(torch.ones(nb_eps, nb_features))
+        self.bias = Parameter(torch.zeros(nb_eps, nb_features))
+
+    @torch.compile
+    def forward(self, x, noise):
+        mean = x.mean(1,keepdim=True).expand_as(x)
+        std = x.std(1,keepdim=True).expand_as(x)
+        # x = (x - mean) / (std + self.eps)
+        # x = x * self.gain.expand_as(x) + self.bias.expand_as(x)
+        #  eps is (nb, neps) where neps is e.g. 16
+        #  x is (nb, nh)
+        #  multiply eps with an MLP (neps, nh) to get to (nb, nh) for the gain and bias parameters 
+        # e.g. (nb,nh)*(16,128)
+        x = (x - mean) / (std + self.eps) * torch.mm(noise, self.gain) + torch.mm(noise, self.bias)
+        return x
+
+class StochasticLayerNormLSTMLayer(jit.ScriptModule):
+    def __init__(self, input_size, hidden_size, eps_size):
+        super().__init__()
+        # self.cell = cell(*cell_args)
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.eps_size = eps_size
+        self.weight_ih = Parameter(torch.randn(( input_size, 4 * hidden_size)))
+        self.weight_hh = Parameter(torch.randn(( hidden_size, 4 * hidden_size)))
+        
+        self.bias_ih = Parameter(torch.randn((4 * hidden_size)))
+        self.bias_hh = Parameter(torch.randn((4 * hidden_size)))
+        
+        self.ln_ih = LayerNorm(eps_size, 4 * hidden_size)
+        self.ln_hh = LayerNorm(eps_size, 4 * hidden_size)
+        self.ln_ho = LayerNorm(eps_size, hidden_size)
+
+        # self.weight_encoder =  Parameter(torch.randn((input_size + hidden_size, 2*hidden_size),dtype=dtype))
+        # self.weight_zh = Parameter(torch.randn((hidden_size, hidden_size),dtype=dtype))
+        # self.bias_zh = Parameter(torch.randn((3 * hidden_size),dtype=dtype))
+        # self.bias_zh = Parameter(torch.randn((hidden_size),dtype=dtype))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        std = 1.0 / math.sqrt(self.hidden_size)
+        for w in self.parameters():
+            w.data.uniform_(-std, std)
+            
+    @torch.compile
+    def forward(
+        self, input_seq: Tensor, state: Tuple[Tensor, Tensor]
+    ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
+        nseq, batch_size, nx = input_seq.shape
+        # epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device)
+        # epss = epss.unbind(0)
+        inputs = input_seq.unbind(0)
+        outputs = torch.jit.annotate(List[Tensor], [])
+        hx, cx = state
+        
+        # weight_ih = self.weight_ih.t()
+        # weight_hh = self.weight_hh.t()
+        epss = torch.randn((nseq, batch_size, self.eps_size),device=input_seq.device, dtype=input_seq.dtype)
+
+        for i in range(len(inputs)):
+            x = inputs[i]
+            eps = epss[i]
+            # eps = torch.randn((batch_size, self.eps_size),device=input_seq.device, dtype=input_seq.dtype)
+
+            # gates = self.ln_ih(F.linear(x, self.weight_ih, self.bias_ih)) + self.ln_hh(F.linear(hx, self.weight_hh, self.bias_hh))
+            gates = self.ln_ih((torch.mm(x, self.weight_ih) + self.bias_ih), eps) + self.ln_hh((torch.mm(hx, self.weight_hh) + self.bias_hh), eps)
+                       
+            ingate, forgetgate, cellgate, outgate = gates.chunk(4, 1)
+            
+            ingate = torch.sigmoid(ingate)
+            forgetgate = torch.sigmoid(forgetgate)
+            cellgate = torch.tanh(cellgate)
+            outgate = torch.sigmoid(outgate)
+
+            cx = (forgetgate * cx) + (ingate * cellgate)
+            hx = outgate * torch.tanh(self.ln_ho(cx, eps))
+            
+            outputs += [hx]
+
+        state =  (hx, cx)
+
+        return torch.stack(outputs), state
+
 class MyStochasticLSTMLayer(jit.ScriptModule):
     def __init__(self, input_size, hidden_size, dtype=torch.float32):
         super().__init__()
