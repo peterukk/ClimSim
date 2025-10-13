@@ -47,24 +47,36 @@ def rmse(y_true_lev, y_pred_lev):
     return val_rmse.detach().cpu().numpy()
 
 
-def compute_biases(y_true_lev, y_pred_lev):
+def compute_biases(y_true_lev, y_pred_lev, timesteps):
+
+    
+    ns,seq_size,feature_size = y_true_lev.shape
+    batch_size = ns // timesteps
+    y_true_lev = torch.reshape(y_true_lev, (timesteps, batch_size, seq_size, feature_size))
+    y_pred_lev = torch.reshape(y_pred_lev, (timesteps, batch_size, seq_size, feature_size))
+
+    mean_t_batchlev = torch.nanmean(y_true_lev,dim=(0))
+    mean_p_batchlev = torch.nanmean(y_pred_lev,dim=(0))
+    # (nb, nlev, y)
+    biases_batchlev = mean_p_batchlev - mean_t_batchlev
 
     # mean_t_lev = torch.nanmean(y_true_lev,dim=(0,1))
     # mean_p_lev = torch.nanmean(y_pred_lev,dim=(0,1))
   
     # biases_lev = mean_t_lev - mean_p_lev
 
-    mean_t_lev = torch.nanmean(y_true_lev,dim=(0))
-    mean_p_lev = torch.nanmean(y_pred_lev,dim=(0))
+    mean_t_lev = torch.nanmean(mean_t_batchlev,dim=(0))
+    mean_p_lev = torch.nanmean(mean_p_batchlev,dim=(0))
+    # (nlev, ny)
 
-    biases_perlev = mean_t_lev - mean_p_lev
+    biases_perlev = mean_p_lev - mean_t_lev
 
     mean_t_nolev = torch.nanmean(mean_t_lev,dim=(0))
     mean_p_nolev = torch.nanmean(mean_p_lev,dim=(0))
   
-    biases_nolev = mean_t_nolev - mean_p_nolev
+    biases_nolev = mean_p_nolev - mean_t_nolev
 
-    return biases_nolev.detach().cpu().numpy(), biases_perlev.detach().cpu().numpy()
+    return biases_nolev.detach().cpu().numpy(), biases_perlev.detach().cpu().numpy(), biases_batchlev.detach().cpu().numpy()
 
 
 def compute_absolute_biases(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, numpy=False):
@@ -79,7 +91,7 @@ def compute_absolute_biases(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, nump
     # 3) Abs, so that compensating biases are not hidden 
     biases_lev = torch.abs(diff_lev) # (levels, features)
     biases_sfc = torch.abs(diff_sfc) # (features)
-    # 4) Mean again across levels / features as needed to distill into scalar metric
+    # 4) Mean again across levels 
     biases_lev = torch.nanmean(biases_lev, dim=(0)) 
     
     if numpy:

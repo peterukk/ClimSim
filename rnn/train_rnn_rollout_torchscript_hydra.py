@@ -33,7 +33,7 @@ print(device)
 from torch.utils.data import DataLoader
 from torchinfo import summary
 from models import  *
-from utils import train_or_eval_one_epoch, generator_xy, BatchSampler
+from utils import train_or_eval_one_epoch, generator_xy, BatchSampler, plot_bias_diff
 # from metrics import get_energy_metric, get_hybrid_loss, my_mse_flatten
 import metrics as metrics
 from torchmetrics.regression import R2Score
@@ -974,48 +974,61 @@ def main(cfg: DictConfig):
                 model = model.to(device)
                 print("model saved!")
 
-                R2 = val_runner.metrics["R2_lev"]
-                labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
-                ncols, nrows = 3,2
-                fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(9.5, 4.5),
-                                        layout="constrained")
-                j = 0
-                for irow in range(2):
-                    for icol in range(3):
-                        axs[irow,icol].plot(R2[:,j],level)
-                        axs[irow,icol].set_ylim(0,1000)
-                        axs[irow,icol].invert_yaxis()
-                        axs[irow,icol].set_xlim(0,1)
-                        axs[irow,icol].set_title(labels[j])
-                        j = j + 1
-                    
-                fig.subplots_adjust(hspace=0)
-                plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_R2.pdf')
+            R2 = val_runner.metrics["R2_lev"]
+            labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
+            ncols, nrows = 3,2
+            fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(9.5, 4.5),
+                                    layout="constrained")
+            j = 0
+            for irow in range(2):
+                for icol in range(3):
+                    axs[irow,icol].plot(R2[:,j],level)
+                    axs[irow,icol].set_ylim(0,1000)
+                    axs[irow,icol].invert_yaxis()
+                    axs[irow,icol].set_xlim(0,1)
+                    axs[irow,icol].set_title(labels[j])
+                    j = j + 1
+                
+            fig.subplots_adjust(hspace=0)
+            plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_R2.pdf')
 
-                plt.clf()
-                bias = val_runner.metrics["bias_perlev"]
-                fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
-                for i in range(6):
-                    axs[i].plot(np.arange(60), bias[:,i]); 
-                    axs[i].set_title(labels[i])
-                    axs[i].set_xlim(0,60)
-                    axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
+            # plt.clf()
+            # bias = val_runner.metrics["bias_perlev"]
+            # fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
+            # for i in range(6):
+            #     axs[i].plot(np.arange(60), bias[:,i]); 
+            #     axs[i].set_title(labels[i])
+            #     axs[i].set_xlim(0,60)
+            #     axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
 
-                fig.subplots_adjust(hspace=0.6)                                                     
-                plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_bias.pdf')
+            # fig.subplots_adjust(hspace=0.6)                                                     
+            # plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_bias.pdf')
 
-                plt.clf()
-                rmse = val_runner.metrics["rmse_perlev"]
-                fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
-                for i in range(6):
-                    axs[i].plot(np.arange(60), rmse[:,i]); 
-                    axs[i].set_title(labels[i])
-                    axs[i].set_xlim(0,60)
-                    axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
+            plt.clf()
+            rmse = val_runner.metrics["rmse_perlev"]
+            fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
+            for i in range(6):
+                axs[i].plot(np.arange(60), rmse[:,i]); 
+                axs[i].set_title(labels[i])
+                axs[i].set_xlim(0,60)
+                axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
 
-                fig.subplots_adjust(hspace=0.6)                                                     
-                plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_rmse.pdf')
+            fig.subplots_adjust(hspace=0.6)                                                     
+            plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_rmse.pdf')
+            
+            if batch_size_val==384:
+                dt_diff = val_runner.epoch_bias_collev[:,:,0]
+                q_diff = val_runner.epoch_bias_collev[:,:,1]
+                clw_diff = val_runner.epoch_bias_collev[:,:,2]
+                cli_diff = val_runner.epoch_bias_collev[:,:,3]
+                v_diff = val_runner.epoch_bias_collev[:,:,5]
 
+                vars_stacked = [dt_diff, q_diff, v_diff, clw_diff, cli_diff]
+                                
+                lat = grid_info.lat
+                grid_area =  grid_info.area
+                fig = plot_bias_diff(vars_stacked, grid_area, lat, level)
+                fig.savefig('saved_models/val_eval/' + MODEL_STR + 'val_zonalmeanbias.png')
 
 
         print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timesteps))

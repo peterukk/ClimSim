@@ -176,29 +176,32 @@ def plot_bias(vars_stacked, grid_area, lat, level):
         data_diff = data_nn - data_sp
             
         # Determine color scales
-        vmax = max(abs(data_sp).max(), abs(data_nn).max())
-        vmin = min(abs(data_sp).min(), abs(data_nn).min())
+        # vmax = max(abs(data_sp).max(), abs(data_nn).max())
+        # vmin = min(abs(data_sp).min(), abs(data_nn).min())
+        vmax = max(data_sp.max(), data_nn.max())
+        vmin = min(data_sp.min(), data_nn.min())
+        vmax = max(vmax, -vmin)
+        
         # if var_info['diff_scale']:
         #     vmax_diff = abs(data_diff).max() * diff_scale
         #     vmin_diff = -vmax_diff
         # vmax_diff =  max_diffs[idx]
         # vmin_diff = -vmax_diff
-        vmax_diff = max(abs(data_diff).max(), abs(data_diff).max())
-        vmin_diff = min(abs(data_diff).min(), abs(data_diff).min())
+        vmax_diff = max(data_diff.max(), -data_diff.min())
         # Plot each variable in its row
         
         
-        data_sp.plot(ax=axs[idx, 0], add_colorbar=True, cmap='viridis', vmin=vmin, vmax=vmax)
+        data_sp.plot(ax=axs[idx, 0], add_colorbar=True, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
         # axs[idx, 0].set_title(f'{labels[idx * 3]} {var_title} ({unit}): MMF')
         axs[idx, 0].set_title("{} , {} ".format(labels[idx],'MMF'))
         axs[idx, 0].invert_yaxis()
         
-        data_nn.plot(ax=axs[idx, 1], add_colorbar=True, cmap='viridis', vmin=vmin, vmax=vmax)
+        data_nn.plot(ax=axs[idx, 1], add_colorbar=True, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
         axs[idx, 1].set_title("{} , {} ".format(labels[idx],'RNN'))
         axs[idx, 1].invert_yaxis()
         axs[idx, 1].set_ylabel('')  # Clear the y-label to clean up plot
         
-        data_diff.plot(ax=axs[idx, 2], add_colorbar=True, cmap='RdBu_r', vmin=vmin_diff, vmax=vmax_diff)
+        data_diff.plot(ax=axs[idx, 2], add_colorbar=True, cmap='RdBu_r', vmin=-vmax_diff, vmax=vmax_diff)
         axs[idx, 2].set_title("{} , {} ".format(labels[idx],'diff'))
         axs[idx, 2].invert_yaxis()
         axs[idx, 2].set_ylabel('')  # Clear the y-label to clean up plot
@@ -214,6 +217,43 @@ def plot_bias(vars_stacked, grid_area, lat, level):
             ax.set_xticklabels(latitude_labels)  # Set the custom text labels
     plt.tight_layout()
     plt.show() 
+
+def plot_bias_diff(vars_stacked, grid_area, lat, level):
+    import xarray as xr
+    
+    labels=["Heating","Moistening","V","Cloud water", "cloud ice"]
+    scalings = [1,1000,1,1e6,1e6]
+        
+    latitude_ticks = [-60, -30, 0, 30, 60]
+    latitude_labels = ['60S', '30S', '0', '30N', '60N']
+    
+    fig, axs = plt.subplots(len(vars_stacked), 1, figsize=(8, 12)) 
+    
+    for idx in range(len(vars_stacked)):
+        var_diff = vars_stacked[idx]
+        
+        zm, lats_sorted = zonal_mean_area_weighted(var_diff, grid_area, lat)
+                
+        scaling = scalings[idx]
+        data_diff = scaling * xr.DataArray(zm[:, :].T, dims=["hybrid pressure (hPa)", "latitude"],
+                                         coords={"hybrid pressure (hPa)": level, "latitude": lats_sorted})
+            
+        # Determine color scales
+        vmax_diff = max(data_diff.max(), -data_diff.min())
+
+        # Plot each variable in its row
+    
+        data_diff.plot(ax=axs[idx], add_colorbar=True, cmap='RdBu_r', vmin=-vmax_diff, vmax=vmax_diff)
+        axs[idx].set_title("{} , {} ".format(labels[idx],'NN - MMF'))
+        axs[idx].invert_yaxis()
+        axs[idx].set_ylabel('')  # Clear the y-label to clean up plot
+    
+    for ax in axs:
+        ax.set_xticks(latitude_ticks)  # Set the positions for the ticks
+        ax.set_xticklabels(latitude_labels)  # Set the custom text labels
+    plt.tight_layout()
+    # plt.show() 
+    return fig
 
 class train_or_eval_one_epoch:
     def __init__(self, dataloader, 
@@ -270,6 +310,8 @@ class train_or_eval_one_epoch:
         # else:
         #     self.model_is_stochastic=False 
         self.model_is_stochastic = model_is_stochastic 
+        if self.batch_size==384:
+            self.epoch_bias_collev = np.zeros((384,  self.model.nlev,  self.model.ny))
 
     def eval_one_epoch(self, lossf, optim, epoch, timesteps=1, lr_scheduler=None):
         report_freq = self.report_freq
@@ -369,17 +411,6 @@ class train_or_eval_one_epoch:
                 yto_sfc0 = yto_sfc_chk[ichunk]
 
                 tcomp0= time.time()     
-                # print("true min max", torch.min(target_lay0[:,:]).item(), torch.max(target_lay0[:,:]).item(), "std", torch.std(target_lay0[:,:]).item())
-                # print("true mean", torch.mean(torch.abs(target_lay0)).item())
-                # print("true sfc mean", torch.mean(torch.abs(target_sfc0)).item())
-
-                # print("true min max 0", torch.min(target_lay0[:,:,0]).item(), torch.max(target_lay0[:,:,0]).item(), "std", torch.std(target_lay0[:,:,0]).item())
-                # print("true min max 1", torch.min(target_lay0[:,:,1]).item(), torch.max(target_lay0[:,:,1]).item(), "std", torch.std(target_lay0[:,:,1]).item())
-                # print("true min max 2", torch.min(target_lay0[:,:,2]).item(), torch.max(target_lay0[:,:,2]).item(), "std", torch.std(target_lay0[:,:,2]).item())
-                # print("true min max 3", torch.min(target_lay0[:,:,3]).item(), torch.max(target_lay0[:,:,3]).item(), "std", torch.std(target_lay0[:,:,3]).item())
-                # print("true min max 4", torch.min(target_lay0[:,:,4]).item(), torch.max(target_lay0[:,:,4]).item(), "std", torch.std(target_lay0[:,:,4]).item())
-                # print("true min max 5", torch.min(target_lay0[:,:,5]).item(), torch.max(target_lay0[:,:,5]).item(), "std", torch.std(target_lay0[:,:,5]).item())
-                # print("true  sfcmin max ", torch.min(target_sfc0[:,:]).item(), torch.max(target_sfc0[:,:]).item(), "std", torch.std(yto_sfc0[:,:]).item())
 
                 if self.use_ensemble:
                   x_lay0 = x_lay0.unsqueeze(0)
@@ -427,19 +458,6 @@ class train_or_eval_one_epoch:
                     else:
                         preds_lay0, preds_sfc0 = outs
                     prev_outputs = preds_lay0[:,:,0:5].float()
-                    # print("prevP", prev_outputs[:,:,0].detach().cpu().numpy().mean(), "prevT", target_lay0[:,:,0].detach().cpu().numpy().mean())
-                    # print("prevT x", x_lay0[:,:,-5].detach().cpu().numpy().mean())
-                    # print("pred min max 0", torch.min(preds_lay0[:,:]).item(), torch.max(preds_lay0[:,:]).item(), "std", torch.std(preds_lay0[:,:]).item())
-                    # print("pred mean", torch.mean(torch.abs(preds_lay0)).item())
-                    # print("pred sfc mean", torch.mean(torch.abs(preds_sfc0)).item())
-
-                    # print("pred min max 0", torch.min(preds_lay0[:,:,0]).item(), torch.max(preds_lay0[:,:,0]).item(), "std", torch.std(preds_lay0[:,:,0]).item())
-                    # print("pred min max 1", torch.min(preds_lay0[:,:,1]).item(), torch.max(preds_lay0[:,:,1]).item(), "std", torch.std(preds_lay0[:,:,1]).item())
-                    # print("pred min max 2", torch.min(preds_lay0[:,:,2]).item(), torch.max(preds_lay0[:,:,2]).item(), "std", torch.std(preds_lay0[:,:,2]).item())
-                    # print("pred min max 3", torch.min(preds_lay0[:,:,3]).item(), torch.max(preds_lay0[:,:,3]).item(), "std", torch.std(preds_lay0[:,:,3]).item())
-                    # print("pred min max 4", torch.min(preds_lay0[:,:,4]).item(), torch.max(preds_lay0[:,:,4]).item(), "std", torch.std(preds_lay0[:,:,4]).item())
-                    # print("pred min max 5", torch.min(preds_lay0[:,:,5]).item(), torch.max(preds_lay0[:,:,5]).item(), "std", torch.std(preds_lay0[:,:,5]).item())
-                    # print("pred  sfc min max ", torch.min(preds_sfc0[:,:]).item(), torch.max(preds_sfc0[:,:]).item(), "std", torch.std(preds_sfc0[:,:]).item())
 
                 if self.cfg.autoregressive:
                     # In the autoregressive training case are gathering many time steps before computing loss
@@ -605,15 +623,17 @@ class train_or_eval_one_epoch:
                             epoch_wcon  += water_con.item()
                             epoch_accumprec += precip_sum_mse.item()
                             epoch_prec_gel += precip_sum_gel.item()
+
                             if self.model_is_stochastic:
-                              err_dq_ens1 = dq_true.flatten() - dq_ens1.flatten()
-                              err_dq_ens2 = dq_true.flatten() - dq_ens2.flatten() 
-                              epoch_q_err_corr += np.corrcoef(err_dq_ens1,err_dq_ens2)[0,1]
-                              epoch_ens_var += ens_var.item()
-                              epoch_det_skill += det_skill.item()
-                              epoch_spreadskill += ens_var.item() / det_skill.item()
-                              epoch_dt_std += dt_std.item()
-                              epoch_dq_std += dq_std.item()
+                                epoch_ens_var += ens_var.item()
+                                epoch_det_skill += det_skill.item()
+                                epoch_spreadskill += ens_var.item() / det_skill.item()
+                                epoch_dt_std += dt_std.item()
+                                epoch_dq_std += dq_std.item()
+                                err_dq_ens1 = dq_true.flatten() - dq_ens1.flatten()
+                                err_dq_ens2 = dq_true.flatten() - dq_ens2.flatten() 
+                                epoch_q_err_corr += np.corrcoef(err_dq_ens1,err_dq_ens2)[0,1]
+                                
                             biases_lev, biases_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc, numpy=True)
                             epoch_bias_lev += np.mean(biases_lev)
                             epoch_bias_heating += biases_lev[0]
@@ -621,10 +641,11 @@ class train_or_eval_one_epoch:
                             epoch_bias_cli += biases_lev[3]
                             epoch_bias_sfc += np.mean(biases_sfc)
 
-                            biases_nolev, biases_perlev = metrics.compute_biases(yto_lay, ypo_lay)
+                            biases_nolev, biases_perlev, biases_collev = metrics.compute_biases(yto_lay, ypo_lay, timesteps)
+                            if self.batch_size==384:
+                                self.epoch_bias_collev += biases_collev
                             epoch_bias_lev_tot += np.mean(biases_nolev)
                             epoch_bias_perlev += biases_perlev
-
                             epoch_rmse_perlev += metrics.rmse(yto_lay, ypo_lay)
 
                             self.metric_R2.update(ypo_lay.reshape((-1,self.ny_pp)), yto_lay.reshape((-1,self.ny_pp)))
@@ -761,6 +782,7 @@ class train_or_eval_one_epoch:
             self.metrics['dt_ens_std']  = epoch_dt_std / k
             self.metrics['dq_ens_std']  = epoch_dq_std / k
             self.metrics['q_err_corr'] = epoch_q_err_corr  / k
+
         self.metrics["h_conservation"] =  epoch_hcon / k
         self.metrics["water_conservation"] =  epoch_wcon / k
         self.metrics["precip_accum_mse"] = epoch_accumprec / k
@@ -773,6 +795,8 @@ class train_or_eval_one_epoch:
         self.metrics["bias_heating"] = epoch_bias_heating / k 
         self.metrics["bias_cldliq"] = epoch_bias_clw / k 
         self.metrics["bias_cldice"] = epoch_bias_cli / k 
+        if self.batch_size==384:
+            self.epoch_bias_collev = self.epoch_bias_collev / k
 
         self.metrics["bias_perlev"] = epoch_bias_perlev / k 
         self.metrics["rmse_perlev"] = epoch_rmse_perlev / k 
