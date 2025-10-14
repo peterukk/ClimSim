@@ -558,11 +558,11 @@ class train_or_eval_one_epoch:
                             
                         raw_bias_lev, raw_bias_sfc = metrics.compute_absolute_biases(targets_lay2, targets_sfc, preds_lay2, preds_sfc)
                         bias_tot = torch.cat((raw_bias_lev, raw_bias_sfc))
-                        bias_tot = torch.nanmean(bias_tot)
-                        # inds_inf = torch.isinf(bias_tot)
-                        # bias_tot = bias_tot[~inds_inf]
-                        # inds_nan = torch.isnan(bias_tot)
-                        # bias_tot = torch.mean(bias_tot[~inds_nan])
+                        # bias_tot = torch.nanmean(bias_tot)
+                        inds_inf = torch.isinf(bias_tot)
+                        bias_tot = bias_tot[~inds_inf]
+                        inds_nan = torch.isnan(bias_tot)
+                        bias_tot = torch.mean(bias_tot[~inds_nan])
 
                         if self.cfg.use_bias_loss:
                             loss = loss + self.cfg.w_bias*(bias_tot**2)
