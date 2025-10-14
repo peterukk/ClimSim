@@ -974,23 +974,23 @@ def main(cfg: DictConfig):
                 model = model.to(device)
                 print("model saved!")
 
-            R2 = val_runner.metrics["R2_lev"]
-            labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
-            ncols, nrows = 3,2
-            fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(9.5, 4.5),
-                                    layout="constrained")
-            j = 0
-            for irow in range(2):
-                for icol in range(3):
-                    axs[irow,icol].plot(R2[:,j],level)
-                    axs[irow,icol].set_ylim(0,1000)
-                    axs[irow,icol].invert_yaxis()
-                    axs[irow,icol].set_xlim(0,1)
-                    axs[irow,icol].set_title(labels[j])
-                    j = j + 1
-                
-            fig.subplots_adjust(hspace=0)
-            plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_R2.pdf')
+                R2 = val_runner.metrics["R2_lev"]
+                labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
+                ncols, nrows = 3,2
+                fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(9.5, 4.5),
+                                        layout="constrained")
+                j = 0
+                for irow in range(2):
+                    for icol in range(3):
+                        axs[irow,icol].plot(R2[:,j],level)
+                        axs[irow,icol].set_ylim(0,1000)
+                        axs[irow,icol].invert_yaxis()
+                        axs[irow,icol].set_xlim(0,1)
+                        axs[irow,icol].set_title(labels[j])
+                        j = j + 1
+                    
+                fig.subplots_adjust(hspace=0)
+                plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_R2.pdf')
 
             # plt.clf()
             # bias = val_runner.metrics["bias_perlev"]
