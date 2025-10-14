@@ -1,9 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Thu Mar 13 10:15:11 2025
+PyTorch code for training ClimSim emulators, utilizing Hydra for easy configuration and WandB for tracking results.
+Messy but flexible (LOTS of options!) 
+Here we train autoregressively on a continuous time series, which enables learning a latent convective memory
+
+Other stuff
+- Several options for 
+    -- models (RNN and SSM-based, found in models.py)
+    -- loss functions (hybrid loss, optionally adding terms for e.g. energy conservation), see metrics.py
+    -- optimizers (I recommend SOAP)
+    -- schedulers
+- Fast data loader based on chunking and prefetching data, with on-the-fly preprocessing (generator_xy in utils.py )
+- Convective memory using previous tendencies: option to mix with predictions (cfg.train_replay, cfg.val_replay, cfg.gradual_mixing_end_epoch)
+- Save models when new minimum in validation loss found, also same some validation plots while at it
+    -- models are saved as both H5 and JIT-scripted model. These include normalization coefficients, but
+       a wrapper is still needed for implementation in E3SM (see notebook save_wrapper_mem_prevtend_ftorch_test)
+       should perhaps move everything to the main model classes so a wrapper is not needed
+
+Actual per-epoch training code is in train_or_eval_one_epoch in utils.py
 
 @author: Peter Ukkonen
+
 """
 
 import os
@@ -34,7 +52,6 @@ from torch.utils.data import DataLoader
 from torchinfo import summary
 from models import  *
 from utils import train_or_eval_one_epoch, generator_xy, BatchSampler, plot_bias_diff
-# from metrics import get_energy_metric, get_hybrid_loss, my_mse_flatten
 import metrics as metrics
 from torchmetrics.regression import R2Score
 import wandb
@@ -66,24 +83,18 @@ def main(cfg: DictConfig):
 
     # torch.cuda.memory._record_memory_history(enabled='all')
     
+    # SELECT OUTPUTS / MICROPHYSICS CONSTRAINT
     # mp_mode = 0   # regular 6 outputs
     # mp_mode = 1   # 5 outputs, predict qn, liq_ratio DIAGNOSED from temperature (mp_constraint) (Hu et al.)
     # mp_mode = -1  # 6 outputs, predict qn + liq_ratio PREDICTED
-    # ignore what's below (confusing), instead new option (physical_precip) for precipitation hack (prev mp_mode=3)
     if cfg.physical_precip and cfg.mp_mode==0:
       raise NotImplementedError("Physical_precip=true as it not compatible with mp_mode=0 as it requires qn")
+    # ignore comments below (confusing), instead new option^ (physical_precip) for precipitation hack (previously mp_mode=3)
 
     # mp_mode = 2   # same as mode=1 (predict qn), liq_ratio diagnose, attempt to diagnose precipitation from 
     #  vertically integrated moisture change, diagnose snow based on temperature
     # mp_mode = 3   # similar to mode=2 but keep track of precipitation that hasn't fallen yet
-
     # negative value of mp_mode (-3...-1) : same as abs(mp_mode) where we use qn but liq ratio is PREDICTED
-
-    # if abs(cfg.mp_mode)>0:
-    #     use_mp_constraint=True
-    # else:
-    #     use_mp_constraint=False 
-        
     
     if cfg.memory=="None":
         cfg.autoregressive=False
@@ -597,23 +608,13 @@ def main(cfg: DictConfig):
     infostr = summary(model)
     num_params = infostr.total_params
     
-    # if cfg.model_file_checkpoint != "None":
-    #     print("Loading existing model checkpoint from {}".format(cfg.model_file_checkpoint))
-    #     checkpoint = torch.load("saved_models/"+cfg.model_file_checkpoint, weights_only=True)
-    #     model.load_state_dict(checkpoint['model_state_dict'])
-    
-    # if cfg.use_scaler:
-    #     # scaler = torch.amp.GradScaler(autocast = True)
-    #     scaler = torch.amp.GradScaler(device.type)
-            
     if cfg.autoregressive:
         batch_size_tr = nloc
     else:
         batch_size_tr = cfg.batch_size_tr
 
-    # To improve IO, which is a bottleneck, increase the batch size by a factor of chunk_factor and 
-    # load this many batches at once. These chk then need to be manually split into batches 
-    # within the data iteration loop   
+    # To improve IO, which is a bottleneck, increase the batch size by a factor of chunk_factor and load this many
+    # batches at once. These chk then need to be manually split into batches within the data iteration loop   
     pin = False
     persistent=False
     
@@ -692,11 +693,6 @@ def main(cfg: DictConfig):
     elif cfg.loss_fn_type == "huber":
         loss_fn = metrics_det
     elif cfg.loss_fn_type == "CRPS":
-        # if cfg.crps_start_epoch>0: 
-        #     beta_initial = 500.0
-        #     loss_fn = metrics.get_CRPS(beta_initial, cfg.crps_sumvar)
-        #     print("Setting beta to", beta_initial, "CRPS sum variables first:", cfg.crps_sumvar)
-        # else:
         loss_fn = metrics.get_CRPS(cfg.crps_sumvar)
         print("CRPS sum variables first:", cfg.crps_sumvar)
     elif cfg.loss_fn_type == "variogram_score":
@@ -743,27 +739,10 @@ def main(cfg: DictConfig):
   
 #   https://docs.pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.OneCycleLR.html
     if cfg.lr_scheduler=="OneCycleLR":
-    #   scheduler_end_epoch = 30
-      #max_lr = 5*cfg.lr
-    #   max_lr = 4*cfg.lr
-        # max_lr = 0.002
         max_lr = cfg.scheduler_max_lr
-      # max_lr = 3*cfg.lr
-        # final_div_factor = 10
-        # min_lr = 0.0002
         min_lr = cfg.scheduler_min_lr
         final_div_factor = cfg.lr/min_lr
-    #   steps_per_epoch = int(2*train_data.ntimesteps // timestep_schedule.mean())
-    #   print("Using OneCycleLR with max_lr={} steps_per_epoch={}".format(max_lr, steps_per_epoch))
-    #   lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, 
-    #                                                      div_factor=max_lr/cfg.lr,
-    #                                                      final_div_factor=10,
-    #                                                      epochs=scheduler_end_epoch, steps_per_epoch= steps_per_epoch)
-
-    #   steps_per_epoch = int(2*train_data.ntimesteps // timestep_schedule.mean())
-        # pct_start = 0.1
         scheduler_end_epoch = cfg.scheduler_end_epoch
-        # scheduler_end_epoch = cfg.num_epochs
         pct_start = cfg.scheduler_peak_epoch / scheduler_end_epoch
         annealing = cfg.scheduler_annealing # "linear" #"cos"
         print("Using OneCycleLR with max_lr={} total steps={}, min_lr={}, pct_start={}, anneal={}".format(max_lr, scheduler_end_epoch, min_lr, pct_start, annealing))
@@ -782,9 +761,6 @@ def main(cfg: DictConfig):
     else:
       raise NotImplementedError(("scheduler {} not supported".format(cfg.lr_scheduler)))
 
-    # lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optimizer, gamma=cfg.learning_rate_decay_factor,last_epoch=-1)
-
-            
     from random import randrange
     model_num = randrange(10,99999)
     
@@ -796,14 +772,12 @@ def main(cfg: DictConfig):
     conf["model_num"] = model_num
     conf["num_params"] = num_params 
     
-    # OmegaConf.save(sorted(config), "conf/autoreg_LSTM.yaml")
     if cfg.use_wandb:
         os.environ["WANDB__SERVICE_WAIT"]="400"
         run = wandb.init(
             project="climsim",
             config=conf
         )       
-    
     
     train_runner = train_or_eval_one_epoch(train_loader, model, device, dtype, cfg, metrics_det, 
                                            metric_h_con, metric_water_con, batch_size_tr,  train=True, model_is_stochastic=is_stochastic)
@@ -825,17 +799,6 @@ def main(cfg: DictConfig):
     tsteps_old = 1
     new_lr = cfg.lr
     
-    # model = model.to("cpu")
-    # torch.save({
-    #             'epoch': 0,
-    #             'model_state_dict': model.state_dict(),
-    #             'optimizer_state_dict': optimizer.state_dict(),
-    #             'val_loss': 0,
-    #             }, SAVE_PATH)  
-    # scripted_model = torch . jit . script ( model )
-    # scripted_model = scripted_model.eval()
-    # scripted_model.save(save_file_torch)
-
     # load from checkpoint of it exists
     start_epoch=0
     if len(cfg.model_file_checkpoint)>0:
@@ -942,11 +905,6 @@ def main(cfg: DictConfig):
             # if True:
             if cfg.save_model and val_loss < best_val_loss:
             # if cfg.save_model and val_loss > best_val_loss:
-                # SAVE_PATH =  'saved_models/{}-{}_lr{}.neur{}-{}_x{}_y{}_num{}_ep{}_val{:.4f}.pt'.format(cfg.model_type,
-                #                                                                 cfg.memory, cfg.lr, 
-                #                                                                 cfg.nneur[0], cfg.nneur[1], 
-                #                                                                 inpstr, outpstr,
-                #                                                                 model_num, epoch, val_loss)
                 save_file_torch1 = "saved_models/" + MODEL_STR + "_script_gpu.pt"
                 save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
                 print("saving model to", SAVE_PATH)
@@ -991,18 +949,6 @@ def main(cfg: DictConfig):
                     
                 fig.subplots_adjust(hspace=0)
                 plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_R2.pdf')
-
-            # plt.clf()
-            # bias = val_runner.metrics["bias_perlev"]
-            # fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
-            # for i in range(6):
-            #     axs[i].plot(np.arange(60), bias[:,i]); 
-            #     axs[i].set_title(labels[i])
-            #     axs[i].set_xlim(0,60)
-            #     axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
-
-            # fig.subplots_adjust(hspace=0.6)                                                     
-            # plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_bias.pdf')
 
             plt.clf()
             rmse = val_runner.metrics["rmse_perlev"]

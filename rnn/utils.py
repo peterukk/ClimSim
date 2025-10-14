@@ -90,23 +90,6 @@ lbd_qn_lev = np.array([10000000.        , 10000000.        , 10000000.        ,
 lbd_qn_mean = np.repeat(np.float32(2268406.8),60)
 
 
-# qliq = 1 - np.exp(-xlev[:,:,2] * lbd_qc)
-# qice = 1 - np.exp(-xlev[:,:,3] * lbd_qi)
-
-# plt.hist(xlev[:,:,2].flatten())
-# plt.hist(qliq.flatten())
-
-# plt.hist(xlev[:,:,3].flatten(), bins=20)
-# plt.hist(qice.flatten(), bins=20)
-
-# x_lev_b = x_lev_b * (xmax_lev - xmin_lev) + xmean_lev 
-# x_sfc_b = x_sfc_b * (xmax_sca - xmin_sca) + xmean_sca 
-
-
-# T_denorm = T = T*(xmax_lev[:,0] - xmin_lev[:,0]) + xmax_lev[:,0]
-# T_denorm = T
-# liquid_ratio = (T_denorm - 253.16) / 20.0 
-# liquid_ratio = F.hardtanh(liquid_ratio, 0.0, 1.0)
         
 def zonal_mean_area_weighted(data, grid_area, lat):
     # Define latitude bins ranging from -90 to 90, each bin spans 10 degrees
@@ -254,6 +237,7 @@ def plot_bias_diff(vars_stacked, grid_area, lat, level):
     plt.tight_layout()
     # plt.show() 
     return fig
+
 
 class train_or_eval_one_epoch:
     def __init__(self, dataloader, 
@@ -1407,10 +1391,6 @@ class generator_xy(torch.utils.data.Dataset):
             y_lev_b[:,:,2] = dqn
             y_lev_b[:,:,3] = liq_frac 
 
-        # elaps = time.time() - t0_it
-        # print("Runtime mp {:.2f}s".format(elaps))
-        # t0_it = time.time()
-     
         # for i in range(5):
         #     print("OOO", i, "minmax y ", y_lev_b[:,50,i].min(), y_lev_b[:,50,i].max())
         if self.use_numba:
@@ -1423,18 +1403,6 @@ class generator_xy(torch.utils.data.Dataset):
             
         y_sfc_b  = y_sfc_b * self.yscale_sca    
 
-        
-        # elaps = time.time() - t0_it
-        # print("Runtime out norm {:.2f}s".format(elaps))
-        
-        # for i in range(5):
-        #     print("OOOO", i," minmax y ", y_lev_b[:,50,i].min(), y_lev_b[:,50,i].max(), "std", y_lev_b[:,50,i].std())
-        # # for i in range(5):
-        #     print("OOOO", i," minmax ysca ", y_sfc_b[:,i].min(), y_sfc_b[:,i].max())
-  
-        # if self.remove_past_sfc_inputs:
-        #     x_sfc_b = np.delete(x_sfc_b,(17, 18, 19, 20, 21),axis=1)
-          
         x_lev_b = torch.from_numpy(x_lev_b)
         x_sfc_b = torch.from_numpy(x_sfc_b)
         
