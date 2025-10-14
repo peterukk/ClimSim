@@ -784,6 +784,7 @@ def main(cfg: DictConfig):
     val_runner = train_or_eval_one_epoch(val_loader, model, device, dtype, cfg, metrics_det,
                                            metric_h_con, metric_water_con, batch_size_val, train=False, model_is_stochastic=is_stochastic)
     
+    # Strings for saving model 
     inpstr = "v5" if cfg.v4_to_v5_inputs else "v4"
     MODEL_STR =  '{}-{}_lr{}.neur{}-{}_x{}_mp{}_num{}'.format(cfg.model_type,
                                                                      cfg.memory, cfg.lr, 
@@ -793,14 +794,15 @@ def main(cfg: DictConfig):
 
     SAVE_PATH       = "saved_models/" + MODEL_STR + ".pt"
     save_file_torch = "saved_models/" + MODEL_STR + "_script.pt"
+    
     best_val_loss = np.inf
     # best_val_loss = 0.0
     
-    tsteps_old = 1
     new_lr = cfg.lr
     
-    # load from checkpoint of it exists
     start_epoch=0
+    # load from checkpoint of it exists
+
     if len(cfg.model_file_checkpoint)>0:
         print("lading existing model from {}".format(cfg.model_file_checkpoint))
         checkpoint = torch.load("saved_models/"+cfg.model_file_checkpoint)
@@ -819,29 +821,6 @@ def main(cfg: DictConfig):
             timesteps=timewindow_default
             
         print("Epoch {} Training rollout timesteps: {} ".format(epoch+1, timesteps))
-
-        if cfg.timestepped_optimizer and (timesteps==(tsteps_old+1)):
-
-            # print("Timestepped optimizer turned on, doubling learning rate upon increased time window")
-            # for g in optimizer.param_groups:
-            #     g['lr'] = 2*g['lr']
-            new_lr = (timesteps/(tsteps_old)) * new_lr
-            print("Timestepped optimizer turned on,setting rate to {}".format(new_lr))
-
-            if cfg.optimizer == "adam":
-                optimizer = torch.optim.Adam(model.parameters(), lr = new_lr)
-            elif cfg.optimizer == "adamw":
-                optimizer = torch.optim.AdamW(model.parameters(), lr = new_lr)
-            elif cfg.optimizer == "adamwschedulefree":
-                import schedulefree
-                optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=new_lr)
-            elif cfg.optimizer == "soap":
-                from soap import SOAP
-                optimizer = SOAP(model.parameters(), lr = new_lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
-            else:
-                raise NotImplementedError()
-
-        tsteps_old = timesteps
 
         train_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps, lr_scheduler)
 
@@ -979,7 +958,6 @@ def main(cfg: DictConfig):
 
         print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timesteps))
         print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
-        # if epoch == 6:
 
     if cfg.use_wandb:
         wandb.finish()
