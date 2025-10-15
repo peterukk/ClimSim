@@ -17,226 +17,12 @@ import gc
 import metrics as metrics
 from torchmetrics.regression import R2Score
 import time
-from metrics import corrcoeff_pairs_batchfirst 
+from metrics import corrcoeff_pairs_batchfirst
+from norm_coefficients import lbd_qi_lev, lbd_qi_mean,  lbd_qc_lev, lbd_qc_mean, lbd_qn_lev, lbd_qn_mean
 import matplotlib
 import matplotlib.pyplot as plt
 import random
 # from pickle import dump
-
-lbd_qi_lev = np.array([10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        ,  7556905.1099813 ,
-        3240294.53811436,  4409304.29170528,  5388911.78320826,
-        1414189.69398583,   444847.03675674,   550036.71076073,
-         452219.47765234,   243545.07231263,   163264.17204164,
-         128850.88117789,   108392.13699281,    96868.6539061 ,
-          90154.39383647,    83498.67423248,    76720.52614694,
-          70937.87706283,    66851.27198026,    64579.78345685,
-          64987.05874437,    68963.77227883,    75498.91605962,
-          82745.37660119,    89624.52634008,    96373.41157796,
-         102381.42808207,   102890.33417304,    96849.77123401,
-          92727.78368907,    91320.9721545 ,    91240.30382044,
-          91448.65004889,    91689.26513737,    91833.1829058 ,
-          91941.15859653,    92144.1029509 ,    92628.38565183,
-          93511.1538428 ,    94804.20080999,    96349.5878153 ,
-          98174.89731264,   100348.81479455,   102750.86508174,
-         105013.71207426,   106732.83687405,   107593.00387448,
-         108022.91061398,   109634.8552567 ,   112259.85403167], dtype=np.float32)
-lbd_qi_mean = np.repeat(np.float32(2291547.5),60)
-
-lbd_qc_lev = np.array([10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        ,  2410793.53754872,
-        3462644.65436088,  1594172.20270602,   328086.13752288,
-         154788.55435228,   118712.37335602,   104208.42410058,
-          95801.11739569,    89619.52961093,    83709.51800851,
-          78846.75613935,    74622.76219094,    70555.95112947,
-          66436.67119096,    61797.61126943,    56926.03823691,
-          51838.00818631,    46355.21691466,    40874.23574077,
-          36196.39550842,    32935.40953052,    31290.83140741,
-          30908.27330462,    31386.06558422,    32606.7350768 ,
-          34631.09245739,    37847.88977875,    42878.24049123,
-          50560.90175672,    61294.98389768,    72912.41450047,
-          80998.32102651,    88376.7321416 ,   135468.13760583], dtype=np.float32)
-lbd_qc_mean = np.repeat(np.float32(4496518.0),60)
-
-lbd_qn_lev = np.array([10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        , 10000000.        ,
-       10000000.        , 10000000.        ,  7556905.1099813 ,
-        3240294.53811436,  4409304.29170528,  5388911.78320826,
-        1414189.69398583,   444847.03675674,   550036.71076073,
-         452219.47765234,   243545.07231263,   163264.17204164,
-         128850.88117789,   108392.13699281,    96868.6539061 ,
-          90154.39383647,    83498.67423248,    76720.52614694,
-          70937.79468155,    66821.0327278 ,    63916.46591524,
-          61597.41430156,    60417.96523765,    60359.64347926,
-          60430.76970212,    59696.934318  ,    58222.94889662,
-          56637.11031175,    54844.45378425,    52735.80221775,
-          50450.11987115,    47895.00010132,    45134.95219383,
-          42075.52757738,    38557.91174999,    34843.47468245,
-          31537.88963513,    29179.71520305,    28016.06440645,
-          27844.86770893,    28377.06256804,    29532.22068928,
-          31360.65252559,    34174.61235695,    38452.69084769,
-          44777.29680978,    53238.52542881,    61797.74325549,
-          66939.83519617,    70867.57480034,    94733.63482142], dtype=np.float32) 
-lbd_qn_mean = np.repeat(np.float32(2268406.8),60)
-
-
-        
-def zonal_mean_area_weighted(data, grid_area, lat):
-    # Define latitude bins ranging from -90 to 90, each bin spans 10 degrees
-    bins = np.arange(-90, 91, 10)  # Create edges for 10 degree bins
-
-    # Get indices for each lat value indicating which bin it belongs to
-    bin_indices = np.digitize(lat.values, bins) - 1
-
-    # Initialize a list to store the zonal mean for each latitude bin
-    data_zonal_mean = []
-
-    # Iterate through each bin to calculate the weighted average
-    for i in range(len(bins)-1):
-        # Filter data and grid_area for current bin
-        mask = (bin_indices == i)
-        data_filtered = data[mask]
-        grid_area_filtered = grid_area[mask]
-
-        # Check if there's any data in this bin
-        if data_filtered.size > 0:
-            # Compute area-weighted average for the current bin
-            weighted_mean = np.average(data_filtered, axis=0, weights=grid_area_filtered)
-        else:
-            # If no data in bin, append NaN or suitable value
-            weighted_mean = np.nan
-
-        # Append the result to the list
-        data_zonal_mean.append(weighted_mean)
-
-    # Convert list to numpy array
-    data_zonal_mean = np.array(data_zonal_mean)
-
-    # The mid points of the bins are used as the representative latitudes
-    lats_mid = bins[:-1] + 5
-
-    return data_zonal_mean, lats_mid
-
-def plot_bias(vars_stacked, grid_area, lat, level):
-    import xarray as xr
-    
-    # labels=["Heating","U","V","Cloud water", "cloud ice"]
-    # scalings = [1,1,1,1e6,1e6]
-    
-    labels=["Heating","Moistening","V","Cloud water", "cloud ice"]
-    scalings = [1,1000,1,1e6,1e6]
-    
-    # max_diffs = [40,5]
-    
-    latitude_ticks = [-60, -30, 0, 30, 60]
-    latitude_labels = ['60S', '30S', '0', '30N', '60N']
-    
-    fig, axs = plt.subplots(len(vars_stacked), 3, figsize=(14, 12.5)) 
-    
-    for idx in range(len(vars_stacked)):
-        var_t, var_p = vars_stacked[idx]
-        
-        sp_zm, lats_sorted = zonal_mean_area_weighted(var_t, grid_area, lat)
-        nn_zm, lats_sorted = zonal_mean_area_weighted(var_p, grid_area, lat)
-        
-        # data_sp, data_nn = 1e6*sp_zm.T, 1e6*nn_zm.T
-        
-        scaling = scalings[idx]
-        data_sp = scaling * xr.DataArray(sp_zm[:, :].T, dims=["hybrid pressure (hPa)", "latitude"],
-                                         coords={"hybrid pressure (hPa)": level, "latitude": lats_sorted})
-        data_nn = scaling * xr.DataArray(nn_zm[:, :].T, dims=["hybrid pressure (hPa)", "latitude"],
-                                         coords={"hybrid pressure (hPa)": level, "latitude": lats_sorted})
-        data_diff = data_nn - data_sp
-            
-        # Determine color scales
-        # vmax = max(abs(data_sp).max(), abs(data_nn).max())
-        # vmin = min(abs(data_sp).min(), abs(data_nn).min())
-        vmax = max(data_sp.max(), data_nn.max())
-        vmin = min(data_sp.min(), data_nn.min())
-        vmax = max(vmax, -vmin)
-        
-        # if var_info['diff_scale']:
-        #     vmax_diff = abs(data_diff).max() * diff_scale
-        #     vmin_diff = -vmax_diff
-        # vmax_diff =  max_diffs[idx]
-        # vmin_diff = -vmax_diff
-        vmax_diff = max(data_diff.max(), -data_diff.min())
-        # Plot each variable in its row
-        
-        
-        data_sp.plot(ax=axs[idx, 0], add_colorbar=True, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
-        # axs[idx, 0].set_title(f'{labels[idx * 3]} {var_title} ({unit}): MMF')
-        axs[idx, 0].set_title("{} , {} ".format(labels[idx],'MMF'))
-        axs[idx, 0].invert_yaxis()
-        
-        data_nn.plot(ax=axs[idx, 1], add_colorbar=True, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
-        axs[idx, 1].set_title("{} , {} ".format(labels[idx],'RNN'))
-        axs[idx, 1].invert_yaxis()
-        axs[idx, 1].set_ylabel('')  # Clear the y-label to clean up plot
-        
-        data_diff.plot(ax=axs[idx, 2], add_colorbar=True, cmap='RdBu_r', vmin=-vmax_diff, vmax=vmax_diff)
-        axs[idx, 2].set_title("{} , {} ".format(labels[idx],'diff'))
-        axs[idx, 2].invert_yaxis()
-        axs[idx, 2].set_ylabel('')  # Clear the y-label to clean up plot
-        
-        # axs[idx, 0].set_xlabel('')
-        # axs[idx, 1].set_xlabel('')
-        # axs[idx, 2].set_xlabel('')
-    
-    # Set these ticks and labels for each subplot
-    for ax_row in axs:
-        for ax in ax_row:
-            ax.set_xticks(latitude_ticks)  # Set the positions for the ticks
-            ax.set_xticklabels(latitude_labels)  # Set the custom text labels
-    plt.tight_layout()
-    plt.show() 
-
-def plot_bias_diff(vars_stacked, grid_area, lat, level):
-    import xarray as xr
-    
-    labels=["Heating","Moistening","V","Cloud water", "cloud ice"]
-    scalings = [1,1000,1,1e6,1e6]
-        
-    latitude_ticks = [-60, -30, 0, 30, 60]
-    latitude_labels = ['60S', '30S', '0', '30N', '60N']
-    
-    fig, axs = plt.subplots(len(vars_stacked), 1, figsize=(8, 12)) 
-    
-    for idx in range(len(vars_stacked)):
-        var_diff = vars_stacked[idx]
-        
-        zm, lats_sorted = zonal_mean_area_weighted(var_diff, grid_area, lat)
-                
-        scaling = scalings[idx]
-        data_diff = scaling * xr.DataArray(zm[:, :].T, dims=["hybrid pressure (hPa)", "latitude"],
-                                         coords={"hybrid pressure (hPa)": level, "latitude": lats_sorted})
-            
-        # Determine color scales
-        vmax_diff = max(data_diff.max(), -data_diff.min())
-
-        # Plot each variable in its row
-    
-        data_diff.plot(ax=axs[idx], add_colorbar=True, cmap='RdBu_r', vmin=-vmax_diff, vmax=vmax_diff)
-        axs[idx].set_title("{} , {} ".format(labels[idx],'NN - MMF'))
-        axs[idx].invert_yaxis()
-        axs[idx].set_ylabel('')  # Clear the y-label to clean up plot
-    
-    for ax in axs:
-        ax.set_xticks(latitude_ticks)  # Set the positions for the ticks
-        ax.set_xticklabels(latitude_labels)  # Set the custom text labels
-    plt.tight_layout()
-    # plt.show() 
-    return fig
 
 
 class train_or_eval_one_epoch:
@@ -266,13 +52,11 @@ class train_or_eval_one_epoch:
             raise NotImplementedError()
         # if self.cfg.mp_mode>0:
         self.ny_pp = 6 # Regardless of MP constraint, 6 postprocessed output features per level
-        # Loss functions to be computed, possibly part of overall loss
-        # or just monitored
+        # Loss functions to be computed, possibly part of overall loss or just monitored
         self.metrics_det = metrics_det
         self.metric_h_con = metric_h_con
         self.metric_water_con = metric_water_con
         self.metric_R2 =  R2Score().to(self.device) 
-        # gel_lambda_prec = 250.0
         gel_lambda_prec = cfg.gel_lambda_prec
         self.metric_precip_gel = metrics.get_GEL_precip(gel_lambda_prec)
         self.metric_gel = metrics.get_GEL(250.0)
@@ -289,23 +73,19 @@ class train_or_eval_one_epoch:
         else:
             self.use_mp_constraint=False 
 
-        # if self.cfg.loss_fn_type in ["CRPS","variogram_score","energy_score","ds_score"]:
-        #     self.model_is_stochastic=True 
-        # else:
-        #     self.model_is_stochastic=False 
         self.model_is_stochastic = model_is_stochastic 
         if self.batch_size==384:
             self.epoch_bias_collev = np.zeros((384,  self.model.nlev,  self.model.ny))
 
     def eval_one_epoch(self, lossf, optim, epoch, timesteps=1, lr_scheduler=None):
         report_freq = self.report_freq
+        # Initialize per-epoch metrics to zero (there's LOTS!)
         running_loss = 0.0; running_energy = 0.0; running_water = 0.0
         running_var=0.0; running_det=0.0; running_bias = 0.0; running_precip=0.0; running_gel = 0.0
         epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0; epoch_mae = 0.0
-        epoch_R2precc = 0.0; epoch_R2netsw = 0.0; epoch_R2flwds = 0.0
+        epoch_R2precc = 0.0; epoch_R2netsw = 0.0; epoch_R2flwds = 0.0; epoch_r2_lev = 0.0
         epoch_hcon = 0.0; epoch_wcon = 0.0; epoch_gel = 0.0
         epoch_ens_var = 0.0; epoch_det_skill = 0.0; epoch_spreadskill = 0.0
-        epoch_r2_lev = 0.0
         epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
         epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
         epoch_bias_lev_tot = 0.0; epoch_bias_perlev= 0.0
@@ -472,7 +252,6 @@ class train_or_eval_one_epoch:
                         
                         if self.model_is_stochastic:
                             loss = lossf(targets_lay, targets_sfc, preds_lay, preds_sfc, timesteps)
-                            # loss, det_skill, ens_var = loss
                             ens_var, det_skill = metrics.compute_spread_skill_ratio(targets_lay, targets_sfc, preds_lay, preds_sfc, timesteps)
                         else:
                             loss = lossf(targets_lay, targets_sfc, preds_lay, preds_sfc)
@@ -483,8 +262,7 @@ class train_or_eval_one_epoch:
                                 loss = mse
                             
                         if self.use_ensemble:
-                            # print("preds shape", preds_lay)
-                            # use only first member from here on 
+                            # use only first ensemble member from here on 
                             preds_lay = torch.reshape(preds_lay, (timesteps, self.cfg.ensemble_size, self.batch_size,  self.model.nlev,  self.model.ny))
                             dt_std    = torch.mean(torch.std(preds_lay[:,:,:,:,0], dim=1)).detach()
                             dq_std    = torch.mean(torch.std(preds_lay[:,:,:,:,1], dim=1)).detach()
@@ -591,7 +369,6 @@ class train_or_eval_one_epoch:
                     running_water   += water_con.item()
                     running_bias    += bias_tot.item() 
                     running_precip  += precip_sum_mse.item() 
-                    # running_precip  += precip_sum_gel.item() 
                     running_gel     += gel_lev.item() 
 
                     if self.model_is_stochastic: 
@@ -920,14 +697,12 @@ class generator_xy(torch.utils.data.Dataset):
                  snowhice_fix=True): # 0 = regular outputs, 1 = mp constraint, 2 = pred liq ratio
                  # use_mp_constraint=False):
         self.filepath = filepath
-        # The file list will be divided into chunks (a list of lists)eg [[12,4,32],[1,9,3]..]
-        # where the length of each item is the chunk size; i.e. how many files 
-        # are loaded at once (in this example 3 files)
+        # The file list will be divided into chunks (a list of lists) e.g. [[12,4,32],[1,9,3]..]
+        # where the length of each item is the chunk size; i.e. how many files are loaded at once (in this example 3 files)
         # self.chunk_size = chunk_size # how many batches are loaded at once in getitem
         self.cache = cache
         self.use_numba = True
         self.nloc = nloc
-        # self.cloud_exp_norm = True
         self.cloud_exp_norm = cloud_exp_norm
         self.remove_past_sfc_inputs = remove_past_sfc_inputs
         self.mp_mode = mp_mode
@@ -938,10 +713,7 @@ class generator_xy(torch.utils.data.Dataset):
         self.output_prune=output_prune
         self.include_prev_inputs = include_prev_inputs
         self.include_prev_outputs = include_prev_outputs
-        # if self.mp_mode>0:
-        #     self.use_mp_constraint = True 
-        # else:
-        #     self.use_mp_constraint = False    
+           
         if self.mp_mode==0: # predict qliq, qice
             self.hu_mp_constraint = False 
             self.pred_liq_ratio = False
@@ -1327,16 +1099,6 @@ class generator_xy(torch.utils.data.Dataset):
         # for i in range(x_sfc_b.shape[-1]):
         #     print("after new scaling", i, "minmax xsfc", x_sfc_b[:,i].min(), x_sfc_b[:,i].max())
                     
-          
-        # x_lev_b = torch.from_numpy(x_lev_b)
-        # x_sfc_b = torch.from_numpy(x_sfc_b)
-        
-        # for i in range(6):
-        #     print("O", i, " minmax y ", y_lev_b[:,:,i].min(), y_lev_b[:,:,i].max())
-        # for i in range(5):
-        #     print("O", i," minmax ysca ", y_sfc_b[:,i].min(), y_sfc_b[:,i].max())
-
-    
         if self.reverse_output_norm:
             y_lev_b = y_lev_b / self.yscale_lev_ref
             y_sfc_b = y_sfc_b / self.yscale_sca_ref
@@ -1416,9 +1178,7 @@ class generator_xy(torch.utils.data.Dataset):
 
         return x_lev_b, x_sfc_b, y_lev_b, y_sfc_b, x_lev_b_denorm, y_lev_b_denorm, y_sfc_b_denorm
         # return x_lev_b, x_sfc_b, y_lev_b, y_sfc_b, x_lev_b_denorm
-        
-        # return x_lev_b, x_sfc_b, y_lev_b, y_sfc_b, y_lev_b_denorm, y_sfc_b_denorm
- 
+         
 
 def chunkize(filelist, chunk_size, shuffle_before_chunking=False, shuffle_after_chunking=True):
     import random
@@ -1471,3 +1231,151 @@ class BatchSampler(torch.utils.data.Sampler):
         return iter(self.indices_chunked)
         # for batch in self.indices_chunked:
         #     yield batch
+
+        
+def zonal_mean_area_weighted(data, grid_area, lat):
+    # Define latitude bins ranging from -90 to 90, each bin spans 10 degrees
+    bins = np.arange(-90, 91, 10)  # Create edges for 10 degree bins
+
+    # Get indices for each lat value indicating which bin it belongs to
+    bin_indices = np.digitize(lat.values, bins) - 1
+
+    # Initialize a list to store the zonal mean for each latitude bin
+    data_zonal_mean = []
+
+    # Iterate through each bin to calculate the weighted average
+    for i in range(len(bins)-1):
+        # Filter data and grid_area for current bin
+        mask = (bin_indices == i)
+        data_filtered = data[mask]
+        grid_area_filtered = grid_area[mask]
+
+        # Check if there's any data in this bin
+        if data_filtered.size > 0:
+            # Compute area-weighted average for the current bin
+            weighted_mean = np.average(data_filtered, axis=0, weights=grid_area_filtered)
+        else:
+            # If no data in bin, append NaN or suitable value
+            weighted_mean = np.nan
+
+        # Append the result to the list
+        data_zonal_mean.append(weighted_mean)
+
+    # Convert list to numpy array
+    data_zonal_mean = np.array(data_zonal_mean)
+
+    # The mid points of the bins are used as the representative latitudes
+    lats_mid = bins[:-1] + 5
+
+    return data_zonal_mean, lats_mid
+
+def plot_bias(vars_stacked, grid_area, lat, level):
+    import xarray as xr
+    
+    # labels=["Heating","U","V","Cloud water", "cloud ice"]
+    # scalings = [1,1,1,1e6,1e6]
+    
+    labels=["Heating","Moistening","V","Cloud water", "cloud ice"]
+    scalings = [1,1000,1,1e6,1e6]
+    
+    # max_diffs = [40,5]
+    
+    latitude_ticks = [-60, -30, 0, 30, 60]
+    latitude_labels = ['60S', '30S', '0', '30N', '60N']
+    
+    fig, axs = plt.subplots(len(vars_stacked), 3, figsize=(14, 12.5)) 
+    
+    for idx in range(len(vars_stacked)):
+        var_t, var_p = vars_stacked[idx]
+        
+        sp_zm, lats_sorted = zonal_mean_area_weighted(var_t, grid_area, lat)
+        nn_zm, lats_sorted = zonal_mean_area_weighted(var_p, grid_area, lat)
+        
+        # data_sp, data_nn = 1e6*sp_zm.T, 1e6*nn_zm.T
+        
+        scaling = scalings[idx]
+        data_sp = scaling * xr.DataArray(sp_zm[:, :].T, dims=["hybrid pressure (hPa)", "latitude"],
+                                         coords={"hybrid pressure (hPa)": level, "latitude": lats_sorted})
+        data_nn = scaling * xr.DataArray(nn_zm[:, :].T, dims=["hybrid pressure (hPa)", "latitude"],
+                                         coords={"hybrid pressure (hPa)": level, "latitude": lats_sorted})
+        data_diff = data_nn - data_sp
+            
+        # Determine color scales
+        # vmax = max(abs(data_sp).max(), abs(data_nn).max())
+        # vmin = min(abs(data_sp).min(), abs(data_nn).min())
+        vmax = max(data_sp.max(), data_nn.max())
+        vmin = min(data_sp.min(), data_nn.min())
+        vmax = max(vmax, -vmin)
+        
+        # if var_info['diff_scale']:
+        #     vmax_diff = abs(data_diff).max() * diff_scale
+        #     vmin_diff = -vmax_diff
+        # vmax_diff =  max_diffs[idx]
+        # vmin_diff = -vmax_diff
+        vmax_diff = max(data_diff.max(), -data_diff.min())
+        # Plot each variable in its row
+        
+        
+        data_sp.plot(ax=axs[idx, 0], add_colorbar=True, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+        # axs[idx, 0].set_title(f'{labels[idx * 3]} {var_title} ({unit}): MMF')
+        axs[idx, 0].set_title("{} , {} ".format(labels[idx],'MMF'))
+        axs[idx, 0].invert_yaxis()
+        
+        data_nn.plot(ax=axs[idx, 1], add_colorbar=True, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+        axs[idx, 1].set_title("{} , {} ".format(labels[idx],'RNN'))
+        axs[idx, 1].invert_yaxis()
+        axs[idx, 1].set_ylabel('')  # Clear the y-label to clean up plot
+        
+        data_diff.plot(ax=axs[idx, 2], add_colorbar=True, cmap='RdBu_r', vmin=-vmax_diff, vmax=vmax_diff)
+        axs[idx, 2].set_title("{} , {} ".format(labels[idx],'diff'))
+        axs[idx, 2].invert_yaxis()
+        axs[idx, 2].set_ylabel('')  # Clear the y-label to clean up plot
+        
+        # axs[idx, 0].set_xlabel('')
+        # axs[idx, 1].set_xlabel('')
+        # axs[idx, 2].set_xlabel('')
+    
+    # Set these ticks and labels for each subplot
+    for ax_row in axs:
+        for ax in ax_row:
+            ax.set_xticks(latitude_ticks)  # Set the positions for the ticks
+            ax.set_xticklabels(latitude_labels)  # Set the custom text labels
+    plt.tight_layout()
+    plt.show() 
+
+def plot_bias_diff(vars_stacked, grid_area, lat, level):
+    import xarray as xr
+    
+    labels=["Heating","Moistening","V","Cloud water", "cloud ice"]
+    scalings = [1,1000,1,1e6,1e6]
+        
+    latitude_ticks = [-60, -30, 0, 30, 60]
+    latitude_labels = ['60S', '30S', '0', '30N', '60N']
+    
+    fig, axs = plt.subplots(len(vars_stacked), 1, figsize=(8, 12)) 
+    
+    for idx in range(len(vars_stacked)):
+        var_diff = vars_stacked[idx]
+        
+        zm, lats_sorted = zonal_mean_area_weighted(var_diff, grid_area, lat)
+                
+        scaling = scalings[idx]
+        data_diff = scaling * xr.DataArray(zm[:, :].T, dims=["hybrid pressure (hPa)", "latitude"],
+                                         coords={"hybrid pressure (hPa)": level, "latitude": lats_sorted})
+            
+        # Determine color scales
+        vmax_diff = max(data_diff.max(), -data_diff.min())
+
+        # Plot each variable in its row
+    
+        data_diff.plot(ax=axs[idx], add_colorbar=True, cmap='RdBu_r', vmin=-vmax_diff, vmax=vmax_diff)
+        axs[idx].set_title("{} , {} ".format(labels[idx],'NN - MMF'))
+        axs[idx].invert_yaxis()
+        axs[idx].set_ylabel('')  # Clear the y-label to clean up plot
+    
+    for ax in axs:
+        ax.set_xticks(latitude_ticks)  # Set the positions for the ticks
+        ax.set_xticklabels(latitude_labels)  # Set the custom text labels
+    plt.tight_layout()
+    # plt.show() 
+    return fig
