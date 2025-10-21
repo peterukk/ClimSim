@@ -2317,7 +2317,8 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         use_bias=False
         if self.use_lstm:
             if self.use_ar_noise:
-                rnn_layer = MyStochasticLSTMLayer3_ar
+                # rnn_layer = MyStochasticLSTMLayer3_ar
+                rnn_layer = MyStochasticLstmLayer4_ar
             else:
                 # rnn_layer = MyStochasticLSTMLayer3
                 rnn_layer = MyStochasticLSTMLayer4
