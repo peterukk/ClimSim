@@ -474,8 +474,6 @@ class LSTM_autoreg_torchscript(nn.Module):
         
     def pp_mp(self, out, out_sfc, x_denorm):
 
-        # out_denorm      = out / self.yscale_lev.to(device=out.device)
-        # out_sfc_denorm  = out_sfc / self.yscale_sca.to(device=out.device)
         out_denorm      = out / self.yscale_lev
         out_sfc_denorm  = out_sfc / self.yscale_sca
 
@@ -499,8 +497,6 @@ class LSTM_autoreg_torchscript(nn.Module):
             # print("shape lfracpre", liq_frac_pred.shape, "con", liq_frac_constrained.shape)
             liq_frac_constrained = torch.clamp(liq_frac_pred, min=min_frac, max=max_frac)
             
-            # print("min max lfrac pred pp", torch.max(liq_frac_constrained).item(), torch.min(liq_frac_constrained).item())
-
         #                            dqn
         qn_new      = qn_before + out_denorm[:,:,2:3]*1200  
         qliq_new    = liq_frac_constrained*qn_new
@@ -512,20 +508,6 @@ class LSTM_autoreg_torchscript(nn.Module):
         else:
             out_denorm  = torch.cat((out_denorm[:,:,0:2], dqliq, dqice, out_denorm[:,:,3:]),dim=2)
 
-        # print("Tbef {:.2f}   T {:.2f}  dt {:.2e}  liqfrac {:.2f}   dqn {:.2e}  qbef {:.2e}  qnew {:.2e}  dqliq {:.2e}  dqice {:.2e} ".format( 
-        #                                                 # x_denorm[200,35,4].item(),
-        #                                                 T_before[200,35].item(), 
-        #                                                 T_new[200,35].item(), 
-        #                                                 (out_denorm[200,35,0:1]*1200).item(),
-        #                                                 liq_frac_constrained[200,35].item(), 
-        #                                                 (out_denorm[200,35,2]*1200).item(), 
-        #                                                 qn_before[200,35].item(),
-        #                                                 qn_new[200,35].item(),
-        #                                                 dqliq[200,35].item(),
-        #                                                 dqice[200,35].item()))
-
-        
-        
         return out_denorm, out_sfc_denorm
     
     def forward(self, inp_list : List[Tensor]):
@@ -1459,6 +1441,7 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
     # use_memory: Final[bool]
     # separate_radiation: Final[bool]
     # diagnose_precip: Final[bool]
+    return_det: Final[bool]
 
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
@@ -1472,10 +1455,12 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
                 use_memory=False,
                 separate_radiation=False,
                 coeff_stochastic = 0.0,
+                return_det=True,
                 nh_mem=16):
         super(LSTM_autoreg_torchscript_perturb, self).__init__()
         self.ny = ny 
         self.nlev = nlev 
+        self.nlev_mem= nlev
         self.nx_sfc = nx_sfc 
         self.ny_sfc = ny_sfc
         self.nneur = nneur 
@@ -1485,6 +1470,7 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         if self.add_pres:
             self.preslay = LayerPressure(hyam,hybm)
             nx = nx +1
+        self.return_det = return_det
         self.nx = nx
         self.nh_rnn1 = self.nneur[0]
         self.nx_rnn2 = self.nneur[0]
@@ -1579,16 +1565,12 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         return snow_frac
 
     def postprocessing(self, out, out_sfc):
-        # out             = out / self.yscale_lev.to(device=out.device)
-        # out_sfc         = out_sfc / self.yscale_sca.to(device=out.device)
         out             = out / self.yscale_lev
         out_sfc         = out_sfc / self.yscale_sca
         return out, out_sfc
         
     def pp_mp(self, out, out_sfc, x_denorm):
 
-        # out_denorm      = out / self.yscale_lev.to(device=out.device)
-        # out_sfc_denorm  = out_sfc / self.yscale_sca.to(device=out.device)
         out_denorm      = out / self.yscale_lev
         out_sfc_denorm  = out_sfc / self.yscale_sca
 
@@ -1597,10 +1579,8 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         qice_before     = x_denorm[:,:,3:4]   
         qn_before       = qliq_before + qice_before 
 
-        # print("shape x denorm", x_denorm.shape, "T", T_before.shape)
         T_new           = T_before  + out_denorm[:,:,0:1]*1200
 
-        # T_new           = T_before  + out_denorm[:,:,0:1]*1200
         liq_frac_constrained    = self.temperature_scaling(T_new)
 
         #                            dqn
@@ -1613,9 +1593,10 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         
         return out_denorm, out_sfc_denorm
     
-    def forward(self, inputs_main, inputs_aux, rnn1_mem):
-        # print("shape inp main", inputs_main.shape)
-                    
+    def forward(self, inp_list : List[Tensor]):
+        inputs_main   = inp_list[0]
+        inputs_aux    = inp_list[1]
+        rnn1_mem      = inp_list[2]
         batch_size = inputs_main.shape[0]
         # print("shape inputs main", inputs_main.shape)
         if self.add_pres:
@@ -1686,13 +1667,13 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         
         h_final_perturb = torch.transpose(srnn_out,0,1)
         
-        h_final = h_final + 0.01*h_final_perturb
-        h_sfc   = h_sfc + 0.01*h_sfc_perturb
+        # h_final = h_final + 0.01*h_final_perturb
+        # h_sfc   = h_sfc + 0.01*h_sfc_perturb
         # h_final_perturb = self.hardtanh(h_final_perturb)
         # h_sfc_perturb = self.hardtanh(h_sfc_perturb)
         
-        # h_final = h_final*h_final_perturb
-        # h_sfc   = h_sfc*h_sfc_perturb
+        h_final = h_final*h_final_perturb
+        h_sfc   = h_sfc*h_sfc_perturb
         
         #  --------- STOCHASTIC RNN FOR PERTURBATION ----------
 
@@ -1703,9 +1684,11 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
             out[:,0:12,1:] = out[:,0:12,1:].clone().zero_()
         out_sfc         = self.mlp_surface_output(h_sfc)
         out_sfc         = self.relu(out_sfc)
-
-        return out, out_sfc, rnn1_mem, out_det
-
+        if self.return_det:
+            return out, out_sfc, rnn1_mem, out_det
+        else:
+            return out, out_sfc, rnn1_mem
+        
 class LSTM_autoreg_torchscript_radflux(nn.Module):
     use_initial_mlp: Final[bool]
     use_intermediate_mlp: Final[bool]

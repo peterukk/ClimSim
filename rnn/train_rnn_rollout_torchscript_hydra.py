@@ -492,7 +492,7 @@ def main(cfg: DictConfig):
                     ar_noise_mode = cfg.ar_noise_mode,
                     ar_tau = cfg.ar_tau,
                     use_surface_memory=cfg.use_surface_memory)#,
-    elif cfg.model_type=="partiallystochasticRNN":
+    elif cfg.model_type=="halfstochasticRNN":
         model = halfstochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
                     out_sfc_scale = yscale_sca, 
@@ -526,6 +526,22 @@ def main(cfg: DictConfig):
                     output_prune = cfg.output_prune,
                     nh_mem = cfg.nh_mem,
                     use_surface_memory=cfg.use_surface_memory)#,
+    elif cfg.model_type=="LSTM_autoreg_torchscript_perturb":
+        # if cfg.autoregressive:
+        model =  LSTM_autoreg_torchscript_perturb(hyam,hybm,hyai,hybi,
+                                    out_scale = yscale_lev,
+                                    out_sfc_scale = yscale_sca, 
+                                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+                                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                                    device=device,
+                                    nx = nx, nx_sfc=nx_sfc, 
+                                    ny = ny, ny_sfc=ny_sfc, 
+                                    nneur=cfg.nneur, 
+                                    use_initial_mlp=cfg.use_initial_mlp, 
+                                    # use_intermediate_mlp=True,
+                                    add_pres = cfg.add_pres,
+                                    output_prune = cfg.output_prune,
+                                    nh_mem=cfg.nh_mem)
     elif cfg.model_type=="physrad":
         from models_rad import LSTM_autoreg_torchscript_physrad
         model = LSTM_autoreg_torchscript_physrad(hyam,hybm,hyai,hybi,

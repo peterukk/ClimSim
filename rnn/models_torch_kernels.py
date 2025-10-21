@@ -559,7 +559,6 @@ class MyStochasticGRULayer5(jit.ScriptModule):
             hidden = n + torch.mul(z, (hidden - n))
 
             outputs += [hidden]
-            gc.collect()
 
         return torch.stack(outputs)
     
