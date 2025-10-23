@@ -242,7 +242,7 @@ class LSTM_autoreg_torchscript(nn.Module):
     # diagnose_precip_v2: Final[bool]
     physical_precip: Final[bool]
     predict_liq_ratio: Final[bool]
-
+    randomly_initialize_cellstate: Final[bool]
     concat: Final[bool]
 
     def __init__(self, hyam, hybm,  hyai, hybi,
@@ -263,6 +263,7 @@ class LSTM_autoreg_torchscript(nn.Module):
                 # diagnose_precip_v2=False,
                 physical_precip=False,
                 predict_liq_ratio=False,
+                randomly_initialize_cellstate=False,
                 concat=False,
                 # predict_flux=False,
                 coeff_stochastic = 0.0,
@@ -303,7 +304,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.preslay = LayerPressure(hyam,hybm)
             nx = nx +1
             self.preslay_nonorm = LayerPressure(hyam, hybm, norm=False)
-
+        self.randomly_initialize_cellstate = randomly_initialize_cellstate
         self.nx = nx
         self.nh_rnn1 = self.nneur[0]
         self.nx_rnn2 = self.nneur[0]
@@ -392,31 +393,27 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.mlp_initial = nn.Linear(nx, self.nneur[0])
 
         self.mlp_surface1  = nn.Linear(self.nx_sfc, self.nh_rnn1)
-        self.mlp_surface2  = nn.Linear(self.nx_sfc, self.nh_rnn1)
+        if not self.randomly_initialize_cellstate:
+            self.mlp_surface2  = nn.Linear(self.nx_sfc, self.nh_rnn1)
 
         # self.rnn1      = nn.LSTMCell(self.nx_rnn1, self.nh_rnn1)  # (input_size, hidden_size)
         # self.rnn2      = nn.LSTMCell(self.nx_rnn2, self.nh_rnn2)
         if self.use_third_rnn:
-            self.mlp_toa1  = nn.Linear(2, self.nh_rnn1)
-            self.mlp_toa2  = nn.Linear(2, self.nh_rnn1)
-            
+
             self.rnn0   = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)
             self.rnn1   = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)  # (input_size, hidden_size)
             if self.add_stochastic_layer:
                 use_bias=False
-                self.rnn2 = MyStochasticLSTMLayer2(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias)  
+                self.rnn2 = MyStochasticLSTMLayer4(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias)  
             else:
                 self.rnn2   = nn.LSTM(self.nx_rnn3, self.nh_rnn3,  batch_first=True)
             self.rnn0.flatten_parameters()
         else:
 
-            self.mlp_toa1  = nn.Linear(2, self.nh_rnn2)
-            self.mlp_toa2  = nn.Linear(2, self.nh_rnn2)
-
             self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)  # (input_size, hidden_size)
             if self.add_stochastic_layer:
                 use_bias=False
-                self.rnn2 = MyStochasticLSTMLayer2(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)  
+                self.rnn2 = MyStochasticLSTMLayer4(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)  
             else:
                 self.rnn2 = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
                 
@@ -451,6 +448,9 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.mlp_toa_rad  = nn.Linear(2, self.nh_rnn2_rad)
             self.mlp_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_rad)
             print("nx rnn1", self.nx_rnn1, "nh rnn1", self.nh_rnn1)
+        else: 
+            self.mlp_toa1  = nn.Linear(2, self.nh_rnn1)
+            self.mlp_toa2  = nn.Linear(2, self.nh_rnn1)
 
     def temperature_scaling(self, T_raw):
         # T_denorm = T = T*(self.xmax_lev[:,0] - self.xmin_lev[:,0]) + self.xmean_lev[:,0]
@@ -547,11 +547,8 @@ class LSTM_autoreg_torchscript(nn.Module):
         inputs_main_crm = torch.cat((inputs_main_crm,rnn1_mem), dim=2)
             
         if self.use_third_rnn: # use initial downward RNN
-            inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) #  pbuf_SOLIN and COSZRS
-            cx0 = self.mlp_toa1(inputs_toa)
-            # cx0 = self.nonlin(cx0)
-            hx0 = self.mlp_toa2(inputs_toa)
-            # hx0 = self.nonlin(hx0)
+            hx0 = torch.randn((batch_size, self.nh_rnn1),device=inputs_main.device)  # (batch, hidden_size)
+            cx0 = torch.randn((batch_size, self.nh_rnn1),device=inputs_main.device)
             hidden0 = (torch.unsqueeze(hx0,0), torch.unsqueeze(cx0,0))  
             rnn0out, states = self.rnn0(inputs_main_crm, hidden0)
             
@@ -569,7 +566,10 @@ class LSTM_autoreg_torchscript(nn.Module):
             inputs_sfc = inputs_aux
         hx = self.mlp_surface1(inputs_sfc)
         hx = self.nonlin(hx)
-        cx = self.mlp_surface2(inputs_sfc)
+        if self.randomly_initialize_cellstate:
+            cx = torch.randn_like(hx)
+        else:
+            cx = self.mlp_surface2(inputs_sfc)
         # cx = self.nonlin(cx)
         hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
 
@@ -581,7 +581,7 @@ class LSTM_autoreg_torchscript(nn.Module):
 
         rnn1out = torch.flip(rnn1out, [1])
 
-        if self.use_third_rnn:
+        if self.separate_radiation:
           hx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)  # (batch, hidden_size)
           cx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)
         else: 
@@ -589,7 +589,6 @@ class LSTM_autoreg_torchscript(nn.Module):
           hx2 = self.mlp_toa1(inputs_toa)
           cx2 = self.mlp_toa2(inputs_toa)
         
-
         if self.add_stochastic_layer:
             input_rnn2 = torch.transpose(rnn1out,0,1)
             hidden2 = (hx2, cx2)

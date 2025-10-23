@@ -432,6 +432,7 @@ def main(cfg: DictConfig):
                         # diagnose_precip = diagnose_precip,
                         # diagnose_precip_v2 = diagnose_precip_v2,
                         predict_liq_ratio=predict_liq_ratio,
+                        randomly_initialize_cellstate=cfg.randomly_initialize_cellstate,
                         use_third_rnn = use_third_rnn,
                         concat = cfg.concat,
                         nh_mem = cfg.nh_mem)#,
