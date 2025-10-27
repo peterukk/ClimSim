@@ -22,6 +22,9 @@ from norm_coefficients import lbd_qi_lev, lbd_qi_mean,  lbd_qc_lev, lbd_qc_mean,
 import matplotlib
 import matplotlib.pyplot as plt
 import random
+from conflictfree.momentum_operator import PseudoMomentumOperator
+from conflictfree.grad_operator import ConFIG_update
+from conflictfree.utils import get_gradient_vector,apply_gradient_vector
 # from pickle import dump
 
 
@@ -99,7 +102,7 @@ class train_or_eval_one_epoch:
         epoch_dt_std = 0.0; epoch_dq_std = 0.0; epoch_q_err_corr = 0.0
         t_comp =0 
         t0_it = time.time()
-        j = 0; k = 0; k2=0; k3 = 0 
+        j = 0; j2 = 0; k = 0; k2=0; k3 = 0 
         mixing_frac = 0.0
         device = self.device
         # torch.cuda.memory._record_memory_history(enabled='all')
@@ -122,7 +125,23 @@ class train_or_eval_one_epoch:
             loss_update_start_index = 0
             
         # torch.autograd.set_detect_anomaly(True)
-            
+        losses=[]
+        grads=[]     
+        num_loss = 1
+        if self.cfg.use_precip_accum_loss:
+            num_loss += 1
+        if self.cfg.use_precip_gel_loss:
+            num_loss += 1
+        if self.cfg.use_bias_loss:
+            num_loss += 1
+        if self.cfg.use_energy_loss: 
+            num_loss += 1
+        if self.cfg.use_water_loss:
+            num_loss += 1
+        if self.model_is_stochastic and self.cfg.use_det_loss:
+            num_loss += 1
+        operator=PseudoMomentumOperator(num_vectors=num_loss) 
+
         # Option ar_noise_mode for training stochastic RNNs
         # 0 : Fully uncorrelated noise. The sampled noise (eps) used in the stochastic RNN has no temporal correlation, is
         # redrawn at every vertical level and for each RNN. Therefore no need to keep track of it outside the model
@@ -260,7 +279,7 @@ class train_or_eval_one_epoch:
                                 loss = huber
                             else:
                                 loss = mse
-                            
+
                         if self.use_ensemble:
                             # use only first ensemble member from here on 
                             preds_lay = torch.reshape(preds_lay, (timesteps, self.cfg.ensemble_size, self.batch_size,  self.model.nlev,  self.model.ny))
@@ -306,49 +325,98 @@ class train_or_eval_one_epoch:
 
                         # precipitation accumulation
                         precip_sum_mse  = metrics.precip_sum_mse(yto_sfc, ypo_sfc, timesteps)
-                        if self.cfg.use_precip_accum_loss:
-                            loss = loss + self.cfg.w_precmse*precip_sum_mse
                             
                         precip_sum_gel  = self.metric_precip_gel(yto_sfc, ypo_sfc, timesteps)
-                        if self.cfg.use_precip_gel_loss:
-                            loss = loss + self.cfg.w_precgel*precip_sum_mse
-                            
+
                         targets_lay2 = targets_lay[:,12:]; preds_lay2 = preds_lay[:,12:]
                         gel_lev        = self.metric_gel(targets_lay2, preds_lay2)
-                        if self.cfg.use_gel_loss and j>loss_update_start_index:
-                            loss = loss + self.cfg.w_gel*gel_lev
+                        # if self.cfg.use_gel_loss and j>loss_update_start_index:
+                        #     # loss = loss + self.cfg.w_gel*gel_lev
+                        #     losses.append(self.cfg.w_gel*gel_lev)
                             
                         raw_bias_lev, raw_bias_sfc = metrics.compute_absolute_biases(targets_lay2, targets_sfc, preds_lay2, preds_sfc)
                         bias_tot = torch.cat((raw_bias_lev, raw_bias_sfc))
-                        # bias_tot = torch.nanmean(bias_tot)
-                        inds_inf = torch.isinf(bias_tot)
-                        bias_tot = bias_tot[~inds_inf]
-                        inds_nan = torch.isnan(bias_tot)
-                        bias_tot = torch.mean(bias_tot[~inds_nan])
-
-                        if self.cfg.use_bias_loss:
-                            loss = loss + self.cfg.w_bias*(bias_tot**2)
-                                                    
-                        if self.cfg.use_energy_loss: 
-                            loss = loss + self.cfg.w_hcon*h_con
-
-                        if self.cfg.use_water_loss:
-                            # loss = loss + timesteps*self.cfg.w_wcon * water_con
-                            loss = loss + self.cfg.w_wcon * water_con
-
-                        if self.model_is_stochastic:
-                            loss = loss + self.cfg.w_det * (det_skill**2)
+                        bias_tot = torch.nanmean(bias_tot)
 
                     if self.train:
-                        if self.cfg.use_scaler:
-                            self.scaler.scale(loss).backward(retain_graph=True)
-                            self.scaler.step(optim)
-                            self.scaler.update()
+                        losses.append(loss)
+
+                        if self.cfg.use_precip_accum_loss:
+                            # loss = loss + self.cfg.w_precmse*precip_sum_mse
+                            losses.append(self.cfg.w_precmse*precip_sum_mse)
+
+                        if self.cfg.use_precip_gel_loss:
+                            # loss = loss + self.cfg.w_precgel*precip_sum_mse
+                            losses.append(self.cfg.w_precgel*precip_sum_mse)
+
+                        if self.cfg.use_bias_loss:
+                            # loss = loss + self.cfg.w_bias*(bias_tot**2)
+                            losses.append(self.cfg.w_bias*(bias_tot**2))
+                                          
+                        if self.cfg.use_energy_loss: 
+                            # loss = loss + self.cfg.w_hcon*h_con
+                            losses.append(self.cfg.w_hcon*h_con)
+                            
+                        if self.cfg.use_water_loss:
+                            # loss = loss + timesteps*self.cfg.w_wcon * water_con
+                            # loss = loss + self.cfg.w_wcon * water_con
+                            losses.append(self.cfg.w_wcon * water_con)
+                            
+                        if self.model_is_stochastic and self.cfg.use_det_loss:
+                            # loss = loss + self.cfg.w_det * (det_skill**2)
+                            losses.append(self.cfg.w_det * (det_skill**2))
+
+
+                        if self.cfg.use_conflictfree: 
+                            # optim.zero_grad()     
+                            # index=j2 % num_loss
+                            # loss=losses[index]
+                            # # loss.backward()
+                            # if self.cfg.use_scaler:
+                            #     self.scaler.scale(loss).backward(retain_graph=True)
+                            # else:
+                            #     loss.backward(retain_graph=True)            
+                            
+                            # g_config=operator.calculate_gradient(index,get_gradient_vector(self.model)) # calculate the conflict-free direction
+                            # apply_gradient_vector(self.model,g_config) # or simply use `operator.update_gradient(network,grads)` to calculate and set the conflict-free direction to the network
+                            # # optimizer.step()
+                            # if self.cfg.use_scaler:
+                            #     self.scaler.step(optim)
+                            #     self.scaler.update()
+                            # else: 
+                            #     optim.step()
+                            # global_step+=1
+                            
+                            for loss_i in losses:
+                                optim.zero_grad()
+                                # print("loss_i", loss_i)
+                                if self.cfg.use_scaler:
+                                    self.scaler.scale(loss_i).backward(retain_graph=True)
+                                else:
+                                    loss_i.backward(retain_graph=True)       
+                                # curgrad = get_gradient_vector(self.model)
+                                # print("curgrad", curgrad, "shape", curgrad.shape)
+                                grads.append(get_gradient_vector(self.model)) #get loss-specfic gradient
+                            g_config=ConFIG_update(grads) # calculate the conflict-free direction
+                            apply_gradient_vector(self.model,g_config) # set the conflict-free direction to the network
+                            if self.cfg.use_scaler:
+                                self.scaler.step(optim)
+                                self.scaler.update()
+                            else: 
+                                optim.step()
+                            loss = torch.stack(losses).sum()
+
                         else:
-                            loss.backward(retain_graph=True)       
-                            optim.step()
-   
-                        optim.zero_grad()
+                            optim.zero_grad()
+                            loss = torch.stack(losses).sum()
+                            if self.cfg.use_scaler:
+                                self.scaler.scale(loss).backward(retain_graph=True)
+                                self.scaler.step(optim)
+                                self.scaler.update()
+                            else:
+                                loss.backward(retain_graph=True)       
+                                optim.step()
+    
                         loss = loss.detach()
                         if self.model_is_stochastic:
                             det_skill = det_skill.detach(); ens_var = ens_var.detach()
@@ -359,7 +427,9 @@ class train_or_eval_one_epoch:
                         precip_sum_mse = precip_sum_mse.detach()
                         precip_sum_gel = precip_sum_gel.detach()
                         gel_lev = gel_lev.detach()
-                          
+                        losses = []; grads = []
+
+                    j2 += 1           
                     ypo_lay = ypo_lay.detach(); ypo_sfc = ypo_sfc.detach()
                     yto_lay = yto_lay.detach(); yto_sfc = yto_sfc.detach()
                     prev_outputs = prev_outputs.detach()

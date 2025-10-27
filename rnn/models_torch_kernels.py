@@ -439,8 +439,8 @@ class MyStochasticGRULayer4(jit.ScriptModule):
             w.data.uniform_(-std, std)
             
     # @torch.jit.script          
-    @jit.script_method
-    # @torch.compile
+    # @jit.script_method
+    @torch.compile
     def forward(
         self, input_seq: Tensor, hidden: Tensor) -> Tensor: #Tuple[Tensor, Tensor]:
         

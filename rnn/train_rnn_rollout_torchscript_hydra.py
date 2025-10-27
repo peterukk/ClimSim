@@ -539,6 +539,7 @@ def main(cfg: DictConfig):
                                     ny = ny, ny_sfc=ny_sfc, 
                                     nneur=cfg.nneur, 
                                     use_initial_mlp=cfg.use_initial_mlp, 
+                                    separate_radiation=cfg.separate_radiation,
                                     # use_intermediate_mlp=True,
                                     add_pres = cfg.add_pres,
                                     output_prune = cfg.output_prune,
