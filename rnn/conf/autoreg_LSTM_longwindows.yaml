@@ -51,6 +51,7 @@ snowhice_fix: true
 
 # loss_fn_type: mse
 loss_fn_type: huber
+use_conflictfree: false
 crps_sumvar: true
 use_energy_loss: true
 # w_hcon: 1.0e-05

@@ -80,7 +80,7 @@ class train_or_eval_one_epoch:
             from conflictfree.momentum_operator import PseudoMomentumOperator
             from conflictfree.grad_operator import ConFIG_update
             from conflictfree.utils import get_gradient_vector,apply_gradient_vector
-            
+
     def eval_one_epoch(self, lossf, optim, epoch, timesteps=1, lr_scheduler=None):
         report_freq = self.report_freq
         # Initialize per-epoch metrics to zero (there's LOTS!)
@@ -141,7 +141,9 @@ class train_or_eval_one_epoch:
             num_loss += 1
         if self.model_is_stochastic and self.cfg.use_det_loss:
             num_loss += 1
-        operator=PseudoMomentumOperator(num_vectors=num_loss) 
+
+        if self.cfg.use_conflictfree:
+          operator=PseudoMomentumOperator(num_vectors=num_loss) 
 
         # Option ar_noise_mode for training stochastic RNNs
         # 0 : Fully uncorrelated noise. The sampled noise (eps) used in the stochastic RNN has no temporal correlation, is

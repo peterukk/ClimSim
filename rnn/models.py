@@ -1442,6 +1442,7 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
     return_det: Final[bool]
     det_mode: Final[bool]
     use_stochastic_lstm: Final[bool]
+    deterministic_mode: Final[bool]
 
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
@@ -1453,6 +1454,7 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
                 add_pres=False,
                 output_prune=False,
                 use_stochastic_lstm=True,
+                deterministic_mode=False,
                 separate_radiation=False,
                 coeff_stochastic = 0.0,
                 return_det=True,
@@ -1472,11 +1474,13 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
             self.preslay = LayerPressure(hyam,hybm)
             nx = nx +1
         self.return_det = return_det
+        self.deterministic_mode=deterministic_mode
         self.nx = nx
         self.use_stochastic_lstm = use_stochastic_lstm
         self.separate_radiation=separate_radiation
         if self.separate_radiation:
             print("Model config separate_radiation is ON!")
+            if self.return_det: raise NotImplementedError("separate_rad not compatible with return_det")
             # self.nlev = 50
             self.nlev_mem = 50
             self.nlev_rad = 60
@@ -1552,8 +1556,8 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
             stochastic_layer = MyStochasticGRULayer5
         # stochastic_layer = MyStochasticLSTMLayer2
 
-        self.rnn3 = stochastic_layer(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias) 
-        # self.rnn4 = stochastic_layer(self.nx_rnn4, self.nh_rnn4, use_bias=use_bias) 
+        if not self.deterministic_mode:
+          self.rnn3 = stochastic_layer(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias) 
 
         # if self.concat: 
         nh_rnn = self.nh_rnn2
@@ -1687,42 +1691,50 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         h_sfc = last_h.squeeze() 
         
         # Final steps: 
-        if self.return_det:
-            rnn1_mem        = self.mlp_latent(h_final)
-            out_det         = self.mlp_output(rnn1_mem)
-            if self.output_prune:
-                out_det[:,0:12,1:] = out_det[:,0:12,1:].clone().zero_()
+        # if self.return_det:
+        #     rnn1_mem        = self.mlp_latent(h_final)
+        #     out_det         = self.mlp_output(rnn1_mem)
+        #     if self.output_prune:
+        #         out_det[:,0:12,1:] = out_det[:,0:12,1:].clone().zero_()
         # out_sfc         = self.mlp_surface_output(h_sfc)
         # out_sfc         = self.relu(out_sfc)
         
         
         #  --------- STOCHASTIC RNN FOR PERTURBATION ----------
-        input_rnn3 = torch.transpose(h_final,0,1)
-        # input_rnn3 = torch.flip(input_rnn3, [0])
+        if not self.deterministic_mode:
+            if self.return_det:
+                rnn1_mem        = self.mlp_latent(h_final)
+                out_det         = self.mlp_output(rnn1_mem)
+                if self.output_prune:
+                    out_det[:,0:12,1:] = out_det[:,0:12,1:].clone().zero_()
 
-        hx = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device) 
-        if self.use_stochastic_lstm:
-          cx = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device) 
-          hx = (hx, cx)
-          srnn_out, last_state = self.rnn3(input_rnn3, hx)
-        else:
-          srnn_out = self.rnn3(input_rnn3, hx)
-        h_sfc_perturb = srnn_out[-1,:,:]
+            input_rnn3 = torch.transpose(h_final,0,1)
+            # input_rnn3 = torch.flip(input_rnn3, [0])
 
-        # srnn_out, state = self.rnn3(input_rnn3, (hx,cx))
-        # h_sfc_perturb, dummy = state
-        
-        h_final_perturb = torch.transpose(srnn_out,0,1)
-        
-        # h_final = h_final + 0.01*h_final_perturb
-        # h_sfc   = h_sfc + 0.01*h_sfc_perturb
-        # h_final_perturb = self.hardtanh(h_final_perturb)
-        # h_sfc_perturb = self.hardtanh(h_sfc_perturb)
-        
-        h_final = h_final*h_final_perturb
-        h_sfc   = h_sfc*h_sfc_perturb
-        
-        #  --------- STOCHASTIC RNN FOR PERTURBATION ----------
+            hx = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device) 
+            if self.use_stochastic_lstm:
+              cx = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device) 
+              hx = (hx, cx)
+              srnn_out, last_state = self.rnn3(input_rnn3, hx)
+            else:
+              srnn_out = self.rnn3(input_rnn3, hx)
+            h_sfc_perturb = srnn_out[-1,:,:]
+
+            # srnn_out, state = self.rnn3(input_rnn3, (hx,cx))
+            # h_sfc_perturb, dummy = state
+            
+            h_final_perturb = torch.transpose(srnn_out,0,1)
+            
+            # h_final = h_final + 0.01*h_final_perturb
+            # h_sfc   = h_sfc + 0.01*h_sfc_perturb
+            # h_final_perturb = self.hardtanh(h_final_perturb)
+            # h_sfc_perturb = self.hardtanh(h_sfc_perturb)
+            
+            h_final = h_final*h_final_perturb
+            # h_sfc   = h_sfc*h_sfc_perturb
+            h_sfc   = h_sfc_perturb
+
+          #  --------- STOCHASTIC RNN FOR PERTURBATION ----------
 
         # Final steps: 
         rnn1_mem        = self.mlp_latent(h_final)
