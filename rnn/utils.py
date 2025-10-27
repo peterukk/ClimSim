@@ -22,9 +22,6 @@ from norm_coefficients import lbd_qi_lev, lbd_qi_mean,  lbd_qc_lev, lbd_qc_mean,
 import matplotlib
 import matplotlib.pyplot as plt
 import random
-from conflictfree.momentum_operator import PseudoMomentumOperator
-from conflictfree.grad_operator import ConFIG_update
-from conflictfree.utils import get_gradient_vector,apply_gradient_vector
 # from pickle import dump
 
 
@@ -79,7 +76,11 @@ class train_or_eval_one_epoch:
         self.model_is_stochastic = model_is_stochastic 
         if self.batch_size==384:
             self.epoch_bias_collev = np.zeros((384,  self.model.nlev,  self.model.ny))
-
+        if self.cfg.use_conflictfree: 
+            from conflictfree.momentum_operator import PseudoMomentumOperator
+            from conflictfree.grad_operator import ConFIG_update
+            from conflictfree.utils import get_gradient_vector,apply_gradient_vector
+            
     def eval_one_epoch(self, lossf, optim, epoch, timesteps=1, lr_scheduler=None):
         report_freq = self.report_freq
         # Initialize per-epoch metrics to zero (there's LOTS!)
