@@ -655,28 +655,27 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
     to the latent state, similar to SPPT
     """
     use_initial_mlp: Final[bool]
-    # use_intermediate_mlp: Final[bool]
     add_pres: Final[bool]
     output_prune: Final[bool]
     separate_radiation: Final[bool]
-    # diagnose_precip: Final[bool]
     return_det: Final[bool]
     det_mode: Final[bool]
     use_stochastic_lstm: Final[bool]
     deterministic_mode: Final[bool]
-
+    randomly_initialize_cellstate: Final[bool]
+    
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
                 device,
                 nlev=60, nx = 15, nx_sfc=24, ny = 5, ny_sfc=5, nneur=(192,192), 
                 use_initial_mlp=False, 
-                # use_intermediate_mlp=True,
                 add_pres=False,
                 output_prune=False,
                 use_stochastic_lstm=True,
                 deterministic_mode=False,
                 separate_radiation=False,
+                randomly_initialize_cellstate=False,
                 return_det=True,
                 nh_mem=16):
         super(LSTM_autoreg_torchscript_perturb, self).__init__()
@@ -775,24 +774,16 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         if not self.deterministic_mode:
           self.rnn3 = stochastic_layer(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias) 
 
-        # if self.concat: 
         nh_rnn = self.nh_rnn2
-
-        # if self.use_intermediate_mlp: 
         self.mlp_latent = nn.Linear(nh_rnn, self.nh_mem)
         self.mlp_output = nn.Linear(self.nh_mem, self.ny)
-        # else:
-        #     self.mlp_output = nn.Linear(nh_rnn, self.ny)
-            
+
         self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc0)
         if self.separate_radiation:
-            # self.nh_rnn1_rad = self.nh_rnn1 
-            # self.nh_rnn2_rad = self.nh_rnn2 
             self.nh_rnn1_rad = 96 
             self.nh_rnn2_rad = 96
             # self.rnn1_rad      = nn.GRU(self.nh_mem+self.nx_rad, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
             self.rnn1_rad      = nn.GRU(4+self.nx_rad, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
-
             self.rnn2_rad      = nn.GRU(self.nh_rnn1_rad, self.nh_rnn2_rad,  batch_first=True) 
             self.mlp_surface_rad = nn.Linear(self.nx_sfc_rad, self.nh_rnn1_rad)
             self.mlp_surface_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_sfc_rad)
@@ -801,7 +792,8 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
             print("nx rnn1", self.nx_rnn1, "nh rnn1", self.nh_rnn1)
         else: 
             self.mlp_toa1  = nn.Linear(2, self.nh_rnn2)
-            self.mlp_toa2  = nn.Linear(2, self.nh_rnn2)
+            if not self.randomly_initialize_cellstate:
+                self.mlp_toa2  = nn.Linear(2, self.nh_rnn2)
 
     def temperature_scaling(self, T_raw):
         # T_denorm = T = T*(self.xmax_lev[:,0] - self.xmin_lev[:,0]) + self.xmean_lev[:,0]
@@ -938,12 +930,16 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         rnn1out = torch.flip(rnn1out, [1])
 
         if self.separate_radiation:
-          hx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)  # (batch, hidden_size)
-          cx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)
+            hx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)  # (batch, hidden_size)
+            cx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)
         else: 
-          inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
-          hx2 = self.mlp_toa1(inputs_toa)
-          cx2 = self.mlp_toa2(inputs_toa)
+            inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
+            hx2 = self.mlp_toa1(inputs_toa)
+            if self.randomly_initialize_cellstate: 
+                cx2 = torch.randn_like(hx2)
+            else:
+                cx2 = self.mlp_toa2(inputs_toa)
+
         hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
         
         input_rnn2 = rnn1out

@@ -485,8 +485,8 @@ def main(cfg: DictConfig):
                                     nneur=cfg.nneur, 
                                     use_initial_mlp=cfg.use_initial_mlp, 
                                     separate_radiation=cfg.separate_radiation,
+                                    randomly_initialize_cellstate=cfg.randomly_initialize_cellstate,
                                     deterministic_mode=not is_stochastic,
-                                    # use_intermediate_mlp=True,
                                     add_pres = cfg.add_pres,
                                     output_prune = cfg.output_prune,
                                     nh_mem=cfg.nh_mem)
