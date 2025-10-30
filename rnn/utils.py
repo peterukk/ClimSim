@@ -751,6 +751,17 @@ def apply_output_norm_numba(y, ycoeff):
             for kk in range(ny): 
                 y[ii,jj,kk] = y[ii,jj,kk] * ycoeff[jj,kk]
     
+@njit(error_model="numpy")    
+# def apply_input_norm_numba(x, xcoeff_mean, xcoeff_min, xcoeff_max):
+def apply_output_norm_numba_sqrt(y, ycoeff):
+    signs = np.sign(y)
+    (ns,nlev,ny) = y.shape
+    for ii in range(ns):
+        for jj in range(nlev):
+            for kk in range(ny): 
+                y[ii,jj,kk] = np.sqrt(np.sqrt(np.sqrt(np.abs(y[ii,jj,kk]))))
+                y[ii,jj,kk] = signs[ii,jj,kk] * (y[ii,jj,kk] * ycoeff[jj,kk])
+    
 class generator_xy(torch.utils.data.Dataset):
     def __init__(self, filepath, nloc=384, cache=False, add_refpres=True,
                  ycoeffs=None, xcoeffs=None, 
@@ -759,6 +770,7 @@ class generator_xy(torch.utils.data.Dataset):
                  v4_to_v5_inputs=False,
                  cloud_exp_norm=True,
                  input_norm_per_level=True,
+                 output_sqrt_norm=False,
                  remove_past_sfc_inputs=False,
                  qinput_prune=False,
                  rh_prune=False,
@@ -786,7 +798,7 @@ class generator_xy(torch.utils.data.Dataset):
         self.output_prune=output_prune
         self.include_prev_inputs = include_prev_inputs
         self.include_prev_outputs = include_prev_outputs
-           
+        self.output_sqrt_norm = output_sqrt_norm 
         if self.mp_mode==0: # predict qliq, qice
             self.hu_mp_constraint = False 
             self.pred_liq_ratio = False
@@ -1229,10 +1241,18 @@ class generator_xy(torch.utils.data.Dataset):
         # for i in range(5):
         #     print("OOO", i, "minmax y ", y_lev_b[:,50,i].min(), y_lev_b[:,50,i].max())
         if self.use_numba:
-            apply_output_norm_numba(y_lev_b, self.yscale_lev)
+            if self.output_sqrt_norm:
+                apply_output_norm_numba_sqrt(y_lev_b, self.yscale_lev)
+            else:
+                apply_output_norm_numba(y_lev_b, self.yscale_lev)
         else:
             y_lev_b  = y_lev_b * self.yscale_lev
-        
+            if self.output_sqrt_norm:
+                raise NotImplementedError()
+
+        # for ivar in range(6):
+        #     print(ivar, y_lev_b[:,:,ivar].min(), y_lev_b[:,:,ivar].max(), y_lev_b[:,:,ivar].std())
+
         if self.output_prune:
             y_lev_b[:,0:12,1:] = 0.0
             

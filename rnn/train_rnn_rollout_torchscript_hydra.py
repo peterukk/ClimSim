@@ -254,50 +254,55 @@ def main(cfg: DictConfig):
             print("Padded y norm coefficients with ones, new shape: {}".format(yscale_lev.shape))
 
     else:
-        yscale_lev = np.repeat(np.array([2.3405453e+04, 2.3265182e+08, 1.4898973e+08, 6.4926711e+04,
-                7.8328773e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        if cfg.new_nolev_scaling:
-            # if use_mp_constraint:
+        if not cfg.new_nolev_scaling:
             if cfg.mp_mode==1:
                 yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.58085550e+08, 5.00182069e+04,
-                       6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+                        6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
             elif cfg.mp_mode==0:
                 yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.91623978e+08, 3.23919949e+08, 
                     5.00182069e+04, 6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
             else:
                 raise NotImplementedError()
         else:
-            raise NotImplementedError()
+            if cfg.mp_mode==0:
+                 yscale_lev = np.repeat(np.array([24.4, 22.8, 25.1, 30.1, 10.1, 11.3], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+                # yscale_lev = np.repeat(np.array([1.0,1.0,1.0,1.0,1.0,1.0], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            else:
+                raise NotImplementedError()
+
+            if cfg.input_norm_per_level:
+                raise NotImplementedError()
             
     if cfg.input_norm_per_level:
         xmax_lev = input_max[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
         xmin_lev = input_min[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
         xmean_lev = input_mean[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
     else:
-        xmax_lev = np.repeat(np.array([2.9577750e+02, 1.0000000e+00, 1.0000000e+00, 1.0000000e+00,
-               7.6608604e+01, 5.4018818e+01, 2.3003130e-03, 3.2301173e-07,
-               4.1381191e-03, 2.3003130e-03, 3.2301173e-07, 4.1381191e-03,
-               2.7553122e-06, 8.6128614e-07, 4.0667697e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        xmin_lev = np.repeat(np.array([ 1.9465800e+02,  0.0000000e+00,  0.0000000e+00,  0.0000000e+00,
-               -4.5055122e+01, -5.4770996e+01, -2.7256422e-03, -2.8697787e-07,
-               -3.2421835e-03, -2.7256422e-03, -2.8697787e-07, -3.2421835e-03,
-                1.0383576e-06,  6.6867170e-07,  3.3562134e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        xmean_lev = np.repeat(np.array([ 2.47143495e+02,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00,
-                9.02305768e+00, -1.85453092e-02,  0.00000000e+00,  0.00000000e+00,
-                0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00,
-                1.95962779e-06,  8.22708859e-07,  3.88440249e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        # xmax_lev = np.repeat(np.array([2.9577750e+02, 1.0000000e+00, 1.0000000e+00, 1.0000000e+00,
+        #        7.6608604e+01, 5.4018818e+01, 2.3003130e-03, 3.2301173e-07,
+        #        4.1381191e-03, 2.3003130e-03, 3.2301173e-07, 4.1381191e-03,
+        #        2.7553122e-06, 8.6128614e-07, 4.0667697e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        # xmin_lev = np.repeat(np.array([ 1.9465800e+02,  0.0000000e+00,  0.0000000e+00,  0.0000000e+00,
+        #        -4.5055122e+01, -5.4770996e+01, -2.7256422e-03, -2.8697787e-07,
+        #        -3.2421835e-03, -2.7256422e-03, -2.8697787e-07, -3.2421835e-03,
+        #         1.0383576e-06,  6.6867170e-07,  3.3562134e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        # xmean_lev = np.repeat(np.array([ 2.47143495e+02,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00,
+        #         9.02305768e+00, -1.85453092e-02,  0.00000000e+00,  0.00000000e+00,
+        #         0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00,
+        #         1.95962779e-06,  8.22708859e-07,  3.88440249e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
     
-        if cfg.new_nolev_scaling:
-            xmax_lev = np.repeat(np.array([3.21864136e+02, 1.0000000e+00, 1.0000000e+00, 1.0000000e+00,
-                   2.13669708e+02, 1.41469925e+02, 6.18724059e-03, 8.70866188e-07,
-                   4.59552743e-02, 6.18724059e-03, 8.70866188e-07, 4.59552743e-02,
-                   1.80104525e-05, 9.98605856e-07, 4.90858383e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            
-            xmin_lev = np.repeat(np.array([ 1.56582825e+02,  0.0000000e+00,  0.0000000e+00,  0.0000000e+00,
-                   -1.46704926e+02, -2.35915283e+02, -4.92735580e-03, -1.11688621e-06,
-                   -4.69117053e-02, -4.92735580e-03, -1.11688621e-06, -4.69117053e-02,
-                    9.70113589e-09,  1.78764156e-10,  3.65223324e-10], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            xmean_lev = np.repeat(np.zeros((15), dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        # if cfg.new_nolev_scaling:
+        xmax_lev = np.repeat(np.array([3.21864136e+02, 1.0000000e+00, 1.0000000e+00, 1.0000000e+00,
+                2.13669708e+02, 1.41469925e+02, 6.18724059e-03, 8.70866188e-07,
+                4.59552743e-02, 6.18724059e-03, 8.70866188e-07, 4.59552743e-02,
+                1.80104525e-05, 9.98605856e-07, 4.90858383e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        
+        xmin_lev = np.repeat(np.array([ 1.56582825e+02,  0.0000000e+00,  0.0000000e+00,  0.0000000e+00,
+                -1.46704926e+02, -2.35915283e+02, -4.92735580e-03, -1.11688621e-06,
+                -4.69117053e-02, -4.92735580e-03, -1.11688621e-06, -4.69117053e-02,
+                9.70113589e-09,  1.78764156e-10,  3.65223324e-10], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        xmean_lev = np.repeat(np.zeros((15), dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+
         if cfg.include_prev_outputs:
             xmax_lev_prevout = np.repeat(np.array([1.6314061e-03, 8.9240649e-07, 2.0485280e-07, 4.7505119e-07,
                    1.1354494e-03], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
@@ -412,6 +417,7 @@ def main(cfg: DictConfig):
                         # diagnose_precip_v2 = diagnose_precip_v2,
                         predict_liq_ratio=predict_liq_ratio,
                         randomly_initialize_cellstate=cfg.randomly_initialize_cellstate,
+                        output_sqrt_norm=cfg.new_nolev_scaling,
                         use_third_rnn = use_third_rnn,
                         concat = cfg.concat,
                         nh_mem = cfg.nh_mem)#,
@@ -615,6 +621,7 @@ def main(cfg: DictConfig):
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune,  
                     input_norm_per_level=cfg.input_norm_per_level,
+                    output_sqrt_norm=cfg.new_nolev_scaling,
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
                     include_prev_inputs=cfg.include_prev_inputs, include_prev_outputs=cfg.include_prev_outputs,
                     ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
@@ -635,6 +642,7 @@ def main(cfg: DictConfig):
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
                     input_norm_per_level=cfg.input_norm_per_level,
+                    output_sqrt_norm=cfg.new_nolev_scaling,
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
                     include_prev_inputs=cfg.include_prev_inputs, include_prev_outputs=cfg.include_prev_outputs,
                     ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)

@@ -155,6 +155,7 @@ class LSTM_autoreg_torchscript(nn.Module):
     physical_precip: Final[bool]
     predict_liq_ratio: Final[bool]
     randomly_initialize_cellstate: Final[bool]
+    output_sqrt_norm: Final[bool]
     concat: Final[bool]
 
     def __init__(self, hyam, hybm,  hyai, hybi,
@@ -176,6 +177,7 @@ class LSTM_autoreg_torchscript(nn.Module):
                 predict_liq_ratio=False,
                 randomly_initialize_cellstate=False, # introduce a smalld degree of randomness into deterministic LSTM
                 concat=False,
+                output_sqrt_norm=False,
                 nh_mem=16):  # dimension of latent convective memory (per vertical level)
         super(LSTM_autoreg_torchscript, self).__init__()
         self.ny = ny 
@@ -223,6 +225,9 @@ class LSTM_autoreg_torchscript(nn.Module):
         # else:
         #     raise NotImplementedError()
         self.concat=concat
+        self.output_sqrt_norm=output_sqrt_norm
+        if self.output_sqrt_norm:
+            print("Warning: output_sqrt_norm ON")
         self.repeat_mu = repeat_mu
         if self.repeat_mu:
             nx = nx + 1
@@ -371,16 +376,21 @@ class LSTM_autoreg_torchscript(nn.Module):
         return snow_frac
 
     def postprocessing(self, out, out_sfc):
-        # out             = out / self.yscale_lev.to(device=out.device)
-        # out_sfc         = out_sfc / self.yscale_sca.to(device=out.device)
         out             = out / self.yscale_lev
         out_sfc         = out_sfc / self.yscale_sca
+        if self.output_sqrt_norm:
+            signs = torch.sign(out)
+            out = signs*torch.pow(out, 8)
         return out, out_sfc
         
     def pp_mp(self, out, out_sfc, x_denorm):
 
         out_denorm      = out / self.yscale_lev
         out_sfc_denorm  = out_sfc / self.yscale_sca
+
+        if self.output_sqrt_norm:
+            signs = torch.sign(out_denorm)
+            out_denorm = signs*torch.pow(out_denorm, 8)
 
         T_before        = x_denorm[:,:,0:1]
         qliq_before     = x_denorm[:,:,2:3]
@@ -712,6 +722,7 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
             self.ny_rad = 1
             self.ny_sfc_rad = self.ny_sfc0 - 2
             self.ny_sfc0 = 2
+        self.randomly_initialize_cellstate = randomly_initialize_cellstate
         self.nh_rnn1 = self.nneur[0]
         self.nx_rnn2 = self.nneur[0]
         self.nh_rnn2 = self.nneur[1]
