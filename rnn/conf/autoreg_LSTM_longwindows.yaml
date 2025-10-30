@@ -31,7 +31,8 @@ only_load_model: false
 autoregressive: true
 ar_noise_mode: 0
 ar_tau: 0.85
-mp_mode: 1
+
+mp_mode: 0
 physical_precip: false
 input_norm_per_level: true
 output_norm_per_level: true
@@ -85,6 +86,7 @@ use_initial_mlp: true
 use_intermediate_mlp: true
 memory: Hidden
 model_type: LSTM
+randomly_initialize_cellstate: false
 concat: false
 separate_radiation: false
 ensemble_size: 1 

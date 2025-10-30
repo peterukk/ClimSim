@@ -871,6 +871,9 @@ def main(cfg: DictConfig):
             logged_metrics = {"train_"+k:v for k, v in logged_metrics.items()}
             logged_metrics['epoch'] = epoch
             wandb.log(logged_metrics)
+
+        if (np.isnan(logged_metrics['train_loss']) or (logged_metrics['train_R2'] < 0.0)):
+            sys.exit("Loss was NaN or R-squared was below 0 - something's wrong, stopping training") 
         
         # if (bool(epoch%2) and (epoch>=cfg.val_epoch_start)):
         if (epoch>=cfg.val_epoch_start):

@@ -323,16 +323,34 @@ class LSTM_autoreg_torchscript(nn.Module):
         self.repeat_mu = repeat_mu
         if self.repeat_mu:
             nx = nx + 1
+        self.use_intermediate_mlp=use_intermediate_mlp  
+        if self.use_intermediate_mlp:
+            # self.nh_mem = self.nneur[1] // 4
+            # if nh_mem is None:
+            #     self.nh_mem = self.nneur[1] // 8
+            # else:
+            self.nh_mem = nh_mem
+        else:
+            self.nh_mem = self.nneur[1]
         self.separate_radiation=separate_radiation
+        # in ClimSim config of E3SM, the CRM physics first computes 
+        # moist physics on 50 levels, and then computes radiation on 60 levels!
         if self.separate_radiation:
             # self.nlev = 50
             self.nlev_mem = 50
             self.nlev_rad = 60
-            self.nx_rad = self.nx - 2
-            # self.nx_rad = nx - 2
-            # self.nx_rnn1 = self.nx_rnn1 - 3
+            # Rad inputs would in reality be the state variables (except winds) updated by the CRM, plus the gases:
+            self.nx_rad_gas = 3 # 'pbuf_ozone', 'pbuf_CH4', 'pbuf_N2O'
+            # We don't have the CRM state variables (T, qwv, qliq, qice) but pretend is in the output from the first BiRNN
+            # mlp_output does a reduction from the RNN state to actual model outputs, it would be tempting to use the first 4 of these model outputs
+            # (T, qwv, qlic, qice) but this would only be valid if radiation was calculated on the CRM domain mean.
+            # However, it's probable that radiation was run on grouped CRM columns in climsim? https://doi.org/10.5194/gmd-2023-55 
+            # Let's use the BiRNN  output (after intermediate reduction to nh_mem) and not final output so we don't make this assumption
+            # that could be wrong
+            self.nx_rad_crm = self.nh_mem
+            self.nx_rad_tot = self.nx_rad_gas + self.nx_rad_crm 
             nx = nx - 3
-            self.nx_sfc_rad = 5
+            self.nx_sfc_rad = 6 # 'pbuf_COSZRS' 'cam_in_ALDIF' 'cam_in_ALDIR' 'cam_in_ASDIF' 'cam_in_ASDIR' 'cam_in_LWUP' 
             self.nx_sfc = self.nx_sfc  - self.nx_sfc_rad
             self.ny_rad = 1
             self.ny_sfc_rad = self.ny_sfc0 - 2
@@ -364,18 +382,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         self.register_buffer('xdiv_sca', xdiv_sca)
         self.register_buffer('hyai', hyai)
         self.register_buffer('hybi', hybi)
-        # in ClimSim config of E3SM, the CRM physics first computes 
-        # moist physics on 50 levels, and then computes radiation on 60 levels!
-        self.use_intermediate_mlp=use_intermediate_mlp
-            
-        if self.use_intermediate_mlp:
-            # self.nh_mem = self.nneur[1] // 4
-            # if nh_mem is None:
-            #     self.nh_mem = self.nneur[1] // 8
-            # else:
-            self.nh_mem = nh_mem
-        else:
-            self.nh_mem = self.nneur[1]
+
         # self.rnn1_mem = None 
         print("Building RNN that feeds its hidden memory at t0,z0 to its inputs at t1,z0")
         print("Initial mlp: {}, intermediate mlp: {}".format(self.use_initial_mlp, self.use_intermediate_mlp))
@@ -440,8 +447,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.nh_rnn1_rad = 96 
             self.nh_rnn2_rad = 96
             # self.rnn1_rad      = nn.GRU(self.nh_mem+self.nx_rad, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
-            self.rnn1_rad      = nn.GRU(4+self.nx_rad, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
-
+            self.rnn1_rad      = nn.GRU(self.nx_rad_tot, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
             self.rnn2_rad      = nn.GRU(self.nh_rnn1_rad, self.nh_rnn2_rad,  batch_first=True) 
             self.mlp_surface_rad = nn.Linear(self.nx_sfc_rad, self.nh_rnn1_rad)
             self.mlp_surface_output_rad = nn.Linear(self.nh_rnn2_rad, self.ny_sfc_rad)
@@ -561,7 +567,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         # output of the RNN from the previous time step 
 
         if self.separate_radiation:
-            inputs_sfc = torch.cat((inputs_aux[:,0:6],inputs_aux[:,11:]),dim=1)
+            inputs_sfc = torch.cat((inputs_aux[:,0:6],inputs_aux[:,12:]),dim=1)
         else:
             inputs_sfc = inputs_aux
         hx = self.mlp_surface1(inputs_sfc)
@@ -650,22 +656,20 @@ class LSTM_autoreg_torchscript(nn.Module):
             out_new = torch.zeros(batch_size, self.nlev_rad, self.ny, device=inputs_main.device)
             out_new[:,10:,:] = out
             # Start at surface again
-            # Do not use inputs 4,5 (winds)
-            inputs_main_rad =  torch.cat((inputs_main[:,:,0:4], inputs_main[:,:,6:]),dim=2)
+            inputs_gas_rad =  inputs_main[:,:,12:15] # gases
             # # add dT from crm 
             # T_old =   inputs_main * (self.xcoeff_lev[2,:,0:1] - self.xcoeff_lev[1,:,0:1]) + self.xcoeff_lev[0,:,0:1] 
             # T_new = T_old + dT
             # inputs_rad =  torch.zeros(batch_size, self.nlev_rad, self.nh_mem+self.nx_rad,device=inputs_main.device)
-            inputs_rad =  torch.zeros(batch_size, self.nlev_rad, 4+self.nx_rad,device=inputs_main.device)
+            inputs_rad =  torch.zeros(batch_size, self.nlev_rad, self.nx_rad_tot, device=inputs_main.device)
 
             # inputs_rad[:,10:,0:self.nh_mem] = torch.flip(rnn2out, [1])
             # inputs_rad[:,:,self.nh_mem:] = inputs_main_rad
-
-            inputs_rad[:,10:,0:4] = torch.flip(out[:,:,0:4], [1])
-            inputs_rad[:,:,4:] = inputs_main_rad
+            inputs_rad[:,:,0:3] = inputs_gas_rad
+            inputs_rad[:,10:,3:] = torch.flip(rnn1_mem, [1])
             # inputs_rad = torch.flip(inputs_rad, [1])
 
-            inputs_sfc_rad = inputs_aux[:,6:11]
+            inputs_sfc_rad = inputs_aux[:,6:12]
             hx = self.mlp_surface_rad(inputs_sfc_rad)
             hidden = (torch.unsqueeze(hx,0))
             rnn_out, states = self.rnn1_rad(inputs_rad, hidden)
@@ -758,22 +762,23 @@ class LSTM_autoreg_torchscript(nn.Module):
           # out[:,:,0] = out[:,:,0] + dT_precip 
           out[:,:,1] = out[:,:,1] + dqv_precip
           out[:,:,2] = out[:,:,2] + dqn_precip
+          # Add temperature tendencies due to these!!!!!!!!!!!!!!!!!!!!!!!!!1
           out = out[:,:,0:self.ny]
 
-          
           # mass flux of precip downwards due to gravity,  force positive
           flux_dn_precip = self.relu(flux_dn_precip) #  because we use pressure coordinates this is just omega (vertical velocity in pressure coordinates )
           # flux_up_precip = 0 
 
           # precipitation that hasn't fallen yet, vertical profile, stored in memory (hidden state variable)
           P_old = rnn1_mem[:,ilev_precip:,0]
+          # apply relu to this to limit size???????????????????
 
         #   flux_net = flux_dn_precip # - flux_up_precip
           flux_diff = flux_dn_precip[:,1:] - flux_dn_precip[:,0:-1]
           precc = flux_dn_precip[:,-1]
           precc = precc.unsqueeze(1)
           pres_diff = pres_nonorm[:,1:] - pres_nonorm[:,0:-1]
-          dP_adv = -(flux_diff / pres_diff) #
+          dP_adv = 9.81*(flux_diff / pres_diff) # just times g, in z coordinates this would be (-1/rho)
           zeroes = torch.zeros(batch_size, 1, device=inputs_main.device)
           dP_adv = torch.cat((zeroes,dP_adv),dim=1)
             
@@ -1599,6 +1604,52 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         snow_frac = (283.3 - temp_surface) /  14.6
         snow_frac = F.hardtanh(snow_frac, 0.0, 1.0)
         return snow_frac
+    
+    def forward_rad(self, inputs_main, inputs_aux, inputs_toa, out):
+        batch_size = inputs_main.shape[0]  
+        # out_crm = out.clone()
+        out_new = torch.zeros(batch_size, self.nlev_rad, self.ny, device=inputs_main.device)
+        out_new[:,10:,:] = out
+        # Start at surface again
+        # Do not use inputs 4,5 (winds)
+        inputs_main_rad =  torch.cat((inputs_main[:,:,0:4], inputs_main[:,:,6:]),dim=2)
+        # # add dT from crm 
+        # T_old =   inputs_main * (self.xcoeff_lev[2,:,0:1] - self.xcoeff_lev[1,:,0:1]) + self.xcoeff_lev[0,:,0:1] 
+        # T_new = T_old + dT
+        # inputs_rad =  torch.zeros(batch_size, self.nlev_rad, self.nh_mem+self.nx_rad,device=inputs_main.device)
+        inputs_rad =  torch.zeros(batch_size, self.nlev_rad, 4+self.nx_rad,device=inputs_main.device)
+
+        # inputs_rad[:,10:,0:self.nh_mem] = torch.flip(rnn2out, [1])
+        # inputs_rad[:,:,self.nh_mem:] = inputs_main_rad
+
+        inputs_rad[:,10:,0:4] = torch.flip(out[:,:,0:4], [1])
+        inputs_rad[:,:,4:] = inputs_main_rad
+        # inputs_rad = torch.flip(inputs_rad, [1])
+
+        inputs_sfc_rad = inputs_aux[:,6:11]
+        hx = self.mlp_surface_rad(inputs_sfc_rad)
+        hidden = (torch.unsqueeze(hx,0))
+        rnn_out, states = self.rnn1_rad(inputs_rad, hidden)
+        rnn_out = torch.flip(rnn_out, [1])
+
+        inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
+        hx2 = self.mlp_toa_rad(inputs_toa)
+
+        rnn_out, last_h = self.rnn2_rad(rnn_out, hidden)
+        out_rad = self.mlp_output_rad(rnn_out)
+
+        out_sfc_rad = self.mlp_surface_output_rad(last_h)
+        #1D (scalar) Output variables: ['cam_out_NETSW', 'cam_out_FLWDS', 'cam_out_PRECSC', 
+        #'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
+        # print("shape 1", out_sfc_rad.shape, "2", out_sfc.shape)
+        out_sfc_rad = torch.squeeze(out_sfc_rad)
+
+        # dT_tot = dT_crm + dT_rad
+        out_new[:,:,0:1] = out_new[:,:,0:1] + out_rad
+        # rad predicts everything except PRECSC, PRECC
+        out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
+
+        return out_new, out_sfc
 
     def postprocessing(self, out, out_sfc):
         out             = out / self.yscale_lev
@@ -1705,7 +1756,7 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
             if self.return_det:
                 rnn1_mem        = self.mlp_latent(h_final)
                 out_det         = self.mlp_output(rnn1_mem)
-                if self.output_prune:
+                if self.output_prune and (not self.separate_radiation):
                     out_det[:,0:12,1:] = out_det[:,0:12,1:].clone().zero_()
 
             input_rnn3 = torch.transpose(h_final,0,1)
@@ -1748,47 +1799,49 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         out_sfc         = self.mlp_surface_output(h_sfc)
 
         if self.separate_radiation:
-            # out_crm = out.clone()
-            out_new = torch.zeros(batch_size, self.nlev_rad, self.ny, device=inputs_main.device)
-            out_new[:,10:,:] = out
-            # Start at surface again
-            # Do not use inputs 4,5 (winds)
-            inputs_main_rad =  torch.cat((inputs_main[:,:,0:4], inputs_main[:,:,6:]),dim=2)
-            # # add dT from crm 
-            # T_old =   inputs_main * (self.xcoeff_lev[2,:,0:1] - self.xcoeff_lev[1,:,0:1]) + self.xcoeff_lev[0,:,0:1] 
-            # T_new = T_old + dT
-            # inputs_rad =  torch.zeros(batch_size, self.nlev_rad, self.nh_mem+self.nx_rad,device=inputs_main.device)
-            inputs_rad =  torch.zeros(batch_size, self.nlev_rad, 4+self.nx_rad,device=inputs_main.device)
+            # # out_crm = out.clone()
+            # out_new = torch.zeros(batch_size, self.nlev_rad, self.ny, device=inputs_main.device)
+            # out_new[:,10:,:] = out
+            # # Start at surface again
+            # # Do not use inputs 4,5 (winds)
+            # inputs_main_rad =  torch.cat((inputs_main[:,:,0:4], inputs_main[:,:,6:]),dim=2)
+            # # # add dT from crm 
+            # # T_old =   inputs_main * (self.xcoeff_lev[2,:,0:1] - self.xcoeff_lev[1,:,0:1]) + self.xcoeff_lev[0,:,0:1] 
+            # # T_new = T_old + dT
+            # # inputs_rad =  torch.zeros(batch_size, self.nlev_rad, self.nh_mem+self.nx_rad,device=inputs_main.device)
+            # inputs_rad =  torch.zeros(batch_size, self.nlev_rad, 4+self.nx_rad,device=inputs_main.device)
 
-            # inputs_rad[:,10:,0:self.nh_mem] = torch.flip(rnn2out, [1])
-            # inputs_rad[:,:,self.nh_mem:] = inputs_main_rad
+            # # inputs_rad[:,10:,0:self.nh_mem] = torch.flip(rnn2out, [1])
+            # # inputs_rad[:,:,self.nh_mem:] = inputs_main_rad
 
-            inputs_rad[:,10:,0:4] = torch.flip(out[:,:,0:4], [1])
-            inputs_rad[:,:,4:] = inputs_main_rad
-            # inputs_rad = torch.flip(inputs_rad, [1])
+            # inputs_rad[:,10:,0:4] = torch.flip(out[:,:,0:4], [1])
+            # inputs_rad[:,:,4:] = inputs_main_rad
+            # # inputs_rad = torch.flip(inputs_rad, [1])
 
-            inputs_sfc_rad = inputs_aux[:,6:11]
-            hx = self.mlp_surface_rad(inputs_sfc_rad)
-            hidden = (torch.unsqueeze(hx,0))
-            rnn_out, states = self.rnn1_rad(inputs_rad, hidden)
-            rnn_out = torch.flip(rnn_out, [1])
+            # inputs_sfc_rad = inputs_aux[:,6:11]
+            # hx = self.mlp_surface_rad(inputs_sfc_rad)
+            # hidden = (torch.unsqueeze(hx,0))
+            # rnn_out, states = self.rnn1_rad(inputs_rad, hidden)
+            # rnn_out = torch.flip(rnn_out, [1])
 
-            inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
-            hx2 = self.mlp_toa_rad(inputs_toa)
+            # inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
+            # hx2 = self.mlp_toa_rad(inputs_toa)
 
-            rnn_out, last_h = self.rnn2_rad(rnn_out, hidden)
-            out_rad = self.mlp_output_rad(rnn_out)
+            # rnn_out, last_h = self.rnn2_rad(rnn_out, hidden)
+            # out_rad = self.mlp_output_rad(rnn_out)
 
-            out_sfc_rad = self.mlp_surface_output_rad(last_h)
-            # dT_tot = dT_crm + dT_rad
-            out_new[:,:,0:1] = out_new[:,:,0:1] + out_rad
-            out = out_new
-            #1D (scalar) Output variables: ['cam_out_NETSW', 'cam_out_FLWDS', 'cam_out_PRECSC', 
-            #'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
-            # print("shape 1", out_sfc_rad.shape, "2", out_sfc.shape)
-            out_sfc_rad = torch.squeeze(out_sfc_rad)
-            # rad predicts everything except PRECSC, PRECC
-            out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
+            # out_sfc_rad = self.mlp_surface_output_rad(last_h)
+            # #1D (scalar) Output variables: ['cam_out_NETSW', 'cam_out_FLWDS', 'cam_out_PRECSC', 
+            # #'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
+            # # print("shape 1", out_sfc_rad.shape, "2", out_sfc.shape)
+            # out_sfc_rad = torch.squeeze(out_sfc_rad)
+
+            # # dT_tot = dT_crm + dT_rad
+            # out_new[:,:,0:1] = out_new[:,:,0:1] + out_rad
+            # out = out_new
+            # # rad predicts everything except PRECSC, PRECC
+            # out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
+            out, out_sfc = self.forward_rad(inputs_main, inputs_aux, inputs_toa, out)
 
         out_sfc         = self.relu(out_sfc)
         if self.return_det:

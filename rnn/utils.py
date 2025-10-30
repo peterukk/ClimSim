@@ -75,7 +75,7 @@ class train_or_eval_one_epoch:
 
         self.model_is_stochastic = model_is_stochastic 
         if self.batch_size==384:
-            self.epoch_bias_collev = np.zeros((384,  self.model.nlev,  self.model.ny))
+            self.epoch_bias_collev = np.zeros((384,  self.model.nlev,  self.model.ny_pp))
         if self.cfg.use_conflictfree: 
             from conflictfree.momentum_operator import PseudoMomentumOperator
             from conflictfree.grad_operator import ConFIG_update
