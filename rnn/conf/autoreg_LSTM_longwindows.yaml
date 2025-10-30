@@ -52,13 +52,12 @@ snowhice_fix: true
 
 # loss_fn_type: mse
 loss_fn_type: huber
+# use "conlict-free" method that supposedly better way of combining loss functions? github.com/tum-pbs/ConFIG
 use_conflictfree: false
 crps_sumvar: true
 use_energy_loss: true
 # w_hcon: 1.0e-05
 w_hcon: 6.0e-06
-# input_norm_per_level: false
-# output_norm_per_level: false
 use_water_loss: true
 w_wcon: 6.0e7
 use_bias_loss: false
@@ -91,7 +90,6 @@ concat: false
 separate_radiation: false
 ensemble_size: 1 
 crps_start_epoch: 0 
-beta: 1.0 
 
 lr_scheduler: OneCycleLR
 scheduler_end_epoch: 95

@@ -51,6 +51,7 @@ print(device)
 from torch.utils.data import DataLoader
 from torchinfo import summary
 from models import  *
+from models_experimental import *
 from utils import train_or_eval_one_epoch, generator_xy, BatchSampler, plot_bias_diff
 import metrics as metrics
 from torchmetrics.regression import R2Score
@@ -58,7 +59,7 @@ import wandb
 from omegaconf import DictConfig
 import hydra
 import matplotlib.pyplot as plt
-
+from random import randrange
 
 @hydra.main(version_base="1.2", config_path="conf", config_name="autoreg_LSTM")
 def main(cfg: DictConfig):
@@ -87,15 +88,10 @@ def main(cfg: DictConfig):
     # mp_mode = 0   # regular 6 outputs
     # mp_mode = 1   # 5 outputs, predict qn, liq_ratio DIAGNOSED from temperature (mp_constraint) (Hu et al.)
     # mp_mode = -1  # 6 outputs, predict qn + liq_ratio PREDICTED
+    # physical_precip: attempt to incorporate some physics in the way precip is predicted (see models.py)
     if cfg.physical_precip and cfg.mp_mode==0:
       raise NotImplementedError("Physical_precip=true as it not compatible with mp_mode=0 as it requires qn")
-    # ignore comments below (confusing), instead new option^ (physical_precip) for precipitation hack (previously mp_mode=3)
 
-    # mp_mode = 2   # same as mode=1 (predict qn), liq_ratio diagnose, attempt to diagnose precipitation from 
-    #  vertically integrated moisture change, diagnose snow based on temperature
-    # mp_mode = 3   # similar to mode=2 but keep track of precipitation that hasn't fallen yet
-    # negative value of mp_mode (-3...-1) : same as abs(mp_mode) where we use qn but liq ratio is PREDICTED
-    
     if cfg.memory=="None":
         cfg.autoregressive=False
         cfg.use_intermediate_mlp = False
@@ -153,8 +149,6 @@ def main(cfg: DictConfig):
     sp_min = torch.from_numpy(data.input_min['state_ps'].values).to(device, torch.float32)
     sp_mean = torch.from_numpy(data.input_mean['state_ps'].values).to(device, torch.float32)
     
-    # ns, nlev, nx, nx_sfc, ny, ny_sfc = get_input_output_shapes(tr_data_path)
-
     hf = h5py.File(tr_data_path, 'r')
     print(hf.keys()) # <KeysViewHDF5 ['input_lev', 'input_sca', 'output_lev', 'output_sca']>
     print(hf['input_lev'].attrs.keys())
@@ -163,6 +157,9 @@ def main(cfg: DictConfig):
         ns, nloc, nlev, nx = dims 
     else:
         ns, nlev, nx = dims
+
+    # ------------------------------------------------------------------------------------------------
+    # -------------------------------  INPUTS/OUTPUTS AND NORMALIZATON -------------------------------
     
     vars_2D_inp = hf['input_lev'].attrs.get('varnames').tolist()
     # ['state_t', 'state_rh', 'state_q0002', 'state_q0003', 'state_u',
@@ -243,16 +240,6 @@ def main(cfg: DictConfig):
         print("mp mode was <0, we are PREDICTING liquid fraction")
     else:
         predict_liq_ratio=False
-        
-    # if abs(cfg.mp_mode)==2:
-    #     diagnose_precip = True
-    # else:
-    #     diagnose_precip = False
-        
-    # if abs(cfg.mp_mode)==3:
-    #     diagnose_precip_v2 = True
-    # else:
-    #     diagnose_precip_v2 = False
 
     print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
 
@@ -281,13 +268,6 @@ def main(cfg: DictConfig):
                 raise NotImplementedError()
         else:
             raise NotImplementedError()
-        # if cfg.krasnopolsky_scaling:
-        #     ymean_lev = np.repeat(np.array([-1.8267360e-06, -2.9296985e-09,  8.0729937e-12, -2.2609501e-12,
-        #             3.1241700e-07,  7.8532585e-09], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        #     # yscale_lev = np.repeat(np.array([42800.73,42800.73,42800.73,42800.73, 
-        #     #         42800.73,42800.73], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        #     yscale_lev = np.stack((yscale_lev,ymean_lev))
-
             
     if cfg.input_norm_per_level:
         xmax_lev = input_max[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
@@ -334,7 +314,6 @@ def main(cfg: DictConfig):
     ycoeffs = (yscale_lev, yscale_sca)
     print("Y coeff shapes:", yscale_lev.shape, yscale_sca.shape)
     
-        
     xdiv_lev = xmax_lev - xmin_lev
     if xdiv_lev[-1,-1] == 0.0:
         # the division coefficients for N2O, CH4 are zero in lower atmosphere, fix:
@@ -387,19 +366,20 @@ def main(cfg: DictConfig):
     xcoeff_sca = np.stack((xmean_sca, xdiv_sca))
     xcoeff_lev = np.stack((xmean_lev, xdiv_lev))
     xcoeffs = np.float32(xcoeff_lev), np.float32(xcoeff_sca)
+
+    # ------------------------------------------------------------------------------------------------
+
     
-    
-    # if cfg.add_stochastic_layer:
     if cfg.ensemble_size>1:
         use_ensemble = True 
         is_stochastic = True
-        # cfg.ensemble_size = 2
         if cfg.loss_fn_type not in ["CRPS","variogram_score","energy_score","ds_score"]:
             raise NotImplementedError("To train stochastic RNN, use CRPS or variogram loss")
     else:
         use_ensemble = False
-        # cfg.ensemble_size = 1
         is_stochastic = False 
+
+    # ---------------------------------------- SELECT MODEL  -----------------------------------------
 
     print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
     if len(cfg.nneur)==3:
@@ -408,7 +388,6 @@ def main(cfg: DictConfig):
       use_third_rnn = False 
     else: 
       raise NotImplementedError()
-
 
     if cfg.model_type=="LSTM":
         if cfg.autoregressive:
@@ -493,6 +472,24 @@ def main(cfg: DictConfig):
                     ar_noise_mode = cfg.ar_noise_mode,
                     ar_tau = cfg.ar_tau,
                     use_surface_memory=cfg.use_surface_memory)#,
+    elif cfg.model_type=="LSTM_autoreg_torchscript_perturb":
+        # if cfg.autoregressive:
+        model =  LSTM_autoreg_torchscript_perturb(hyam,hybm,hyai,hybi,
+                                    out_scale = yscale_lev,
+                                    out_sfc_scale = yscale_sca, 
+                                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+                                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                                    device=device,
+                                    nx = nx, nx_sfc=nx_sfc, 
+                                    ny = ny, ny_sfc=ny_sfc, 
+                                    nneur=cfg.nneur, 
+                                    use_initial_mlp=cfg.use_initial_mlp, 
+                                    separate_radiation=cfg.separate_radiation,
+                                    deterministic_mode=not is_stochastic,
+                                    # use_intermediate_mlp=True,
+                                    add_pres = cfg.add_pres,
+                                    output_prune = cfg.output_prune,
+                                    nh_mem=cfg.nh_mem)
     elif cfg.model_type=="halfstochasticRNN":
         model = halfstochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
@@ -511,39 +508,6 @@ def main(cfg: DictConfig):
                     ar_noise_mode = cfg.ar_noise_mode,
                     ar_tau = cfg.ar_tau,
                     use_surface_memory=cfg.use_surface_memory)#,
-    elif cfg.model_type=="barelystochasticRNN":
-        model = barelystochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
-                    out_scale = yscale_lev,
-                    out_sfc_scale = yscale_sca, 
-                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                    device=device,
-                    nx = nx, nx_sfc=nx_sfc, 
-                    ny = ny, ny_sfc=ny_sfc, 
-                    nneur=cfg.nneur, 
-                    use_initial_mlp = cfg.use_initial_mlp,
-                    use_intermediate_mlp = cfg.use_intermediate_mlp,
-                    add_pres = cfg.add_pres,
-                    output_prune = cfg.output_prune,
-                    nh_mem = cfg.nh_mem,
-                    use_surface_memory=cfg.use_surface_memory)#,
-    elif cfg.model_type=="LSTM_autoreg_torchscript_perturb":
-        # if cfg.autoregressive:
-        model =  LSTM_autoreg_torchscript_perturb(hyam,hybm,hyai,hybi,
-                                    out_scale = yscale_lev,
-                                    out_sfc_scale = yscale_sca, 
-                                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                                    device=device,
-                                    nx = nx, nx_sfc=nx_sfc, 
-                                    ny = ny, ny_sfc=ny_sfc, 
-                                    nneur=cfg.nneur, 
-                                    use_initial_mlp=cfg.use_initial_mlp, 
-                                    separate_radiation=cfg.separate_radiation,
-                                    # use_intermediate_mlp=True,
-                                    add_pres = cfg.add_pres,
-                                    output_prune = cfg.output_prune,
-                                    nh_mem=cfg.nh_mem)
     elif cfg.model_type=="physrad":
         from models_rad import LSTM_autoreg_torchscript_physrad
         model = LSTM_autoreg_torchscript_physrad(hyam,hybm,hyai,hybi,
@@ -625,26 +589,17 @@ def main(cfg: DictConfig):
     
     infostr = summary(model)
     num_params = infostr.total_params
-    
+
+    # ------------------------------------------------------------------------------------------------
+    # --------------------------------------- DATA I/O -----------------------------------------------
+
     if cfg.autoregressive:
         batch_size_tr = nloc
     else:
         batch_size_tr = cfg.batch_size_tr
 
-    # To improve IO, which is a bottleneck, increase the batch size by a factor of chunk_factor and load this many
-    # batches at once. These chk then need to be manually split into batches within the data iteration loop   
     pin = False
     persistent=False
-    
-    # if type(tr_data_path)==list:  
-    #     num_files = len(tr_data_path)
-    #     batch_size_tr = num_files*batch_size_tr 
-    #     chunk_size_tr = cfg.chunksiz // num_files
-    # else:
-    # num_files = 1
-    # chunk size in number of batches
-    # 720 = 10 days (3 time steps in an hour, 72 in a day)
-    # chunk_size_tr = cfg.chunksize_train
     
     if cfg.num_workers==0:
         no_multiprocessing=True
@@ -653,7 +608,9 @@ def main(cfg: DictConfig):
         no_multiprocessing=False
         prefetch_factor = 1
 
-    
+
+    # To improve IO, which is a bottleneck, increase the batch size by a factor of chunk_factor and load this many
+    # batches at once. These chk then need to be manually split into batches within the data iteration loop  
     train_data = generator_xy(tr_data_path, cache = cfg.cache, nloc = nloc, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune,  
@@ -700,6 +657,10 @@ def main(cfg: DictConfig):
 
     print("batch_size_tr: {}, batch_size_val: {}".format(batch_size_tr, batch_size_val))
 
+
+    # -------------------------------------------------------------------------------------------------------
+    # ----------------------------------- METRICS AND LOSS FUNCTIONS  ---------------------------------------
+
     metric_h_con = metrics.get_energy_metric(hyai, hybi)
     metric_water_con = metrics.get_water_conservation(hyai, hybi)
 
@@ -722,6 +683,9 @@ def main(cfg: DictConfig):
     else:
         raise NotImplementedError("loss_fn {} not implemented".format(cfg.loss_fn_type))
         
+    # -------------------------------------------------------------------------------------------------------
+    # --------------------------------------------- OPTIMIZER -----------------------------------------------
+
     if cfg.optimizer == "adam":
         optimizer = torch.optim.Adam(model.parameters(), lr = cfg.lr)
     elif cfg.optimizer == "adamw":
@@ -747,6 +711,8 @@ def main(cfg: DictConfig):
     else:
         raise NotImplementedError(("optimizer {} not implemented".format(cfg.optimizer)))
 
+    # -------------------------------------------------------------------------------------------------------
+    # -------------------------------- ROLLOUT SCHEDULE AND LR SCHEDULER ------------------------------------
 
     timewindow_default = 1
     rollout_schedule = cfg.rollout_schedule #timestep_schedule[0:10].tolist()
@@ -754,9 +720,8 @@ def main(cfg: DictConfig):
     timestep_schedule[0:len(rollout_schedule)] = rollout_schedule
     timestep_schedule[len(rollout_schedule):] = rollout_schedule[len(rollout_schedule)-1]
 
-  
-#   https://docs.pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.OneCycleLR.html
     if cfg.lr_scheduler=="OneCycleLR":
+        #   https://docs.pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.OneCycleLR.html
         max_lr = cfg.scheduler_max_lr
         min_lr = cfg.scheduler_min_lr
         final_div_factor = cfg.lr/min_lr
@@ -778,16 +743,13 @@ def main(cfg: DictConfig):
       lr_scheduler=None
     else:
       raise NotImplementedError(("scheduler {} not supported".format(cfg.lr_scheduler)))
-
-    from random import randrange
-    model_num = randrange(10,99999)
     
     conf = OmegaConf.to_container(cfg)
     dtypestr = "{}".format(dtype)
     cwd = os.getcwd()
     conf["dtypestr"] = dtypestr
     conf["cwd"] = cwd
-    conf["model_num"] = model_num
+    conf["model_num"] = randrange(10,99999)
     conf["num_params"] = num_params 
     
     if cfg.use_wandb:
@@ -808,7 +770,7 @@ def main(cfg: DictConfig):
                                                                      cfg.memory, cfg.lr, 
                                                                      cfg.nneur[0], cfg.nneur[1], 
                                                                      inpstr, cfg.mp_mode,
-                                                                     model_num)
+                                                                     conf["model_num"] )
 
     SAVE_PATH       = "saved_models/" + MODEL_STR + ".pt"
     save_file_torch = "saved_models/" + MODEL_STR + "_script.pt"
@@ -829,6 +791,9 @@ def main(cfg: DictConfig):
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch']
+
+    # --------------------------------------------------------------------------------------------------------
+    # ----------------------------------------- START TRAINING -----------------------------------------------
 
     for epoch in range(start_epoch, cfg.num_epochs):
         t0 = time.time()

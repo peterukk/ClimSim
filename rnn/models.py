@@ -652,7 +652,7 @@ class LSTM_autoreg_torchscript(nn.Module):
 class LSTM_autoreg_torchscript_perturb(nn.Module):
     """
     Deterministic biLSTM + single stochastic RNN that adds a multiplicative perturbation
-    to the latent state, similar to SSPT
+    to the latent state, similar to SPPT
     """
     use_initial_mlp: Final[bool]
     # use_intermediate_mlp: Final[bool]
@@ -716,12 +716,9 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         self.nh_rnn1 = self.nneur[0]
         self.nx_rnn2 = self.nneur[0]
         self.nh_rnn2 = self.nneur[1]
-        
         self.nx_rnn3 = self.nneur[1]
         self.nh_rnn3 = self.nneur[1]
 
-        self.nx_rnn4 = self.nneur[1]
-        self.nh_rnn4 = self.nneur[1]
         if self.use_initial_mlp:
             self.nx_rnn1 = self.nneur[0]
         else:
