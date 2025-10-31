@@ -380,7 +380,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         out_sfc         = out_sfc / self.yscale_sca
         if self.output_sqrt_norm:
             signs = torch.sign(out)
-            out = signs*torch.pow(out, 8)
+            out = signs*torch.pow(out, 4)
         return out, out_sfc
         
     def pp_mp(self, out, out_sfc, x_denorm):
@@ -390,7 +390,7 @@ class LSTM_autoreg_torchscript(nn.Module):
 
         if self.output_sqrt_norm:
             signs = torch.sign(out_denorm)
-            out_denorm = signs*torch.pow(out_denorm, 8)
+            out_denorm = signs*torch.pow(out_denorm, 4)
 
         T_before        = x_denorm[:,:,0:1]
         qliq_before     = x_denorm[:,:,2:3]

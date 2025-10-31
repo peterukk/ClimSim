@@ -265,7 +265,8 @@ def main(cfg: DictConfig):
                 raise NotImplementedError()
         else:
             if cfg.mp_mode==0:
-                 yscale_lev = np.repeat(np.array([24.4, 22.8, 25.1, 30.1, 10.1, 11.3], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+                yscale_lev = np.repeat(np.array([48.52, 182.97, 271.33,  361.04,   41.43,  44.14 ], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+                #  yscale_lev = np.repeat(np.array([24.4, 22.8, 25.1, 30.1, 10.1, 11.3], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
                 # yscale_lev = np.repeat(np.array([1.0,1.0,1.0,1.0,1.0,1.0], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
             else:
                 raise NotImplementedError()
@@ -492,7 +493,8 @@ def main(cfg: DictConfig):
                                     use_initial_mlp=cfg.use_initial_mlp, 
                                     separate_radiation=cfg.separate_radiation,
                                     randomly_initialize_cellstate=cfg.randomly_initialize_cellstate,
-                                    deterministic_mode=not is_stochastic,
+                                    deterministic_mode=not is_stochastic, # for pretraining the deterministic part only
+                                    return_det=is_stochastic, # if stochastic mode, perhaps useful to still output deterministic output
                                     add_pres = cfg.add_pres,
                                     output_prune = cfg.output_prune,
                                     nh_mem=cfg.nh_mem)
@@ -845,8 +847,8 @@ def main(cfg: DictConfig):
             logged_metrics['epoch'] = epoch
             wandb.log(logged_metrics)
 
-        if (np.isnan(logged_metrics['train_loss']) or (logged_metrics['train_R2'] < 0.0)):
-            sys.exit("Loss was NaN or R-squared was below 0 - something's wrong, stopping training") 
+            if (np.isnan(logged_metrics['train_loss']) or (logged_metrics['train_R2'] < 0.0)):
+                sys.exit("Loss was NaN or R-squared was below 0 - something's wrong, stopping training") 
         
         # if (bool(epoch%2) and (epoch>=cfg.val_epoch_start)):
         if (epoch>=cfg.val_epoch_start):

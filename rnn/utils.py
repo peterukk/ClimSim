@@ -759,7 +759,8 @@ def apply_output_norm_numba_sqrt(y, ycoeff):
     for ii in range(ns):
         for jj in range(nlev):
             for kk in range(ny): 
-                y[ii,jj,kk] = np.sqrt(np.sqrt(np.sqrt(np.abs(y[ii,jj,kk]))))
+                # y[ii,jj,kk] = np.sqrt(np.sqrt(np.sqrt(np.abs(y[ii,jj,kk]))))
+                y[ii,jj,kk] = np.sqrt(np.sqrt(np.abs(y[ii,jj,kk])))
                 y[ii,jj,kk] = signs[ii,jj,kk] * (y[ii,jj,kk] * ycoeff[jj,kk])
     
 class generator_xy(torch.utils.data.Dataset):
