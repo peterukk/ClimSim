@@ -232,12 +232,12 @@ class train_or_eval_one_epoch:
                         
                     if self.cfg.autoregressive:
                         if use_ar_noise:
-                            if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb":
+                            if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb" and self.model_is_stochastic:
                                 preds_lay0, preds_sfc0, rnn1_mem, eps_prev, dummy = outs
                             else:
                                 preds_lay0, preds_sfc0, rnn1_mem, eps_prev = outs
                         else:
-                            if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb":
+                            if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb" and self.model_is_stochastic:
                                 preds_lay0, preds_sfc0, rnn1_mem, dummy = outs
                             else:
                                 preds_lay0, preds_sfc0, rnn1_mem = outs
