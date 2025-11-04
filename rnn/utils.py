@@ -349,28 +349,22 @@ class train_or_eval_one_epoch:
                         losses.append(loss)
 
                         if self.cfg.use_precip_accum_loss:
-                            # loss = loss + self.cfg.w_precmse*precip_sum_mse
                             losses.append(self.cfg.w_precmse*precip_sum_mse)
 
                         if self.cfg.use_precip_gel_loss:
-                            # loss = loss + self.cfg.w_precgel*precip_sum_mse
                             losses.append(self.cfg.w_precgel*precip_sum_mse)
 
                         if self.cfg.use_bias_loss:
-                            # loss = loss + self.cfg.w_bias*(bias_tot**2)
                             losses.append(self.cfg.w_bias*(bias_tot**2))
                                           
                         if self.cfg.use_energy_loss: 
-                            # loss = loss + self.cfg.w_hcon*h_con
                             losses.append(self.cfg.w_hcon*h_con)
                             
                         if self.cfg.use_water_loss:
-                            # loss = loss + timesteps*self.cfg.w_wcon * water_con
-                            # loss = loss + self.cfg.w_wcon * water_con
-                            losses.append(self.cfg.w_wcon * water_con)
-                            
+                            # losses.append(self.cfg.w_wcon * water_con)
+                            losses.append(self.cfg.w_wcon * water_con_long)
+
                         if self.model_is_stochastic and self.cfg.use_det_loss:
-                            # loss = loss + self.cfg.w_det * (det_skill**2)
                             losses.append(self.cfg.w_det * (det_skill**2))
 
 
