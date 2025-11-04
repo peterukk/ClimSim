@@ -190,8 +190,8 @@ class LSTM_autoreg_torchscript(nn.Module):
         self.nneur = nneur 
         self.use_initial_mlp=use_initial_mlp
         self.output_prune = output_prune
+        self.separate_radiation=separate_radiation
         self.physical_precip=physical_precip
-
         if self.physical_precip:
             #  predict autoconversion and evaporation tendencies separately (Perkins 2024) and add those to 
             # q tendency and precipitation source/sink. It would be nice to just diagnose the precipitation
@@ -201,8 +201,11 @@ class LSTM_autoreg_torchscript(nn.Module):
             # P is then equal to P_old + dP_sourcesink + dP_flux
             print("warning: physical_precip is ON")
             self.ny0 = self.ny0 + 3   # , evaporation, autoconversion, and flux of precipitation
-            self.ny_sfc0 = self.ny_sfc0 - 2 # PRECC is computed from above using Eq 9.,
+            if not self.separate_radiation:
+              self.ny_sfc0 = self.ny_sfc0 - 2 # PRECC is computed from above using Eq 9.,
             # PRECSC is diagnosed using bottom temperature
+            # learnable weight for t tendency from evaporation
+            self.w1 = nn.Parameter(torch.randn(1), requires_grad=True)
         self.predict_liq_ratio = predict_liq_ratio
         self.add_pres = add_pres
         if self.add_pres:
@@ -240,7 +243,6 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.nh_mem = nh_mem
         else:
             self.nh_mem = self.nneur[1]
-        self.separate_radiation=separate_radiation
         # in ClimSim config of E3SM, the CRM physics first computes 
         # moist physics on 50 levels, and then computes radiation on 60 levels!
         if self.separate_radiation:
@@ -381,6 +383,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         if self.output_sqrt_norm:
             signs = torch.sign(out)
             out = signs*torch.pow(out, 4)
+            # out = signs*torch.square(out)
         return out, out_sfc
         
     def pp_mp(self, out, out_sfc, x_denorm):
@@ -391,6 +394,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         if self.output_sqrt_norm:
             signs = torch.sign(out_denorm)
             out_denorm = signs*torch.pow(out_denorm, 4)
+            # out_denorm = signs*torch.square(out_denorm)
 
         T_before        = x_denorm[:,:,0:1]
         qliq_before     = x_denorm[:,:,2:3]
@@ -552,7 +556,7 @@ class LSTM_autoreg_torchscript(nn.Module):
                 
         if self.separate_radiation:
             # out_crm = out.clone()
-            out_new = torch.zeros(batch_size, self.nlev_rad, self.ny, device=inputs_main.device)
+            out_new = torch.zeros(batch_size, self.nlev_rad, self.ny0, device=inputs_main.device)
             out_new[:,10:,:] = out
             # Start at surface again
             inputs_gas_rad =  inputs_main[:,:,12:15] # gases
@@ -593,15 +597,18 @@ class LSTM_autoreg_torchscript(nn.Module):
                 out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
 
         if self.physical_precip:
+          if self.separate_radiation:
+            ilev_crm = 10
+          else:
+            ilev_crm = 0
           #  ['ptend_t', 'ptend_q0001', 'ptend_qn', 'ptend_u', 'ptend_v']
           #  ['ptend_t', 'ptend_q0001', 'ptend_qn', 'liq_frac', 'ptend_u', 'ptend_v']
-          dqv_precip = out[:,:,self.ny] # Evaporation of precipitation (sink of precip, source of qv)
-          dqn_precip = out[:,:,self.ny+1] # Accretion/autoconversion (source of precip, sink of qn)
+          dqv_precip = out[:,ilev_crm:,self.ny] # Evaporation of precipitation (sink of precip, source of qv)
+          dqn_precip = out[:,ilev_crm:,self.ny+1] # Accretion/autoconversion (source of precip, sink of qn)
 
           # flux_dn_precip   = out[:,20:,9]
-          ilev_precip = 0
           # flux_dn_precip   = out[:,ilev_precip:,8]
-          flux_dn_precip   = out[:,ilev_precip:,self.ny+2]
+          flux_dn_precip   = out[:,ilev_crm:,self.ny+2]
 
           # dT_precip = -self.relu(dT_precip) # force negative
           dqv_precip = self.relu(dqv_precip) # force positive
@@ -615,9 +622,10 @@ class LSTM_autoreg_torchscript(nn.Module):
           #  out: ['ptend_t', 'ptend_q0001', 'ptend_qn', 'ptend_u', 'ptend_v']
           # or   ['ptend_t', 'ptend_q0001', 'ptend_qn', 'pred_liq_ratio', 'ptend_u', 'ptend_v']
           # out[:,:,0] = out[:,:,0] + dT_precip 
-          out[:,:,1] = out[:,:,1] + dqv_precip
-          out[:,:,2] = out[:,:,2] + dqn_precip
+          out[:,ilev_crm:,1] = out[:,ilev_crm:,1] + dqv_precip
+          out[:,ilev_crm:,2] = out[:,ilev_crm:,2] + dqn_precip
           # Add temperature tendencies due to these!!!!!!!!!!!!!!!!!!!!!!!!!1
+          out[:,ilev_crm:,0] =  out[:,ilev_crm:,0] - self.w1*dqv_precip
           out = out[:,:,0:self.ny]
 
           # mass flux of precip downwards due to gravity,  force positive
@@ -625,14 +633,15 @@ class LSTM_autoreg_torchscript(nn.Module):
           # flux_up_precip = 0 
 
           # precipitation that hasn't fallen yet, vertical profile, stored in memory (hidden state variable)
-          P_old = rnn1_mem[:,ilev_precip:,0]
+          # P_old = rnn1_mem[:,ilev_precip:,0]
+          P_old = rnn1_mem[:,:,0]
           # apply relu to this to limit size???????????????????
 
         #   flux_net = flux_dn_precip # - flux_up_precip
           flux_diff = flux_dn_precip[:,1:] - flux_dn_precip[:,0:-1]
           precc = flux_dn_precip[:,-1]
           precc = precc.unsqueeze(1)
-          pres_diff = pres_nonorm[:,1:] - pres_nonorm[:,0:-1]
+          pres_diff = pres_nonorm[:,ilev_crm+1:] - pres_nonorm[:,ilev_crm:-1]
           dP_adv = 9.81*(flux_diff / pres_diff) # just times g, in z coordinates this would be (-1/rho)
           zeroes = torch.zeros(batch_size, 1, device=inputs_main.device)
           dP_adv = torch.cat((zeroes,dP_adv),dim=1)

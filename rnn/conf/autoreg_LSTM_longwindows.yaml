@@ -37,6 +37,7 @@ physical_precip: false
 input_norm_per_level: true
 output_norm_per_level: true
 new_nolev_scaling: false
+cld_inp_transformation: "exp"
 output_prune: true
 qinput_prune: true
 rh_prune: true

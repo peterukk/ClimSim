@@ -88,7 +88,7 @@ class train_or_eval_one_epoch:
         running_var=0.0; running_det=0.0; running_bias = 0.0; running_precip=0.0; running_gel = 0.0
         epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0; epoch_mae = 0.0
         epoch_R2precc = 0.0; epoch_R2netsw = 0.0; epoch_R2flwds = 0.0; epoch_r2_lev = 0.0
-        epoch_hcon = 0.0; epoch_wcon = 0.0; epoch_gel = 0.0
+        epoch_hcon = 0.0; epoch_wcon = 0.0; epoch_wcon_long = 0.0; epoch_gel = 0.0
         epoch_ens_var = 0.0; epoch_det_skill = 0.0; epoch_spreadskill = 0.0
         epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
         epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
@@ -325,6 +325,10 @@ class train_or_eval_one_epoch:
                         water_con_t     = self.metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, 1)#,printdebug=True)
                         water_con       = torch.mean(torch.square(water_con_p - water_con_t))
                         del water_con_p, water_con_t
+                        water_con_p_long     = self.metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)
+                        water_con_t_long     = self.metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)#,printdebug=True)
+                        water_con_long       = timesteps*torch.mean(torch.square(water_con_p_long - water_con_t_long))
+                        del water_con_p_long, water_con_t_long 
 
                         # precipitation accumulation
                         precip_sum_mse  = metrics.precip_sum_mse(yto_sfc, ypo_sfc, timesteps)
@@ -427,6 +431,7 @@ class train_or_eval_one_epoch:
                             huber = huber.detach(); mse = mse.detach(); mae = mae.detach()
                         h_con = h_con.detach() 
                         water_con = water_con.detach()
+                        water_con_long = water_con_long.detach()
                         precip_sum_mse = precip_sum_mse.detach()
                         precip_sum_gel = precip_sum_gel.detach()
                         gel_lev = gel_lev.detach()
@@ -460,6 +465,7 @@ class train_or_eval_one_epoch:
                             epoch_gel += gel_lev.item()                 
                             epoch_hcon  += h_con.item()
                             epoch_wcon  += water_con.item()
+                            epoch_wcon_long += water_con_long.item()
                             epoch_accumprec += precip_sum_mse.item()
                             epoch_prec_gel += precip_sum_gel.item()
 
@@ -624,6 +630,7 @@ class train_or_eval_one_epoch:
 
         self.metrics["h_conservation"] =  epoch_hcon / k
         self.metrics["water_conservation"] =  epoch_wcon / k
+        self.metrics["water_con_long"] =  epoch_wcon_long / k
         self.metrics["precip_accum_mse"] = epoch_accumprec / k
         self.metrics['gel'] = epoch_gel / k
 
@@ -720,7 +727,14 @@ def cloud_exp_norm_numba(x_lev_b, lbd_qc, lbd_qi):
             x_lev_b[ii,jj,2] = 1 - np.exp(-x_lev_b[ii,jj,2] * lbd_qc[jj])
             x_lev_b[ii,jj,3] = 1 - np.exp(-x_lev_b[ii,jj,3] * lbd_qi[jj])
                     
-            
+@njit(fastmath=True)    
+def cloud_sqrt_norm_numba(x_lev_b):
+    (ns,nlev,nx) = x_lev_b.shape
+    for ii in range(ns):
+        for jj in range(nlev):
+            x_lev_b[ii,jj,2] = np.sqrt(np.sqrt(x_lev_b[ii,jj,2]))
+            x_lev_b[ii,jj,3] = np.sqrt(np.sqrt(x_lev_b[ii,jj,3]))
+
 @njit()    
 # def reverse_input_norm_numba(x, xcoeff_mean, xcoeff_min, xcoeff_max):
 def reverse_input_norm_numba(x, xcoeff_mean, xcoeff_div):
@@ -761,6 +775,7 @@ def apply_output_norm_numba_sqrt(y, ycoeff):
             for kk in range(ny): 
                 # y[ii,jj,kk] = np.sqrt(np.sqrt(np.sqrt(np.abs(y[ii,jj,kk]))))
                 y[ii,jj,kk] = np.sqrt(np.sqrt(np.abs(y[ii,jj,kk])))
+                # y[ii,jj,kk] = np.sqrt(np.abs(y[ii,jj,kk]))
                 y[ii,jj,kk] = signs[ii,jj,kk] * (y[ii,jj,kk] * ycoeff[jj,kk])
     
 class generator_xy(torch.utils.data.Dataset):
@@ -769,7 +784,7 @@ class generator_xy(torch.utils.data.Dataset):
                  xcoeffs_ref=None,
                  ycoeffs_ref=None,
                  v4_to_v5_inputs=False,
-                 cloud_exp_norm=True,
+                 cld_inp_transformation="exp", 
                  input_norm_per_level=True,
                  output_sqrt_norm=False,
                  remove_past_sfc_inputs=False,
@@ -789,7 +804,9 @@ class generator_xy(torch.utils.data.Dataset):
         self.cache = cache
         self.use_numba = True
         self.nloc = nloc
-        self.cloud_exp_norm = cloud_exp_norm
+        self.cld_inp_transformation = cld_inp_transformation
+        if self.cld_inp_transformation not in ["exp","sqrt","none"]:
+            raise NotImplementedError()
         self.remove_past_sfc_inputs = remove_past_sfc_inputs
         self.mp_mode = mp_mode
         self.no_multiprocessing=no_multiprocessing
@@ -1128,7 +1145,7 @@ class generator_xy(torch.utils.data.Dataset):
             # print("doing v4 to v5")
             liq_frac_constrained = self.compute_liq_ratio(x_lev_b[:,:,0])
             # numba optimized
-            if self.cloud_exp_norm and self.use_numba:
+            if self.cld_inp_transformation=="exp" and self.use_numba:
                 v4_to_v5_inputs_numba(x_lev_b, liq_frac_constrained) 
                 if self.qinput_prune:
                     x_lev_b[:,0:15,2] = 0.0
@@ -1138,11 +1155,12 @@ class generator_xy(torch.utils.data.Dataset):
                     qn[:,0:15] = 0.0
                 x_lev_b[:,:,2] = qn
                 x_lev_b[:,:,3] = liq_frac_constrained
-                if self.cloud_exp_norm:
+                if self.cld_inp_transformation=="exp":
                     x_lev_b[:,:,2] = 1 - np.exp(-x_lev_b[:,:,2] * self.lbd_qn)
-
+                elif self.cld_inp_transformation=="sqrt":   
+                    x_lev_b[:,:,2] = np.sqrt(np.sqrt(x_lev_b[:,:,2]))
         else:
-            if self.cloud_exp_norm:
+            if self.cld_inp_transformation=="exp":
                 if self.use_numba:
                     cloud_exp_norm_numba(x_lev_b, self.lbd_qc, self.lbd_qi)
                 else:
@@ -1150,6 +1168,12 @@ class generator_xy(torch.utils.data.Dataset):
                     x_lev_b[:,:,3] = 1 - np.exp(-x_lev_b[:,:,3] * self.lbd_qi)
                     # print("min max liq", x_lev_b[:,:,2].min(), x_lev_b[:,:,2].max() )
                     # print("min max ice", x_lev_b[:,:,3].min(), x_lev_b[:,:,3].max() )
+            elif self.cld_inp_transformation=="sqrt":
+                if self.use_numba:
+                    cloud_sqrt_norm_numba(x_lev_b)
+                else:
+                    x_lev_b[:,:,2] = np.sqrt(np.sqrt(x_lev_b[:,:,2]))
+                    x_lev_b[:,:,3] = np.sqrt(np.sqrt(x_lev_b[:,:,3]))     
             if self.qinput_prune:
                 x_lev_b[:,0:15,2:3] = 0.0
                 

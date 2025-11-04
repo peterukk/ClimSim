@@ -254,55 +254,55 @@ def main(cfg: DictConfig):
             print("Padded y norm coefficients with ones, new shape: {}".format(yscale_lev.shape))
 
     else:
-        if not cfg.new_nolev_scaling:
-            if cfg.mp_mode==1:
-                yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.58085550e+08, 5.00182069e+04,
-                        6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            elif cfg.mp_mode==0:
-                yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.91623978e+08, 3.23919949e+08, 
-                    5.00182069e+04, 6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            else:
-                raise NotImplementedError()
+        if cfg.mp_mode==1:  #  ['ptend_t', 'ptend_q0001', 'ptend_qn', 'ptend_u', 'ptend_v']
+            yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.58085550e+08, 5.00182069e+04,
+                    6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        elif cfg.mp_mode==0: #  ['ptend_t', 'ptend_q0001', 'ptend_q0002', 'ptend_q0003', 'ptend_u', 'ptend_v']
+            yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.91623978e+08, 3.23919949e+08, 
+                5.00182069e+04, 6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        elif cfg.mp_mode==-1: #                ['ptend_t', 'ptend_q0001',   'ptend_qn',     'liqfrac', 'ptend_u', 'ptend_v']
+            yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.58085550e+08, 2.6709356,  5.00182069e+04,
+                    6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
         else:
-            if cfg.mp_mode==0:
-                yscale_lev = np.repeat(np.array([48.52, 182.97, 271.33,  361.04,   41.43,  44.14 ], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-                #  yscale_lev = np.repeat(np.array([24.4, 22.8, 25.1, 30.1, 10.1, 11.3], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-                # yscale_lev = np.repeat(np.array([1.0,1.0,1.0,1.0,1.0,1.0], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            else:
-                raise NotImplementedError()
+            raise NotImplementedError()
 
-            if cfg.input_norm_per_level:
-                raise NotImplementedError()
+        if cfg.input_norm_per_level:
+            raise NotImplementedError()
             
     if cfg.input_norm_per_level:
         xmax_lev = input_max[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
         xmin_lev = input_min[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
         xmean_lev = input_mean[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
+        if cfg.cld_inp_transformation=="sqrt":
+            # raise NotImplementedError("cloud square-root-scaling not compatible with level-wise normalization")
+            from norm_coefficients import cldliq_sqrt_max_lev, cldice_sqrt_max_lev
+            xmax_lev[:,2] = cldliq_sqrt_max_lev 
+            xmax_lev[:,3] = cldice_sqrt_max_lev 
     else:
-        # xmax_lev = np.repeat(np.array([2.9577750e+02, 1.0000000e+00, 1.0000000e+00, 1.0000000e+00,
-        #        7.6608604e+01, 5.4018818e+01, 2.3003130e-03, 3.2301173e-07,
-        #        4.1381191e-03, 2.3003130e-03, 3.2301173e-07, 4.1381191e-03,
-        #        2.7553122e-06, 8.6128614e-07, 4.0667697e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        # xmin_lev = np.repeat(np.array([ 1.9465800e+02,  0.0000000e+00,  0.0000000e+00,  0.0000000e+00,
-        #        -4.5055122e+01, -5.4770996e+01, -2.7256422e-03, -2.8697787e-07,
-        #        -3.2421835e-03, -2.7256422e-03, -2.8697787e-07, -3.2421835e-03,
-        #         1.0383576e-06,  6.6867170e-07,  3.3562134e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        # xmean_lev = np.repeat(np.array([ 2.47143495e+02,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00,
-        #         9.02305768e+00, -1.85453092e-02,  0.00000000e+00,  0.00000000e+00,
-        #         0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  0.00000000e+00,
-        #         1.95962779e-06,  8.22708859e-07,  3.88440249e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-    
-        # if cfg.new_nolev_scaling:
-        xmax_lev = np.repeat(np.array([3.21864136e+02, 1.0000000e+00, 1.0000000e+00, 1.0000000e+00,
-                2.13669708e+02, 1.41469925e+02, 6.18724059e-03, 8.70866188e-07,
-                4.59552743e-02, 6.18724059e-03, 8.70866188e-07, 4.59552743e-02,
-                1.80104525e-05, 9.98605856e-07, 4.90858383e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        
-        xmin_lev = np.repeat(np.array([ 1.56582825e+02,  0.0000000e+00,  0.0000000e+00,  0.0000000e+00,
+        xmin_lev = np.array([ 1.56582825e+02,  0.0000000e+00,  0.0000000e+00,  0.0000000e+00,
                 -1.46704926e+02, -2.35915283e+02, -4.92735580e-03, -1.11688621e-06,
                 -4.69117053e-02, -4.92735580e-03, -1.11688621e-06, -4.69117053e-02,
-                9.70113589e-09,  1.78764156e-10,  3.65223324e-10], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        xmean_lev = np.repeat(np.zeros((15), dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+                9.70113589e-09,  1.78764156e-10,  3.65223324e-10], dtype=np.float32).reshape((1,-1))
+        
+        xmax_lev = np.array([3.21864136e+02, 1.0000000e+00, 1.0000000e+00, 1.0000000e+00,
+                2.13669708e+02, 1.41469925e+02, 6.18724059e-03, 8.70866188e-07,
+                4.59552743e-02, 6.18724059e-03, 8.70866188e-07, 4.59552743e-02,
+                1.80104525e-05, 9.98605856e-07, 4.90858383e-07], dtype=np.float32).reshape((1,-1))
+        
+        xmean_lev = np.zeros((15), dtype=np.float32).reshape((1,-1))
+        # xmean_lev = np.array([ 2.4652231e+02,  5.0792712e-01,  7.3151014e-06,  3.7296347e-06,
+        #             7.8239331e+00,  4.0367767e-02,  1.8644631e-06,  2.8351113e-09,
+        #             -6.8700395e-08,  1.8643551e-06,  2.8350911e-09, -6.9796215e-08,
+        #             1.9556560e-06,  8.2271487e-07,  3.8844493e-07], dtype=np.float32).reshape((1,-1))
+        
+        if cfg.cld_inp_transformation=="sqrt": 
+            xmax_lev[0,2:4] = np.array([0.0007122298, 0.000688873])
+            # xmin_lev[0,2:4] = np.array([0.0,0.0])
+            # xmean_lev[0,2:4] = np.array([0.020437788,0.017036619])
+
+        xmin_lev = np.repeat(xmin_lev,nlev,axis=0)
+        xmax_lev = np.repeat(xmax_lev,nlev,axis=0)
+        xmean_lev = np.repeat(xmean_lev, nlev,axis=0)
 
         if cfg.include_prev_outputs:
             xmax_lev_prevout = np.repeat(np.array([1.6314061e-03, 8.9240649e-07, 2.0485280e-07, 4.7505119e-07,
@@ -311,6 +311,9 @@ def main(cfg: DictConfig):
             xmin_lev_prevout = np.repeat(np.array([-1.3457362e-03, -9.0609535e-07, -1.1949140e-07, -2.0962088e-07,
                    -1.3081296e-03], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
             xmean_lev_prevout = np.repeat(np.zeros((5), dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            # xmean_lev_prevout =  np.repeat(np.array([-1.7993794e-06, -2.8229272e-09,  7.1136300e-12, -9.3221915e-13, 
+            #                               3.6559445e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+
             xmax_lev = np.concatenate((xmax_lev, xmax_lev_prevout),axis=1)
             xmin_lev = np.concatenate((xmin_lev, xmin_lev_prevout),axis=1)
             xmean_lev = np.concatenate((xmean_lev, xmean_lev_prevout),axis=1)
@@ -357,8 +360,6 @@ def main(cfg: DictConfig):
         xdiv_sca[6] = 1.0 
         xmean_sca[1] = 0.0
         xmean_sca[6] = 0.0
-        # yscale_sca[0]  = 1.0 
-        # yscale_sca[4:] = 1.0 
     elif cfg.model_type=="physrad":
         xdiv_sca[1] = 1.0; xmean_sca[1] = 0.0
         xdiv_sca[6] = 1.0; xmean_sca[6] = 0.0
@@ -623,6 +624,7 @@ def main(cfg: DictConfig):
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune,  
                     input_norm_per_level=cfg.input_norm_per_level,
+                    cld_inp_transformation=cfg.cld_inp_transformation,
                     output_sqrt_norm=cfg.new_nolev_scaling,
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
                     include_prev_inputs=cfg.include_prev_inputs, include_prev_outputs=cfg.include_prev_outputs,
@@ -644,6 +646,7 @@ def main(cfg: DictConfig):
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
                     input_norm_per_level=cfg.input_norm_per_level,
+                    cld_inp_transformation=cfg.cld_inp_transformation,
                     output_sqrt_norm=cfg.new_nolev_scaling,
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
                     include_prev_inputs=cfg.include_prev_inputs, include_prev_outputs=cfg.include_prev_outputs,
@@ -794,13 +797,14 @@ def main(cfg: DictConfig):
     # load from checkpoint of it exists
 
     if len(cfg.model_file_checkpoint)>0:
-        print("lading existing model from {}".format(cfg.model_file_checkpoint))
-        checkpoint = torch.load("saved_models/"+cfg.model_file_checkpoint)
+        print("loading existing model from {}".format(cfg.model_file_checkpoint))
+        checkpoint = torch.load("saved_models/"+cfg.model_file_checkpoint,weights_only=True)
         model.load_state_dict(checkpoint['model_state_dict'])
         if not cfg.only_load_model:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch']
+        print("LOADED FROM MODEL CHECKPOINT SUCCESSFULLY")
 
     # --------------------------------------------------------------------------------------------------------
     # ----------------------------------------- START TRAINING -----------------------------------------------
