@@ -23,7 +23,9 @@ Actual per-epoch training code is in train_or_eval_one_epoch in utils.py
 @author: Peter Ukkonen
 
 """
-
+import matplotlib
+import matplotlib.pyplot as plt
+matplotlib.use('TkAgg')
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import sys
@@ -58,7 +60,6 @@ from torchmetrics.regression import R2Score
 import wandb
 from omegaconf import DictConfig
 import hydra
-import matplotlib.pyplot as plt
 from random import randrange
 
 @hydra.main(version_base="1.2", config_path="conf", config_name="autoreg_LSTM")
@@ -269,16 +270,46 @@ def main(cfg: DictConfig):
         if cfg.input_norm_per_level:
             raise NotImplementedError()
             
+        if cfg.physical_precip:
+            scaleval = 1.0e8
+            # scaleval = 1.0
+            scalelev = scaleval*np.ones((nlev),dtype=np.float32)
+            yscale_lev[:,1] = scalelev
+            yscale_lev[:,2] = scalelev
+            # if cfg.mp_mode == 1: 
+            #   yscale_lev[:,3] = scalelev
+
+            yscale_sca[2:4] = scaleval
+            # print("scale lev 3", yscale_lev[:,3])
+            if cfg.mp_mode == 0:
+                raise NotImplementedError()
+
+
     if cfg.input_norm_per_level:
         xmax_lev = input_max[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
         xmin_lev = input_min[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
         xmean_lev = input_mean[vars_2D_inp].to_dataarray(dim='features', name='inputs_lev').transpose().values
+        from norm_coefficients import lbd_qc_lev, lbd_qi_lev, lbd_qn_lev
+        lbd_qc = lbd_qc_lev
+        lbd_qi = lbd_qi_lev
+        lbd_qn = lbd_qn_lev
         if cfg.cld_inp_transformation=="sqrt":
             # raise NotImplementedError("cloud square-root-scaling not compatible with level-wise normalization")
             from norm_coefficients import cldliq_sqrt_max_lev, cldice_sqrt_max_lev
             xmax_lev[:,2] = cldliq_sqrt_max_lev 
             xmax_lev[:,3] = cldice_sqrt_max_lev 
+        if cfg.rh_input_to_wv:
+            from norm_coefficients import q_min_lev, q_max_lev, q_mean_lev
+            xmin_lev[:,1] = q_min_lev 
+            xmax_lev[:,1] = q_max_lev 
+            # xmean_lev[:,1] = q_mean_lev 
+            xmean_lev[:,1] = np.zeros((60), dtype=np.float32)
+
     else:
+        from norm_coefficients import lbd_qc_mean, lbd_qi_mean, lbd_qn_mean
+        lbd_qc = lbd_qc_mean
+        lbd_qi = lbd_qi_mean
+        lbd_qn = lbd_qn_mean
         xmin_lev = np.array([ 1.56582825e+02,  0.0000000e+00,  0.0000000e+00,  0.0000000e+00,
                 -1.46704926e+02, -2.35915283e+02, -4.92735580e-03, -1.11688621e-06,
                 -4.69117053e-02, -4.92735580e-03, -1.11688621e-06, -4.69117053e-02,
@@ -289,16 +320,21 @@ def main(cfg: DictConfig):
                 4.59552743e-02, 6.18724059e-03, 8.70866188e-07, 4.59552743e-02,
                 1.80104525e-05, 9.98605856e-07, 4.90858383e-07], dtype=np.float32).reshape((1,-1))
         
-        xmean_lev = np.zeros((15), dtype=np.float32).reshape((1,-1))
-        # xmean_lev = np.array([ 2.4652231e+02,  5.0792712e-01,  7.3151014e-06,  3.7296347e-06,
-        #             7.8239331e+00,  4.0367767e-02,  1.8644631e-06,  2.8351113e-09,
-        #             -6.8700395e-08,  1.8643551e-06,  2.8350911e-09, -6.9796215e-08,
-        #             1.9556560e-06,  8.2271487e-07,  3.8844493e-07], dtype=np.float32).reshape((1,-1))
+        # xmean_lev = np.zeros((15), dtype=np.float32).reshape((1,-1))
+        xmean_lev = np.array([ 2.4652231e+02,  5.0792712e-01,  7.3151014e-06,  3.7296347e-06,
+                    7.8239331e+00,  4.0367767e-02,  1.8644631e-06,  2.8351113e-09,
+                    -6.8700395e-08,  1.8643551e-06,  2.8350911e-09, -6.9796215e-08,
+                    1.9556560e-06,  8.2271487e-07,  3.8844493e-07], dtype=np.float32).reshape((1,-1))
         
+        if cfg.rh_input_to_wv:
+            xmax_lev[0,1] = 0.025; xmin_lev[0,1] = 3.0e-8
+            # xmean_lev[0,1] = 0.0
+            xmean_lev[0,1] = 0.0025
+
         if cfg.cld_inp_transformation=="sqrt": 
             xmax_lev[0,2:4] = np.array([0.0007122298, 0.000688873])
-            # xmin_lev[0,2:4] = np.array([0.0,0.0])
-            # xmean_lev[0,2:4] = np.array([0.020437788,0.017036619])
+            xmin_lev[0,2:4] = np.array([0.0,0.0])
+            xmean_lev[0,2:4] = np.array([0.020437788,0.017036619])
 
         xmin_lev = np.repeat(xmin_lev,nlev,axis=0)
         xmax_lev = np.repeat(xmax_lev,nlev,axis=0)
@@ -310,9 +346,9 @@ def main(cfg: DictConfig):
             
             xmin_lev_prevout = np.repeat(np.array([-1.3457362e-03, -9.0609535e-07, -1.1949140e-07, -2.0962088e-07,
                    -1.3081296e-03], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            xmean_lev_prevout = np.repeat(np.zeros((5), dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            # xmean_lev_prevout =  np.repeat(np.array([-1.7993794e-06, -2.8229272e-09,  7.1136300e-12, -9.3221915e-13, 
-            #                               3.6559445e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            # xmean_lev_prevout = np.repeat(np.zeros((5), dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            xmean_lev_prevout =  np.repeat(np.array([-1.7993794e-06, -2.8229272e-09,  7.1136300e-12, -9.3221915e-13, 
+                                          3.6559445e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
 
             xmax_lev = np.concatenate((xmax_lev, xmax_lev_prevout),axis=1)
             xmin_lev = np.concatenate((xmin_lev, xmin_lev_prevout),axis=1)
@@ -403,6 +439,7 @@ def main(cfg: DictConfig):
                         out_sfc_scale = yscale_sca, 
                         xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
                         xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+                        lbd_qc = lbd_qc, lbd_qi=lbd_qi,  lbd_qn=lbd_qn, 
                         device=device,
                         nx = nx, nx_sfc=nx_sfc, 
                         ny = ny, ny_sfc=ny_sfc, 
@@ -623,7 +660,9 @@ def main(cfg: DictConfig):
     train_data = generator_xy(tr_data_path, cache = cfg.cache, nloc = nloc, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune,  
-                    input_norm_per_level=cfg.input_norm_per_level,
+                    rh_input_to_wv=cfg.rh_input_to_wv, 
+                    hyam=hyam,hybm=hybm,
+                    lbd_qc=lbd_qc, lbd_qi=lbd_qi, lbd_qn=lbd_qn,
                     cld_inp_transformation=cfg.cld_inp_transformation,
                     output_sqrt_norm=cfg.new_nolev_scaling,
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
@@ -645,7 +684,9 @@ def main(cfg: DictConfig):
     val_data = generator_xy(val_data_path, cache=cfg.val_cache, add_refpres = cfg.add_refpres, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
-                    input_norm_per_level=cfg.input_norm_per_level,
+                    rh_input_to_wv=cfg.rh_input_to_wv, 
+                    hyam=hyam,hybm=hybm,
+                    lbd_qc=lbd_qc, lbd_qi=lbd_qi, lbd_qn=lbd_qn,
                     cld_inp_transformation=cfg.cld_inp_transformation,
                     output_sqrt_norm=cfg.new_nolev_scaling,
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
@@ -676,7 +717,7 @@ def main(cfg: DictConfig):
 
     metric_h_con = metrics.get_energy_metric(hyai, hybi)
     metric_water_con = metrics.get_water_conservation(hyai, hybi)
-
+    
     # mse = metrics.get_mse_flatten(weights)
     metrics_det = metrics.get_metrics_flatten(weights)
     

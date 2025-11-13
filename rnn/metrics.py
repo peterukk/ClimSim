@@ -228,10 +228,9 @@ def get_water_conservation(hyai, hybi):
         # precip = (pred_sfc[:,2] + pred_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
         precip = (pred_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
 
-        one_over_grav = torch.tensor(0.1020408163) # 1/9.8
+        one_over_grav = torch.tensor(0.1019716213) #
         thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
             + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
-
         # qv = pred_lev[:,:,1]
         # ql = pred_lev[:,:,2]
         # qi = pred_lev[:,:,3]
@@ -270,7 +269,11 @@ def get_water_conservation(hyai, hybi):
         # print( "sp", sp[100].item(), "thick[30]", thick[100,30], "thick2", thick2[100,30])
         # diff = torch.mean(lhs - rhs)
         diff = lhs - rhs
-        # print("diff mean", torch.mean(diff).item(), "diff2 mean", torch.mean(rhs-lhs).item())
+
+        ind = 100
+        # print("lhs", lhs[ind].item(), "rhs", rhs[ind].item(), "diff", diff[ind])
+        # print("lhs mean", torch.mean(lhs).item(), "rhs mean", torch.mean(rhs).item(), "diff mean", torch.mean(diff))
+        # print("fac ", torch.nanmean((lhs) / rhs).item())
         return diff 
     return wc
 

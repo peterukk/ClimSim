@@ -38,6 +38,7 @@ input_norm_per_level: true
 output_norm_per_level: true
 new_nolev_scaling: false
 cld_inp_transformation: "exp"
+rh_input_to_wv: false
 output_prune: true
 qinput_prune: true
 rh_prune: true
@@ -45,6 +46,7 @@ remove_past_sfc_inputs: true
 v4_to_v5_inputs: false
 include_prev_inputs: false
 include_prev_outputs: false
+do_semi_online_training: false
 train_replay: "none" 
 val_replay: "none"
 gradual_mixing_end_epoch: 0

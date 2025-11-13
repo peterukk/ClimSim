@@ -25,6 +25,93 @@ import random
 # from pickle import dump
 
 
+def eliq(T):
+    """
+    Function taking temperature (in K) and outputting liquid saturation
+    pressure (in hPa) using a polynomial fit
+    """
+    a_liq = np.array([-0.976195544e-15,-0.952447341e-13,0.640689451e-10,
+                              0.206739458e-7,0.302950461e-5,0.264847430e-3,
+                              0.142986287e-1,0.443987641,6.11239921]);
+    c_liq = -80
+    T0 = 273.16
+    return 100*np.polyval(a_liq,np.maximum(c_liq,T-T0))
+
+def eice(T):
+    """
+    Function taking temperature (in K) and outputting ice saturation
+    pressure (in hPa) using a polynomial fit
+    """
+    a_ice = np.array([0.252751365e-14,0.146898966e-11,0.385852041e-9,
+                      0.602588177e-7,0.615021634e-5,0.420895665e-3,
+                      0.188439774e-1,0.503160820,6.11147274]);
+    c_ice = np.array([273.15,185,-100,0.00763685,0.000151069,7.48215e-07])
+    T0 = 273.16
+    return (T>c_ice[0])*eliq(T)+\
+    (T<=c_ice[0])*(T>c_ice[1])*100*np.polyval(a_ice,T-T0)+\
+    (T<=c_ice[1])*100*(c_ice[3]+np.maximum(c_ice[2],T-T0)*\
+                       (c_ice[4]+np.maximum(c_ice[2],T-T0)*c_ice[5]))
+     
+
+def relative_to_specific_humidity(rh, temp, pressure):
+    """
+    Convert relative humidity to specific humidity using numpy arrays
+    
+    Args:
+        rh : Relative humidity as a fraction (0-1)
+        temp : Temperature in Kelvin
+        pressure : Pressure in Pa (Pascals)
+    
+    Returns:
+        Specific humidity (kg water vapor / kg total air)
+    """
+    
+    # Constants
+    # es0 = 611.2  # Reference saturation vapor pressure at T0 (Pa)
+    # T0 = 273.15  # Reference temperature (K) - triple point of water
+    # Rv = 461.5   # Specific gas constant for water vapor (J/(kg·K))
+    
+    # # Gas constant ratio (water vapor / dry air)
+    # epsilon = 0.622  # kg/kg
+    
+    # # Temperature-dependent latent heat of vaporization (J/kg)
+    # # Linear relationship: Lv = Lv0 + a * (T - T0)
+    # # where Lv0 = 2.501e6 J/kg at 273.15K, and a ≈ -2370 J/(kg·K)
+    # Lv0 = 2.501e6  # Latent heat at reference temperature (J/kg)
+    # a = -2370.0    # Temperature coefficient (J/(kg·K))
+    
+    # Lv = Lv0 + a * (temp - T0)
+    
+    # # Calculate saturation vapor pressure using Clausius-Clapeyron relation
+    # # es = es0 * exp((Lv/Rv) * (1/T0 - 1/T))
+    # e_sat = es0 * np.exp((Lv / Rv) * (1/T0 - 1/temp))
+    
+    # # Calculate actual vapor pressure
+    # # print("pressure in min max", np.min(pressure), np.max(pressure))
+
+    # e_actual = rh * e_sat
+    
+    # # Calculate specific humidity
+    # # q = (epsilon * e) / (p - e * (1 - epsilon))
+    # specific_humidity = (epsilon * e_actual) / (pressure - e_actual * (1 - epsilon))
+    
+    
+    T0 = 273.16 # Freezing temperature in standard conditions
+    T00 = 253.16 # Temperature below which we use e_ice
+    omega = (temp - T00) / (T0 - T00)
+    omega = np.maximum( 0, np.minimum( 1, omega ))
+    esat =  omega * eliq(temp) + (1-omega) * eice(temp)
+    Rd = 287 # Specific gas constant for dry air
+    Rv = 461 # Specific gas constant for water vapor    
+    qvs = (Rd*esat)/(Rv*pressure)
+    q = rh*qvs
+    
+    # print("q ref max mean", np.max(specific_humidity), np.mean(specific_humidity))
+    # print("q new max mean", np.max(q), np.mean(q))
+    # print("q sfc max mean", np.max(specific_humidity[:,-1]), np.mean(specific_humidity[:,-1]))
+
+    return q
+
 class train_or_eval_one_epoch:
     def __init__(self, dataloader, 
                  model, 
@@ -119,8 +206,10 @@ class train_or_eval_one_epoch:
             targets_lay = []; targets_sfc = [] 
             x_sfc = [];  x_lay_raw = []
             yto_lay = []; yto_sfc = []
+            x_true_prev = []; y_true_prev = []; y_pred_prev = []
             inds_rnd = 0; prev_outputs = 0 
-            rnn1_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev_mem, self.model.nh_mem, device=device)
+            rnn1_mem = torch.ones(self.batch_size*self.cfg.ensemble_size, self.model.nlev_mem, self.model.nh_mem, device=device)
+            x_pred = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev, 6, device=device)
             loss_update_start_index = 60
         else:
             loss_update_start_index = 0
@@ -196,8 +285,62 @@ class train_or_eval_one_epoch:
                 yto_lay0 = yto_lay_chk[ichunk]
                 yto_sfc0 = yto_sfc_chk[ichunk]
 
-                tcomp0= time.time()     
+                tcomp0= time.time()    
+                                
+                if self.cfg.do_semi_online_training:
+                    if j>0:
+                    # init x_ls_pred = x_ls_true
+                    # at current time step k:
+                    #  x_ls_pred[k] = x_ls_pred[k-1] + dx_phys_nn[k-1] + dx_dyn_k,
+                    #       where
+                    #  dx_dyn_k = (x_ls_true[k] - x_ls_true[k-1]) - dx_phys_true[k-1]
+                    #           = (x_ls_true[k] - x_ls_true[k-1]) - y[k-1]
+                        
+                    #   then use NN
+                    #   dx_phys_nn[k], x_sfc_pred = NN(x_ls_pred[k], L.S. forcings, sfc inp),
+                    
+                        dx_tot = x_lay_raw0[:,:,0:6] - x_true_prev
+                        #                 dx_phys_true ( previous yto_lay0[:,:,0:6] )
+                        dx_dyn = dx_tot - y_true_prev
+                        #                      dx_phys_pred_prev
+                        # print("j", j, "xpred1, ypred, dyn 1 mean",x_pred[:,:,1].mean().item(), y_pred_prev[:,:,1].mean().item(), dx_dyn[:,:,1].mean().item() )
+                        x_pred = x_pred + y_pred_prev + dx_dyn
+                        # x_lay_raw0[:,:,0:6] = x_pred
+                        # x_lay_raw0 = torch.cat((x_pred, x_lay_raw0[:,:,6:]),dim=2)
+                        # normalize 
+                        # print("x0 true min max mean", x_lay0[:,:,0].min().item(), x_lay0[:,:,0].max().item(), x_lay0[:,:,0].mean().item())
+                        # print("x1 true min max mean", x_lay0[:,:,1].min().item(), x_lay0[:,:,1].max().item(), x_lay0[:,:,1].mean().item())
+                        # print("x2 true min max mean", x_lay0[:,:,2].min().item(), x_lay0[:,:,2].max().item(), x_lay0[:,:,2].mean().item())
 
+                        # print("x2 true max mean", x_lay0[:,:,2].max().item(), x_lay0[:,:,2].mean().item())
+                        # print("x3 true max mean", x_lay0[:,:,3].max().item(), x_lay0[:,:,3].mean().item())
+                        # print("x4 true max mean", x_lay0[:,:,4].max().item(), x_lay0[:,:,4].mean().item())
+                        # print("x5 true max mean", x_lay0[:,:,5].max().item(), x_lay0[:,:,5].mean().item())
+                        
+                        # x_lay0[:,:,0:6] = x_lay_raw0[:,:,0:6]*(self.model.xdiv_lev[:,0:6]) + self.model.xmean_lev[:,0:6]
+                        x_pred_norm = x_pred.clone()
+                        x_pred_norm[:,:,2] = 1 - torch.exp(-x_pred_norm[:,:,2] * self.model.lbd_qc)
+                        x_pred_norm[:,:,3] = 1 - torch.exp(-x_pred_norm[:,:,3] * self.model.lbd_qi)
+                        x_pred_norm = (x_pred_norm-self.model.xmean_lev[:,0:6])/self.model.xdiv_lev[:,0:6]
+                        
+                        x_lay0 = torch.cat((x_pred_norm, x_lay_raw0[:,:,6:]),dim=2)
+                        # print("x0 pred min max mean", x_lay0[:,:,0].min().item(), x_lay0[:,:,0].max().item(), x_lay0[:,:,0].mean().item())
+                        # print("x1 pred min max mean", x_lay0[:,:,1].min().item(), x_lay0[:,:,1].max().item(), x_lay0[:,:,1].mean().item())
+                        # print("x2 pred min max mean", x_lay0[:,:,2].min().item(), x_lay0[:,:,2].max().item(), x_lay0[:,:,2].mean().item())
+
+                        # print("x2 pred max mean", x_lay0[:,:,2].max().item(), x_lay0[:,:,2].mean().item())
+                        # print("x3 pred max mean", x_lay0[:,:,3].max().item(), x_lay0[:,:,3].mean().item())
+                        # print("x4 pred max mean", x_lay0[:,:,4].max().item(), x_lay0[:,:,4].mean().item())
+                        # print("x5 pred max mean", x_lay0[:,:,5].max().item(), x_lay0[:,:,5].mean().item())
+
+                    else:
+                        x_pred = x_lay_raw0[:,:,0:6] 
+                        
+                    y_true_prev = yto_lay0[:,:,0:6]
+                    x_true_prev = x_lay_raw0[:,:,0:6]
+
+                x_lay_raw0 = x_lay_raw0[:,:,0:8]
+                        
                 if self.use_ensemble:
                   x_lay0 = x_lay0.unsqueeze(0)
                   x_lay0 = torch.repeat_interleave(x_lay0,repeats=self.cfg.ensemble_size,dim=0)
@@ -219,7 +362,7 @@ class train_or_eval_one_epoch:
                         # print("shape x0", x_lay0.shape, "[rnd], ", x_lay0_new[inds_rnd].shape)
                         x_lay0_new[inds_rnd,:,-5:] = prev_outputs[inds_rnd,:,0:5]
                         x_lay0 = x_lay0_new
-
+                        
                     inp_list = [x_lay0, x_sfc0]
                     if self.cfg.autoregressive:
                         inp_list.append(rnn1_mem)
@@ -241,6 +384,7 @@ class train_or_eval_one_epoch:
                                 preds_lay0, preds_sfc0, rnn1_mem, dummy = outs
                             else:
                                 preds_lay0, preds_sfc0, rnn1_mem = outs
+
                     else:
                         preds_lay0, preds_sfc0 = outs
                     prev_outputs = preds_lay0[:,:,0:5].float()
@@ -257,7 +401,20 @@ class train_or_eval_one_epoch:
                     targets_lay = target_lay0; targets_sfc = target_sfc0
                     x_lay_raw = x_lay_raw0
                     x_sfc = x_sfc0
-                    
+
+                if self.cfg.do_semi_online_training:
+                  if self.use_mp_constraint:
+                      y_pred_prev, ypo_sfc = self.model.pp_mp(preds_lay0, preds_sfc0, x_lay_raw0)
+                      # with torch.no_grad(): 
+                      #     yto_lay, yto_sfc = self.model.pp_mp(targets_lay, targets_sfc, x_lay_raw )
+                      # ypo_lay, ypo_sfc, yto_lay, yto_sfc = model.pp_mp(preds_lay, preds_sfc, targets_lay, targets_sfc, x_lay_raw )
+                      # if i>10: print ("yto lay true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
+                      # if i>10: print ("yto lay pp-true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
+
+                  else:
+                      y_pred_prev, ypo_sfc = self.model.postprocessing(preds_lay0, preds_sfc0)
+                      # yto_lay, yto_sfc = self.model.postprocessing(targets_lay, targets_sfc)
+
                 if (not self.cfg.autoregressive) or (self.cfg.autoregressive and (j+1) % timesteps==0):
             
                     if self.cfg.autoregressive:
@@ -308,8 +465,8 @@ class train_or_eval_one_epoch:
 
                         else:
                             ypo_lay, ypo_sfc = self.model.postprocessing(preds_lay, preds_sfc)
-                            # yto_lay, yto_sfc = self.model.postprocessing(targets_lay, targets_sfc)
-                            
+                            # yto_lay, yto_sfc = self.model.postprocessing(targets_lay, targets_sfc) 
+
                         with torch.no_grad():
                             # x_sfc = x_sfc*self.model.xdiv_sca + self.model.xmean_sca 
                             surf_pres_denorm = x_sfc[:,0:1]*self.model.xdiv_sca[0:1] + self.model.xmean_sca[0:1]
@@ -410,26 +567,45 @@ class train_or_eval_one_epoch:
                         else:
                             optim.zero_grad()
                             loss = torch.stack(losses).sum()
+                            # if self.cfg.use_scaler:
+                            #     self.scaler.scale(loss).backward(retain_graph=True)
+                            #     self.scaler.step(optim)
+                            #     self.scaler.update()
+                            # else:
+                            #     loss.backward(retain_graph=True)       
+                            #     optim.step()
+
                             if self.cfg.use_scaler:
                                 self.scaler.scale(loss).backward(retain_graph=True)
+                            else:
+                                loss.backward(retain_graph=True)      
+
+                            if self.cfg.use_scaler:
                                 self.scaler.step(optim)
                                 self.scaler.update()
                             else:
-                                loss.backward(retain_graph=True)       
                                 optim.step()
     
-                        loss = loss.detach()
-                        if self.model_is_stochastic:
-                            det_skill = det_skill.detach(); ens_var = ens_var.detach()
-                        else: 
-                            huber = huber.detach(); mse = mse.detach(); mae = mae.detach()
-                        h_con = h_con.detach() 
-                        water_con = water_con.detach()
-                        water_con_long = water_con_long.detach()
-                        precip_sum_mse = precip_sum_mse.detach()
-                        precip_sum_gel = precip_sum_gel.detach()
-                        gel_lev = gel_lev.detach()
-                        losses = []; grads = []
+                    loss = loss.detach()
+                    if self.model_is_stochastic:
+                        det_skill = det_skill.detach(); ens_var = ens_var.detach()
+                    else: 
+                        huber = huber.detach(); mse = mse.detach(); mae = mae.detach()
+                    h_con = h_con.detach() 
+                    water_con = water_con.detach()
+                    water_con_long = water_con_long.detach()
+                    precip_sum_mse = precip_sum_mse.detach()
+                    precip_sum_gel = precip_sum_gel.detach()
+                    gel_lev = gel_lev.detach()
+                    losses = []; grads = []
+
+                    if self.cfg.do_semi_online_training:
+                      # y_pred_prev = y_pred_prev.detach()
+                      # x_pred = x_pred.detach()
+                      # print("j", j, "resetting yp=", y_pred_prev[:,:,1].mean().item(), "to yt=", y_true_prev[:,:,1].mean().item())
+                      # print("j", j, "resetting xpred=", x_pred[:,:,1].mean().item(), "to xt=", x_lay_raw0[:,:,1].mean().item())
+                      y_pred_prev = y_true_prev
+                      x_pred = x_lay_raw0[:,:,0:6] 
 
                     j2 += 1           
                     ypo_lay = ypo_lay.detach(); ypo_sfc = ypo_sfc.detach()
@@ -772,20 +948,24 @@ def apply_output_norm_numba_sqrt(y, ycoeff):
                 # y[ii,jj,kk] = np.sqrt(np.abs(y[ii,jj,kk]))
                 y[ii,jj,kk] = signs[ii,jj,kk] * (y[ii,jj,kk] * ycoeff[jj,kk])
     
+
 class generator_xy(torch.utils.data.Dataset):
     def __init__(self, filepath, nloc=384, cache=False, add_refpres=True,
                  ycoeffs=None, xcoeffs=None, 
                  xcoeffs_ref=None,
                  ycoeffs_ref=None,
+                 lbd_qc=None,lbd_qi=None,lbd_qn=None,
                  v4_to_v5_inputs=False,
                  cld_inp_transformation="exp", 
-                 input_norm_per_level=True,
                  output_sqrt_norm=False,
                  remove_past_sfc_inputs=False,
                  qinput_prune=False,
+                 rh_input_to_wv=False,
                  rh_prune=False,
                  output_prune=False,
                  mp_mode=0,
+                 hybm=None,
+                 hyam=None,
                  include_prev_inputs=False, # include inputs 9,10,11 of the previous time step
                  include_prev_outputs=False, # include previous TRUE tendencies in inputs as in Hu et al.
                  no_multiprocessing=False,
@@ -806,6 +986,7 @@ class generator_xy(torch.utils.data.Dataset):
         self.no_multiprocessing=no_multiprocessing
         self.snowhice_fix = snowhice_fix
         self.qinput_prune = qinput_prune
+        self.rh_input_to_wv=rh_input_to_wv
         self.rh_prune = rh_prune 
         self.output_prune=output_prune
         self.include_prev_inputs = include_prev_inputs
@@ -822,15 +1003,20 @@ class generator_xy(torch.utils.data.Dataset):
             self.pred_liq_ratio = True 
 
         self.v4_to_v5_inputs    = v4_to_v5_inputs
-        if input_norm_per_level:
-            self.lbd_qc = lbd_qc_lev
-            self.lbd_qi = lbd_qi_lev
-            self.lbd_qn = lbd_qn_lev
-        else:
-            self.lbd_qc = lbd_qc_mean
-            self.lbd_qi = lbd_qi_mean
-            self.lbd_qn = lbd_qn_mean
-
+        # if input_norm_per_level:
+        #     self.lbd_qc = lbd_qc_lev
+        #     self.lbd_qi = lbd_qi_lev
+        #     self.lbd_qn = lbd_qn_lev
+        # else:
+        self.lbd_qc = lbd_qc
+        self.lbd_qi = lbd_qi
+        self.lbd_qn = lbd_qn
+        if self.rh_input_to_wv and hyam==None:
+            raise NotImplementedError("Please provide hyam,hybm")
+        if hyam is not None:
+            hyam = hyam.cpu().numpy(); hybm = hybm.cpu().numpy()
+        self.hyam=hyam
+        self.hybm=hybm
         if xcoeffs_ref is None:
             # self.v4_to_v5_inputs    = False
             self.reverse_input_norm = False
@@ -1114,8 +1300,20 @@ class generator_xy(torch.utils.data.Dataset):
         # elaps = time.time() - t0_it
         # print("Runtime load {:.2f}s".format(elaps))
         # t0_it = time.time()
-  
-        x_lev_b_denorm = np.copy(x_lev_b[:,:,0:8])
+        
+        if self.rh_prune:
+            x_lev_b[:,:,1] = np.clip(x_lev_b[:,:,1], 0.0, 1.2)
+            
+        if self.rh_input_to_wv:
+            rh = x_lev_b[:,:,1]
+            temp = x_lev_b[:,:,0]
+            sp = x_sfc_b[:,0:1]
+            pressure = (sp * (self.hybm.reshape(1,-1)) + 100000.0 * (self.hyam.reshape(1,-1)))
+            qwv = relative_to_specific_humidity(rh, temp, pressure)
+            x_lev_b[:,:,1] = qwv
+            
+        # x_lev_b_denorm = np.copy(x_lev_b[:,:,0:8])
+        x_lev_b_denorm = np.copy(x_lev_b)
 
         if self.add_refpres:
             dim0,dim1,dim2 = x_lev_b.shape
@@ -1171,8 +1369,6 @@ class generator_xy(torch.utils.data.Dataset):
             if self.qinput_prune:
                 x_lev_b[:,0:15,2:3] = 0.0
                 
-        if self.rh_prune:
-            x_lev_b[:,:,1] = np.clip(x_lev_b[:,:,1], 0.0, 1.2)
 
         # elaps = time.time() - t0_it
         # print("Runtime cloudnorm {:.2f}s".format(elaps))         
@@ -1188,8 +1384,12 @@ class generator_xy(torch.utils.data.Dataset):
             # but note, for some variables  mean and min is set to 0, and the scaling is actually x/std!! confusing..
             # x_sfc_b = (x_sfc_b - self.xcoeff_sca[0] ) / (self.xcoeff_sca[2] - self.xcoeff_sca[1])
             x_sfc_b = (x_sfc_b - self.xcoeff_sca[0] ) / (self.xcoeff_sca[1])
-
-
+            # print("min max q", x_lev_b[:,:,1].min(), x_lev_b[:,:,1].max())
+            if self.rh_input_to_wv:
+                q = x_lev_b[:,:,1] 
+                q[q<0.0] = 0.0
+                x_lev_b[:,:,1] = q
+            
         # elaps = time.time() - t0_it
         # print("Runtime in norm {:.2f}s".format(elaps))
         

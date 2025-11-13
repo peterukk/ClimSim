@@ -160,7 +160,7 @@ class LSTM_autoreg_torchscript(nn.Module):
 
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
-                xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
+                xmean_lev, xmean_sca, xdiv_lev, xdiv_sca, lbd_qc, lbd_qi, lbd_qn,
                 device,
                 nlev=60, nx = 15, nx_sfc=24, ny = 5, ny0=5, ny_sfc=5, nneur=(192,192), 
                 use_initial_mlp=False, # initial MLP layer (applied to each vertical level independently) 
@@ -200,18 +200,22 @@ class LSTM_autoreg_torchscript(nn.Module):
             # for this reason we try t predict precipitation "flux" and track of precip at each vertical level
             # P is then equal to P_old + dP_sourcesink + dP_flux
             print("warning: physical_precip is ON")
-            self.ny0 = self.ny0 + 3   # , evaporation, autoconversion, and flux of precipitation
+            self.ny0 = self.ny0 + 2  # , evaporation, autoconversion, and flux of precipitation
             if not self.separate_radiation:
               self.ny_sfc0 = self.ny_sfc0 - 2 # PRECC is computed from above using Eq 9.,
             # PRECSC is diagnosed using bottom temperature
             # learnable weight for t tendency from evaporation
             self.w1 = nn.Parameter(torch.randn(1), requires_grad=True)
+            self.w2 = nn.Parameter(torch.randn(1), requires_grad=True)
+            self.w3 = nn.Parameter(torch.randn(1), requires_grad=True)
+
         self.predict_liq_ratio = predict_liq_ratio
         self.add_pres = add_pres
         if self.add_pres:
             self.preslay = LayerPressure(hyam,hybm)
             nx = nx +1
-            self.preslay_nonorm = LayerPressure(hyam, hybm, norm=False)
+            self.preslev_nonorm = LevelPressure(hyai, hybi)
+
         self.randomly_initialize_cellstate = randomly_initialize_cellstate
         self.nx = nx
         self.nh_rnn1 = self.nneur[0]
@@ -243,6 +247,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.nh_mem = nh_mem
         else:
             self.nh_mem = self.nneur[1]
+
         # in ClimSim config of E3SM, the CRM physics first computes 
         # moist physics on 50 levels, and then computes radiation on 60 levels!
         if self.separate_radiation:
@@ -282,7 +287,10 @@ class LSTM_autoreg_torchscript(nn.Module):
         xmean_sca  = torch.from_numpy(xmean_sca).to(device)
         xdiv_lev   = torch.from_numpy(xdiv_lev).to(device)
         xdiv_sca   = torch.from_numpy(xdiv_sca).to(device)
-        
+        lbd_qc     = torch.from_numpy(lbd_qc).to(device)
+        lbd_qi     = torch.from_numpy(lbd_qi).to(device)
+        lbd_qn     = torch.from_numpy(lbd_qn).to(device)
+
         self.register_buffer('yscale_lev', yscale_lev)
         self.register_buffer('yscale_sca', yscale_sca)
         self.register_buffer('xmean_lev', xmean_lev)
@@ -291,6 +299,9 @@ class LSTM_autoreg_torchscript(nn.Module):
         self.register_buffer('xdiv_sca', xdiv_sca)
         self.register_buffer('hyai', hyai)
         self.register_buffer('hybi', hybi)
+        self.register_buffer("lbd_qc", lbd_qc)
+        self.register_buffer("lbd_qi", lbd_qi)
+        self.register_buffer("lbd_qn", lbd_qn)
 
         # self.rnn1_mem = None 
         print("Building RNN that feeds its hidden memory at t0,z0 to its inputs at t1,z0")
@@ -347,6 +358,8 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.mlp_output = nn.Linear(self.nh_mem, self.ny0)
         else:
             self.mlp_output = nn.Linear(nh_rnn, self.ny0)
+        if self.physical_precip:
+            self.mlp_precip_init = nn.Linear(self.nh_mem, 1)
             
         self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc0)
             
@@ -433,6 +446,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         inputs_main   = inp_list[0]
         inputs_aux    = inp_list[1]
         rnn1_mem      = inp_list[2]
+
         batch_size = inputs_main.shape[0]
         # print("shape inputs main", inputs_main.shape)
         if self.add_pres:
@@ -440,7 +454,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             # undo scaling
             sp = sp*35451.17 + 98623.664
             pres  = self.preslay(sp)
-            pres_nonorm  = torch.squeeze(self.preslay_nonorm(sp))
+            pres_nonorm  = torch.squeeze(self.preslev_nonorm(sp))
             inputs_main = torch.cat((inputs_main,pres),dim=2)
 
         if self.repeat_mu:
@@ -457,10 +471,8 @@ class LSTM_autoreg_torchscript(nn.Module):
         if self.use_initial_mlp:
             inputs_main_crm = self.mlp_initial(inputs_main_crm)
             inputs_main_crm = self.nonlin(inputs_main_crm)  
-            
-        # if self.use_memory:
-        # rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
-        inputs_main_crm = torch.cat((inputs_main_crm,rnn1_mem), dim=2)
+                    
+        inputs_main_crm = torch.cat((inputs_main_crm,rnn1_mem[:,:,0:self.nh_mem]), dim=2)
             
         if self.use_third_rnn: # use initial downward RNN
             hx0 = torch.randn((batch_size, self.nh_rnn1),device=inputs_main.device)  # (batch, hidden_size)
@@ -597,71 +609,158 @@ class LSTM_autoreg_torchscript(nn.Module):
                 out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
 
         if self.physical_precip:
-          if self.separate_radiation:
-            ilev_crm = 10
-          else:
-            ilev_crm = 0
-          #  ['ptend_t', 'ptend_q0001', 'ptend_qn', 'ptend_u', 'ptend_v']
-          #  ['ptend_t', 'ptend_q0001', 'ptend_qn', 'liq_frac', 'ptend_u', 'ptend_v']
-          dqv_precip = out[:,ilev_crm:,self.ny] # Evaporation of precipitation (sink of precip, source of qv)
-          dqn_precip = out[:,ilev_crm:,self.ny+1] # Accretion/autoconversion (source of precip, sink of qn)
+          # if self.separate_radiation:
+          #   ilev_crm = 10
+          # else:
+          #   ilev_crm = 0
+          # #  ['ptend_t', 'ptend_q0001', 'ptend_qn', 'ptend_u', 'ptend_v']
+          # #  ['ptend_t', 'ptend_q0001', 'ptend_qn', 'liq_frac', 'ptend_u', 'ptend_v']
+          # dqv_evap_prec = out[:,ilev_crm:,self.ny] # Evaporation of precipitation (sink of precip, source of qv)
+          # dqn_aa        = out[:,ilev_crm:,self.ny+1] # Accretion/autoconversion (source of precip, sink of qn)
 
-          # flux_dn_precip   = out[:,20:,9]
-          # flux_dn_precip   = out[:,ilev_precip:,8]
-          flux_dn_precip   = out[:,ilev_crm:,self.ny+2]
+          # dqn_evap_vapor = out[:,ilev_crm:,self.ny+2] # evaporation - condensation  (cloud water to qv) (sink of clw, source of qv)
 
-          # dT_precip = -self.relu(dT_precip) # force negative
-          dqv_precip = self.relu(dqv_precip) # force positive
-          dqn_precip = -self.relu(dqn_precip) # force negative
-          
-          #                     source        sink
-          # d_precip_sourcesink = -dqn_precip + dqv_precip  #out[:,20:,8]
-          d_precip_sourcesink = dqn_precip - dqv_precip  #out[:,20:,8]
+          # flux_dn_precip   = out[:,ilev_crm:,self.ny+3]
+          # flux_net_qv   = out[:,ilev_crm:,self.ny+4]
+          # flux_net_qn   = out[:,ilev_crm:,self.ny+5]
 
-          
-          #  out: ['ptend_t', 'ptend_q0001', 'ptend_qn', 'ptend_u', 'ptend_v']
-          # or   ['ptend_t', 'ptend_q0001', 'ptend_qn', 'pred_liq_ratio', 'ptend_u', 'ptend_v']
-          # out[:,:,0] = out[:,:,0] + dT_precip 
-          out[:,ilev_crm:,1] = out[:,ilev_crm:,1] + dqv_precip
-          out[:,ilev_crm:,2] = out[:,ilev_crm:,2] + dqn_precip
-          # Add temperature tendencies due to these!!!!!!!!!!!!!!!!!!!!!!!!!1
-          out[:,ilev_crm:,0] =  out[:,ilev_crm:,0] - self.w1*dqv_precip
-          out = out[:,:,0:self.ny]
+          # # precipitation that hasn't fallen yet, vertical profile, stored in memory (hidden state variable)
+          # # P_old = rnn1_mem[:,:,-1]
 
-          # mass flux of precip downwards due to gravity,  force positive
-          flux_dn_precip = self.relu(flux_dn_precip) #  because we use pressure coordinates this is just omega (vertical velocity in pressure coordinates )
-          # flux_up_precip = 0 
-
-          # precipitation that hasn't fallen yet, vertical profile, stored in memory (hidden state variable)
-          # P_old = rnn1_mem[:,ilev_precip:,0]
-          P_old = rnn1_mem[:,:,0]
-          # apply relu to this to limit size???????????????????
-
-        #   flux_net = flux_dn_precip # - flux_up_precip
-          flux_diff = flux_dn_precip[:,1:] - flux_dn_precip[:,0:-1]
-          precc = flux_dn_precip[:,-1]
-          precc = precc.unsqueeze(1)
-          pres_diff = pres_nonorm[:,ilev_crm+1:] - pres_nonorm[:,ilev_crm:-1]
-          dP_adv = 9.81*(flux_diff / pres_diff) # just times g, in z coordinates this would be (-1/rho)
-          zeroes = torch.zeros(batch_size, 1, device=inputs_main.device)
-          dP_adv = torch.cat((zeroes,dP_adv),dim=1)
-            
-          # continuity equation
-          P_new = P_old + d_precip_sourcesink + dP_adv
-          P_new = self.relu(P_new)
-          # rnn1_mem[:,ilev_precip:,0] = P_new
-          P_new = P_new.unsqueeze(2)
-          rnn1_mem = torch.cat((P_new, rnn1_mem[:,:,1:]),dim=2)
-
-          temp_sfc = (inputs_main[:,-1,0:1]*self.xdiv_lev[-1,0:1]) + self.xmean_lev[-1,0:1]
-          snowfrac = self.temperature_scaling_precip(temp_sfc)
-          precsc = snowfrac*precc
-
-          if self.separate_radiation:
-              out_sfc =  torch.cat((out_sfc_rad[:,0:2], precsc, precc, out_sfc_rad[:,2:]),dim=1)
-          else:
-              out_sfc =  torch.cat((out_sfc[:,0:2], precsc, precc, out_sfc[:,2:]),dim=1)    
+          # # mass flux of precip downwards due to gravity,  force positive
+          # flux_dn_precip = self.relu(flux_dn_precip) 
         
+          # flux_diff = flux_dn_precip[:,1:] - flux_dn_precip[:,0:-1]
+          # precc = flux_dn_precip[:,-1]
+          # precc = precc.unsqueeze(1)
+          # pres_diff = pres_nonorm[:,ilev_crm+1:] - pres_nonorm[:,ilev_crm:-1]
+          # dP_adv = 9.81*(flux_diff / pres_diff) # just times g, in z coordinates this would be (-1/rho)
+          # zeroes = torch.zeros(batch_size, 1, device=inputs_main.device)
+          # dP_adv = torch.cat((zeroes,dP_adv),dim=1)
+
+          # flux_diff_qv = flux_net_qv[:,1:] - flux_net_qv[:,0:-1]
+          # flux_diff_qn = flux_net_qn[:,1:] - flux_net_qn[:,0:-1]
+          # qv_adv = 9.81*(flux_diff_qv / pres_diff) # just times g, in z coordinates this would be (-1/rho)
+          # qv_adv = torch.cat((zeroes,qv_adv),dim=1)
+          # qn_adv = 9.81*(flux_diff_qn / pres_diff) # just times g, in z coordinates this would be (-1/rho)
+          # qn_adv = torch.cat((zeroes,qn_adv),dim=1)
+
+          # out[:,ilev_crm:,1] = qv_adv
+          # out[:,ilev_crm:,2] = qn_adv
+          # # out[:,ilev_crm:,1] = out[:,ilev_crm:,1] + qv_adv
+          # # out[:,ilev_crm:,2] = out[:,ilev_crm:,2] + qn_adv
+
+          # # dT_precip = -self.relu(dT_precip) # force negative
+          # dqv_evap_prec = self.relu(dqv_evap_prec) # force positive
+          # dqn_aa        = -self.relu(dqn_aa) # force negative
+          # # dqn_evap_vapor = self.relu(dqn_evap_vapor) # force positive
+
+          # #                     source        sink
+          # # d_precip_sourcesink = -dqn_aa + dqv_evap_prec  #out[:,20:,8]
+          # d_precip_sourcesink = -dqn_aa - dqv_evap_prec  #out[:,20:,8]
+
+          
+          # #  out: ['ptend_t', 'ptend_q0001', 'ptend_qn', 'ptend_u', 'ptend_v']
+          # # or   ['ptend_t', 'ptend_q0001', 'ptend_qn', 'pred_liq_ratio', 'ptend_u', 'ptend_v']
+          # # out[:,:,0] = out[:,:,0] + dT_precip 
+          # out[:,ilev_crm:,1] = out[:,ilev_crm:,1] + dqv_evap_prec # evap. adds water vapor
+          # out[:,ilev_crm:,2] = out[:,ilev_crm:,2] + dqn_aa # autoconversion removes cloud water
+          # out[:,ilev_crm:,1] = out[:,ilev_crm:,1] + dqn_evap_vapor # (evap-cond) adds water vapor
+          # out[:,ilev_crm:,2] = out[:,ilev_crm:,2] - dqn_evap_vapor # (evap-cond) removes cloud water
+          # # Add temperature tendencies due to these!!!!!!!!!!!!!!!!!!!!!!!!!1
+          # out[:,ilev_crm:,0] =  out[:,ilev_crm:,0] - self.w1*dqv_evap_prec
+          # out[:,ilev_crm:,0] =  out[:,ilev_crm:,0] - self.w1*dqn_evap_vapor
+          # out = out[:,:,0:self.ny]
+
+          # # continuity equation
+          # # print("P old =!0", torch.is_nonzero(P_old[0,0]), "val", P_old[0,0])
+          # # if not torch.is_nonzero(P_old[0,0]): # uninitialized
+          # P_old = self.mlp_precip_init(rnn2out)
+          # P_old = P_old.squeeze()
+
+          # P_new = P_old + self.w2*d_precip_sourcesink + dP_adv
+          # P_new = self.relu(P_new)
+          # P_new = P_new.unsqueeze(2)
+          # # counter = counter + 1 
+          # rnn1_mem = torch.cat((P_new, rnn1_mem),dim=2)
+          # # rnn1_mem = torch.cat((P_new, rnn1_mem[:,:,1:]),dim=2)
+
+          # temp_sfc = (inputs_main[:,-1,0:1]*self.xdiv_lev[-1,0:1]) + self.xmean_lev[-1,0:1]
+          # snowfrac = self.temperature_scaling_precip(temp_sfc)
+          # precsc = snowfrac*precc
+
+          # if self.separate_radiation:
+          #     out_sfc =  torch.cat((out_sfc_rad[:,0:2], precsc, precc, out_sfc_rad[:,2:]),dim=1)
+          # else:
+          #     out_sfc =  torch.cat((out_sfc[:,0:2], precsc, precc, out_sfc[:,2:]),dim=1)    
+            if self.separate_radiation:
+                ilev_crm = 10
+            else:
+                ilev_crm = 0
+            fac= 1
+            #  ['ptend_t', 'ptend_q0001', 'ptend_qn', 'ptend_u', 'ptend_v']
+            #  ['ptend_t', 'ptend_q0001', 'ptend_qn', 'liq_frac', 'ptend_u', 'ptend_v']
+            out_neww = torch.zeros(batch_size, self.nlev, self.ny, device=inputs_main.device)
+            out_neww[:,:,0] = out[:,:,0]
+            out_neww[:,:,3:self.ny] = out[:,:,3:self.ny]
+            # dqv_evap_prec = fac*out[:,ilev_crm:,1] # Evaporation of precipitation (sink of precip, source of qv)
+            dqn_aa        = fac*out[:,ilev_crm:,2] # Accretion/autoconversion (source of precip, sink of qn)
+            dqn_evap_cond_vapor = fac*out[:,ilev_crm:,3] # evaporation - condensation  (cloud water to qv) 
+            
+            flux_net_qv   = fac*out[:,ilev_crm:,self.ny]
+            flux_net_qn   = fac*out[:,ilev_crm:,self.ny+1]
+            one_over_g = torch.tensor(0.1019716213)
+            scaling_factor = -one_over_g
+            zeroes = torch.zeros(batch_size, 1, device=inputs_main.device)
+              
+            # scaling_tendency = -9.81 # (-g) negative when downward flux is positive by convention
+            pres_diff = pres_nonorm[:,ilev_crm+1:] - pres_nonorm[:,ilev_crm:-1]
+            flux_net_qv = torch.cat((zeroes,flux_net_qv),dim=1)
+            flux_net_qn = torch.cat((zeroes,flux_net_qn),dim=1)
+            flux_diff_qv = flux_net_qv[:,1:] - flux_net_qv[:,0:-1]
+            flux_diff_qn = flux_net_qn[:,1:] - flux_net_qn[:,0:-1]
+            flux_qv_dp = scaling_factor*(flux_diff_qv / pres_diff) 
+            flux_qn_dp = scaling_factor*(flux_diff_qn / pres_diff) 
+              
+            # dqv_evap_prec = self.relu(dqv_evap_prec) # force positive
+            dqn_aa        = self.relu(dqn_aa) # force positive
+
+            #                     source,     sink   of precipitation
+            d_precip_sourcesink = dqn_aa  # - dqv_evap_prec  #out[:,20:,8]
+                                          
+            #                                 (evap-cond)>0 adds wv          evap. adds water vapor  
+            out_neww[:,ilev_crm:,1] = flux_qv_dp + dqn_evap_cond_vapor   # + dqv_evap_prec     
+            #                                 (evap-cond)>0 removes cldwater  acc-au removes cldwater  
+            out_neww[:,ilev_crm:,2] = flux_qn_dp - dqn_evap_cond_vapor     - dqn_aa             
+            out = out_neww 
+            
+            # sedimentation = flux_qv_dp[:,-1] + flux_qn_dp[:,-1]
+            sedimentation = flux_net_qv[:,-1] + flux_net_qn[:,-1]
+
+            d_precip_sourcesink_nonorm =  d_precip_sourcesink/self.yscale_lev[ilev_crm:,1]
+            dp_water = one_over_g*pres_diff*d_precip_sourcesink_nonorm
+
+            #                                      !! I don't know why 0.01 is needed here!!!
+            precip_nonorm =  torch.sum(dp_water,1)  + 1e-2*sedimentation/self.yscale_lev[-1,1]
+            #               ^ no -1 because we already reversed signs in d_precip_sourcesink
+
+            # ind = 100
+            # print("dqv evap", torch.sum(dqv_evap_prec[ind,:]).item())
+            # print( "dqn_aa", torch.sum(dqn_aa[ind,:]).item(), "DPRECSS", torch.sum(d_precip_sourcesink[ind,:]).item() )
+            # print("dqn_evap_cond_vapor", torch.sum(dqn_evap_cond_vapor[ind,:]).item() )
+            # print("flux_qv_dp", torch.sum(flux_qv_dp[ind,:]).item(), "flux_qn_dp", torch.sum(flux_qn_dp[ind,:]).item()  )
+            # print("sedimentation", sedimentation[ind].item(), "dpwater",  torch.sum(dp_water[ind],0).item(), "prec", precip_nonorm[ind].item())
+            precc = self.yscale_sca[3] * (precip_nonorm/1000)
+            precc = precc.unsqueeze(1)
+            
+            temp_sfc = (inputs_main[:,-1,0:1]*self.xdiv_lev[-1,0:1]) + self.xmean_lev[-1,0:1]
+            snowfrac = self.temperature_scaling_precip(temp_sfc)
+            precsc = snowfrac*precc
+            if self.separate_radiation:
+                out_sfc =  torch.cat((out_sfc_rad[:,0:2], precsc, precc, out_sfc_rad[:,2:]),dim=1)
+            else:
+                out_sfc =  torch.cat((out_sfc[:,0:2], precsc, precc, out_sfc[:,2:]),dim=1) 
+
         # else:
         out_sfc = self.relu(out_sfc)
         # print("shape out pred", out.shape)
