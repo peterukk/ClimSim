@@ -1381,7 +1381,8 @@ class generator_xy(torch.utils.data.Dataset):
         
         # x_lev_b[np.isinf(x_lev_b)] = 0 
         x_lev_b[np.isnan(x_lev_b)] = 0
-                if self.reverse_output_norm:
+        
+        if self.reverse_output_norm:
             y_lev_b = y_lev_b / self.yscale_lev_ref
             y_sfc_b = y_sfc_b / self.yscale_sca_ref
             
