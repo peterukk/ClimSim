@@ -261,9 +261,10 @@ def main(cfg: DictConfig):
         elif cfg.mp_mode==0: #  ['ptend_t', 'ptend_q0001', 'ptend_q0002', 'ptend_q0003', 'ptend_u', 'ptend_v']
             yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.91623978e+08, 3.23919949e+08, 
                 5.00182069e+04, 6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        elif cfg.mp_mode==-1: #                ['ptend_t', 'ptend_q0001',   'ptend_qn',     'liqfrac', 'ptend_u', 'ptend_v']
-            yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.58085550e+08, 2.6709356,  5.00182069e+04,
-                    6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        elif cfg.mp_mode==-1: #                ['dt',     'dqv',       'dqn',      'liqfrac', 'du',      'dv']
+            # yscale_lev = np.repeat(np.array([1.87819e+04, 3.25021e+07, 1.58085e+08, 2.3,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            yscale_lev = np.repeat(np.array([1.87819e+04, 3.25021e+07, 1.58085e+08, 1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+
         else:
             raise NotImplementedError()
 
@@ -283,6 +284,7 @@ def main(cfg: DictConfig):
             # print("scale lev 3", yscale_lev[:,3])
             if cfg.mp_mode == 0:
                 raise NotImplementedError()
+            print("yscale lev 3", yscale_lev[:,3])
 
 
     if cfg.input_norm_per_level:
@@ -846,7 +848,8 @@ def main(cfg: DictConfig):
             lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch']
         print("LOADED FROM MODEL CHECKPOINT SUCCESSFULLY")
-
+        
+    prev_nan = False
     # --------------------------------------------------------------------------------------------------------
     # ----------------------------------------- START TRAINING -----------------------------------------------
 
@@ -893,8 +896,12 @@ def main(cfg: DictConfig):
             wandb.log(logged_metrics)
 
             if (np.isnan(logged_metrics['train_loss']) or (logged_metrics['train_R2'] < 0.0)):
-                sys.exit("Loss was NaN or R-squared was below 0 - something's wrong, stopping training") 
-        
+                if prev_nan:
+                    sys.exit("Loss was NaN or R-squared was below 0 two epochs in a row - something's wrong, stopping training") 
+                prev_nan = True 
+            else:
+                prev_nan = False 
+
         # if (bool(epoch%2) and (epoch>=cfg.val_epoch_start)):
         if (epoch>=cfg.val_epoch_start):
             print("VALIDATION..")

@@ -104,6 +104,8 @@ def relative_to_specific_humidity(rh, temp, pressure):
     Rd = 287 # Specific gas constant for dry air
     Rv = 461 # Specific gas constant for water vapor    
     qvs = (Rd*esat)/(Rv*pressure)
+    # state_rh = ds['state_q0001']/qvs
+    # rh = q / qvs 
     q = rh*qvs
     
     # print("q ref max mean", np.max(specific_humidity), np.mean(specific_humidity))
@@ -208,7 +210,7 @@ class train_or_eval_one_epoch:
             yto_lay = []; yto_sfc = []
             x_true_prev = []; y_true_prev = []; y_pred_prev = []
             inds_rnd = 0; prev_outputs = 0 
-            rnn1_mem = torch.ones(self.batch_size*self.cfg.ensemble_size, self.model.nlev_mem, self.model.nh_mem, device=device)
+            rnn1_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev_mem, self.model.nh_mem, device=device)
             x_pred = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev, 6, device=device)
             loss_update_start_index = 60
         else:
@@ -364,6 +366,7 @@ class train_or_eval_one_epoch:
                         x_lay0 = x_lay0_new
                         
                     inp_list = [x_lay0, x_sfc0]
+                    # rnn1_mem[:,:,-1] = 0.0
                     if self.cfg.autoregressive:
                         inp_list.append(rnn1_mem)
                     if use_ar_noise:
@@ -457,16 +460,50 @@ class train_or_eval_one_epoch:
 
                         if self.use_mp_constraint:
                             ypo_lay, ypo_sfc = self.model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
-                            # with torch.no_grad(): 
-                            #     yto_lay, yto_sfc = self.model.pp_mp(targets_lay, targets_sfc, x_lay_raw )
-                            # ypo_lay, ypo_sfc, yto_lay, yto_sfc = model.pp_mp(preds_lay, preds_sfc, targets_lay, targets_sfc, x_lay_raw )
-                            # if i>10: print ("yto lay true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
-                            # if i>10: print ("yto lay pp-true lev 35  dqliq {:.2e} ".format(ypo_lay[200,35,2].item()))
-
                         else:
                             ypo_lay, ypo_sfc = self.model.postprocessing(preds_lay, preds_sfc)
-                            # yto_lay, yto_sfc = self.model.postprocessing(targets_lay, targets_sfc) 
 
+                        # if (j) % 6400 == 0:
+                        #     ind=100
+
+                        #     for jlev in range(20,55):
+
+                        #         qvt = targets_lay[ind,jlev,1].detach().cpu().numpy()
+                        #         qvp = preds_lay[ind,jlev,1].detach().cpu().numpy()
+                        #         qnt = targets_lay[ind,jlev,2].detach().cpu().numpy()
+                        #         qnp = preds_lay[ind,jlev,2].detach().cpu().numpy()
+                        #         fract = targets_lay[ind,jlev,3].detach().cpu().numpy()
+                        #         fracp = preds_lay[ind,jlev,3].detach().cpu().numpy()
+                        #         liqt = yto_lay[ind,jlev,2].detach().cpu().numpy()
+                        #         liqp = ypo_lay[ind,jlev,2].detach().cpu().numpy()
+                        #         icet = yto_lay[ind,jlev,3].detach().cpu().numpy()
+                        #         icep = ypo_lay[ind,jlev,3].detach().cpu().numpy()
+                        #         print(jlev, "Qv", qvt, qvp, "Qn", qnt, qnp, "frac", fract, fracp, "dLIQ",liqt, liqp,"dICE", icet, icep)
+
+                        #     print("MEAN qn T", torch.mean(targets_lay[:,:,2]).item(),  "MIN", torch.min(targets_lay[:,:,2]).item() , "MAx", torch.max(targets_lay[:,:,2]).item() )
+                        #     print("MEAN qn P", torch.mean(preds_lay[:,:,2]).item(), "MIN", torch.min(preds_lay[:,:,2]).item(),  "MAx", torch.max(preds_lay[:,:,2]).item() )
+                        #     print("MEAN absqn T", torch.mean(torch.abs(targets_lay[:,:,2])).item())
+                        #     print("MEAN absqn P", torch.mean(torch.abs(preds_lay[:,:,2])).item())
+
+                        #     print("MEAN qv T", torch.mean(targets_lay[:,:,1]).item(),  "MIN", torch.min(targets_lay[:,:,1]).item() , "MAx", torch.max(targets_lay[:,:,1]).item() )
+                        #     print("MEAN qv P", torch.mean(preds_lay[:,:,1]).item(), "MIN", torch.min(preds_lay[:,:,1]).item(),  "MAx", torch.max(preds_lay[:,:,1]).item() )
+                        #     print("MEAN absqv T", torch.mean(torch.abs(targets_lay[:,:,1])).item())
+                        #     print("MEAN absqv P", torch.mean(torch.abs(preds_lay[:,:,1])).item())
+
+                        #     print("MEAN FRAC T", torch.mean(targets_lay[:,:,3]).item(),  "MIN", torch.min(targets_lay[:,:,3]).item() , "MAx", torch.max(targets_lay[:,:,3]).item() )
+                        #     print("MEAN FRAC P", torch.mean(preds_lay[:,:,3]).item(), "MIN", torch.min(preds_lay[:,:,3]).item(),  "MAx", torch.max(preds_lay[:,:,3]).item() )
+
+                        #     print("MEAN dliq T", torch.mean(yto_lay[:,:,2]).item(), "MIN", torch.min(yto_lay[:,:,2]).item() , "MAx", torch.max(yto_lay[:,:,2]).item() )
+                        #     print("MEAN dliq P", torch.mean(ypo_lay[:,:,2]).item(), "MIN", torch.min(ypo_lay[:,:,2]).item(),  "MAx", torch.max(ypo_lay[:,:,2]).item() )
+                                            
+                        #     print("MEAN abs dliq T", torch.mean(torch.abs(yto_lay[:,:,2])).item())
+                        #     print("MEAN abs dliq P", torch.mean(torch.abs(ypo_lay[:,:,2])).item())
+                            
+                        #     print("MEAN dice T", torch.mean(yto_lay[:,:,3]).item(),  "MIN", torch.min(yto_lay[:,:,3]).item() , "MAx", torch.max(yto_lay[:,:,3]).item() )
+                        #     print("MEAN dice P", torch.mean(ypo_lay[:,:,3]).item(), "MIN", torch.min(ypo_lay[:,:,3]).item(),  "MAx", torch.max(ypo_lay[:,:,3]).item() )
+                        #     print("MEAN abs dice T", torch.mean(torch.abs(yto_lay[:,:,3])).item())
+                        #     print("MEAN abs dice P", torch.mean(torch.abs(ypo_lay[:,:,3])).item())
+                            
                         with torch.no_grad():
                             # x_sfc = x_sfc*self.model.xdiv_sca + self.model.xmean_sca 
                             surf_pres_denorm = x_sfc[:,0:1]*self.model.xdiv_sca[0:1] + self.model.xmean_sca[0:1]
@@ -475,9 +512,7 @@ class train_or_eval_one_epoch:
                         # Energy conservation metric
                         h_con           = self.metric_h_con(yto_lay, ypo_lay, surf_pres_denorm, 1) #timesteps)
                         
-                        # Water conservation metric (computed over multiple timesteps since the CRM has precipitation storage not exposed to NN)
-                        # water_con_p     = self.metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)
-                        # water_con_t     = self.metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)#,printdebug=True)
+                        # Water conservation metric (compute over multiple timesteps since the CRM has a prognostic,falling precip not exposed here?)
                         water_con_p     = self.metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, 1)
                         water_con_t     = self.metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, 1)#,printdebug=True)
                         water_con       = torch.mean(torch.square(water_con_p - water_con_t))
@@ -494,9 +529,6 @@ class train_or_eval_one_epoch:
 
                         targets_lay2 = targets_lay[:,12:]; preds_lay2 = preds_lay[:,12:]
                         gel_lev        = self.metric_gel(targets_lay2, preds_lay2)
-                        # if self.cfg.use_gel_loss and j>loss_update_start_index:
-                        #     # loss = loss + self.cfg.w_gel*gel_lev
-                        #     losses.append(self.cfg.w_gel*gel_lev)
                             
                         raw_bias_lev, raw_bias_sfc = metrics.compute_absolute_biases(targets_lay2, targets_sfc, preds_lay2, preds_sfc)
                         bias_tot = torch.cat((raw_bias_lev, raw_bias_sfc))
@@ -567,13 +599,6 @@ class train_or_eval_one_epoch:
                         else:
                             optim.zero_grad()
                             loss = torch.stack(losses).sum()
-                            # if self.cfg.use_scaler:
-                            #     self.scaler.scale(loss).backward(retain_graph=True)
-                            #     self.scaler.step(optim)
-                            #     self.scaler.update()
-                            # else:
-                            #     loss.backward(retain_graph=True)       
-                            #     optim.step()
 
                             if self.cfg.use_scaler:
                                 self.scaler.scale(loss).backward(retain_graph=True)
@@ -622,7 +647,7 @@ class train_or_eval_one_epoch:
                     if self.model_is_stochastic: 
                         running_var += ens_var.item() 
                         running_det += det_skill.item() 
-                    #mae             = metrics.mean_absolute_error(targets_lay, preds_lay)
+
                     if j>loss_update_start_index:
                         with torch.no_grad():
                             epoch_loss      += loss.item()
@@ -677,7 +702,6 @@ class train_or_eval_one_epoch:
                             epoch_prec_std_frac += prec_pred.std()/prec_true.std()
                             
                             pp = np.percentile(prec_true,99.9)
-                            # pp = np.percentile(prec_true,99.8)
                             epoch_prec_99p_ratio += prec_pred[prec_pred>pp].size / prec_true[prec_true>pp].size
                             prec_pred_daily.append(prec_pred); prec_true_daily.append(prec_true) 
                             prec_pred_hourly.append(prec_pred); prec_true_hourly.append(prec_true) 
@@ -696,14 +720,18 @@ class train_or_eval_one_epoch:
                             epoch_hum_std_ratio += np.mean(std_ratios[1:-2])
                             epoch_tend_99p_ratio += np.mean(percentile_ratios)
                                 
-                            epoch_r2_lev += metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay)**2
+                            r2_lev = metrics.corrcoeff_pairs_batchfirst(ypo_lay, yto_lay)**2
+                            epoch_r2_lev += r2_lev
+
+                            targets_lay = targets_lay.reshape(-1,self.model.nlev,self.model.ny).cpu().numpy()
+                            preds_lay = preds_lay.reshape(-1,self.model.nlev,self.model.ny).cpu().numpy()
+
+                            r2_lev_raw = metrics.corrcoeff_pairs_batchfirst(preds_lay, targets_lay)**2
+
 
                             epoch_mae_lev_clw +=  np.nanmean(np.abs(ypo_lay[:,:,2] - yto_lay[:,:,2]),axis=0)
                             epoch_mae_lev_cli +=  np.nanmean(np.abs(ypo_lay[:,:,3] - yto_lay[:,:,3]),axis=0)
-                           # if track_ks:
-                           #     if (j+1) % max(timesteps*4,12)==0:
-                           #         epoch_ks += kolmogorov_smirnov(yto,ypo).item()
-                           #         k2 += 1
+
                             k += 1
                     if self.cfg.autoregressive:
                         preds_lay = []; preds_sfc = []
@@ -712,7 +740,6 @@ class train_or_eval_one_epoch:
                         x_sfc = []
                         rnn1_mem = rnn1_mem.detach()
                         # now pick random indices comprising 50% of total indices, where we will use past predictions instead of past truth
-                        # random_inds =
                         inds_all = list(np.arange(self.batch_size))
                         if self.cfg.gradual_mixing_end_epoch != 0: # enable gradual mixing
                             # e.g. if end_epoch is 50, 
@@ -725,7 +752,7 @@ class train_or_eval_one_epoch:
                         inds_rnd = np.sort(random.sample(inds_all, nrandom))
 
                 t_comp += time.time() - tcomp0
-                # # print statistics 
+                # print statistics 
                 if j % report_freq == (report_freq-1): # print every 200 minibatches
                     elaps = time.time() - t0_it
                     fac = report_freq/timesteps
@@ -747,6 +774,8 @@ class train_or_eval_one_epoch:
                     else:
                         print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f},  took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
                                                         j+1, running_loss,running_energy,running_water,running_precip, running_bias, r2raw, elaps, t_comp), flush=True)
+                    # print("R2 q {:.2f} liq {:.2f} ice {:.2f}".format(np.nanmean(r2_lev[:,1]),np.nanmean(r2_lev[:,2]),np.nanmean(r2_lev[:,3])))
+                    print("R2 raw qv {:.2f} qn {:.2f} frac {:.2f}".format(np.nanmean(r2_lev_raw[:,1]),np.nanmean(r2_lev_raw[:,2]),np.nanmean(r2_lev_raw[:,3])))
                     running_loss = 0.0
                     running_energy = 0.0; running_water=0.0
                     running_bias = 0.0; running_precip=0.0; running_gel = 0.0
@@ -948,7 +977,6 @@ def apply_output_norm_numba_sqrt(y, ycoeff):
                 # y[ii,jj,kk] = np.sqrt(np.abs(y[ii,jj,kk]))
                 y[ii,jj,kk] = signs[ii,jj,kk] * (y[ii,jj,kk] * ycoeff[jj,kk])
     
-
 class generator_xy(torch.utils.data.Dataset):
     def __init__(self, filepath, nloc=384, cache=False, add_refpres=True,
                  ycoeffs=None, xcoeffs=None, 
@@ -1003,11 +1031,6 @@ class generator_xy(torch.utils.data.Dataset):
             self.pred_liq_ratio = True 
 
         self.v4_to_v5_inputs    = v4_to_v5_inputs
-        # if input_norm_per_level:
-        #     self.lbd_qc = lbd_qc_lev
-        #     self.lbd_qi = lbd_qi_lev
-        #     self.lbd_qn = lbd_qn_lev
-        # else:
         self.lbd_qc = lbd_qc
         self.lbd_qi = lbd_qi
         self.lbd_qn = lbd_qn
@@ -1018,22 +1041,18 @@ class generator_xy(torch.utils.data.Dataset):
         self.hyam=hyam
         self.hybm=hybm
         if xcoeffs_ref is None:
-            # self.v4_to_v5_inputs    = False
             self.reverse_input_norm = False
         else:
-            # self.v4_to_v5_inputs    = True
             self.reverse_input_norm = True 
             self.xcoeff_lev_ref, self.xcoeff_sca_ref  = xcoeffs_ref
         if ycoeffs_ref is None:
-            # self.v4_to_v5_inputs    = False
             self.reverse_output_norm = False
         else:
-            # self.v4_to_v5_inputs    = True
             self.reverse_output_norm = True 
             self.yscale_lev_ref, self.yscale_sca_ref  = ycoeffs_ref   
             
         # if ref coefficients are provided, undo scaling
-        # if new coefficients are provided, apply new scaling, assume v4_to_V5 inputs=True
+        # if new coefficients are provided, apply new scaling
         # could be that reference but not new coefficients are provided,
         # in this case the preprocessing is done inside the model,
         # and the old scaling should be reversed (only)
@@ -1147,8 +1166,6 @@ class generator_xy(torch.utils.data.Dataset):
             os.system("df -h /dev/shm/")
 
         hdf.close()
-        # self.nloc = int(os.path.basename(self.filepath).split('_')[-1])
-        # self.stateful = stateful
         self.refpres = np.array([7.83478113e-02,1.41108318e-01,2.52923297e-01,4.49250635e-01,
                     7.86346161e-01,1.34735576e+00,2.24477729e+00,3.61643148e+00,
                     5.61583643e+00,8.40325322e+00,1.21444894e+01,1.70168280e+01,
@@ -1164,24 +1181,9 @@ class generator_xy(torch.utils.data.Dataset):
                     8.30259643e+02,8.47450653e+02,8.63535902e+02,8.78715875e+02,
                     8.93246018e+02,9.07385213e+02,9.21354397e+02,9.35316717e+02,
                     9.49378056e+02,9.63599599e+02,9.78013432e+02,9.92635544e+02],dtype=np.float32)
-        # self.refpres_norm = self.refpres
         self.refpres_norm = np.log(self.refpres)
-        # self.refpres_norm = (self.refpres-self.refpres.min())/(self.refpres.max()-self.refpres.min())*2 - 1
-        
-        # self.yscale_lev_ref  = np.array([[1.00464e+03, 2.83470e+06, 5.66940e+06, 2.83470e+06, 2.50000e+02,
-        #         5.00000e+02]], dtype=np.float32).repeat(60,axis=0)
-        # self.yscale_sca_ref = np.array([2.40000e-03, 5.00000e-03, 1.24416e+07, 1.31328e+06, 5.00000e-03,
-        #        4.60000e-03, 6.10000e-03, 9.50000e-03], dtype=np.float32)
-        
-        #if 'train' in self.filepath:
-        #    self.is_validation = False
-        #    print("Training dataset, path is: {}".format(self.filepath))
-        #else:
-        #    self.is_validation = True
-        #    print("Validation dataset, path is: {}".format(self.filepath))
 
         self.add_refpres = add_refpres
-        # batch_idx_expanded =  [0,1,2,3...ntime*1024]
 
         print("Number of locations {}; colums {}, time steps {}".format(self.nloc,self.ncol, self.ntimesteps), flush=True)
         # indices_all = list(np.arange(self.ntimesteps*self.nloc))
@@ -1207,7 +1209,6 @@ class generator_xy(torch.utils.data.Dataset):
                 
     def __getitem__(self, indices):
         # t0_it = time.time()
-        # print("inds ", indices[0:3], "...", indices[-1])
 
         if self.include_prev_inputs or self.include_prev_outputs:
             if indices[0]>0:
@@ -1217,7 +1218,6 @@ class generator_xy(torch.utils.data.Dataset):
                 raise NotImplementedError("First time index cannot be zero as it's used for memory")
                 # inds_prev = indices[0:-1]
                 # inds_prev.insert(0,inds_prev[0])
-        # print(indices, "|||||||||", inds_prev)
           
         if self.cache and self.cache_loaded: 
             x_lev_b = self.input_lev[indices,:]
@@ -1235,16 +1235,12 @@ class generator_xy(torch.utils.data.Dataset):
                 prev_inputs = prev_inputs[:,:,:,[0,1,2,3,4,5]]
         else:
             hdf = h5py.File(self.filepath, 'r')
-            # hdf = self.hdf
 
             x_lev_b = hdf['input_lev'][indices,:]
             x_sfc_b = hdf['input_sca'][indices,:]
             y_lev_b = hdf['output_lev'][indices,:]
             y_sfc_b = hdf['output_sca'][indices,:]
-            # x_lev_b = hdf['input_lev'][indices[0]:indices[-1]+1,:]
-            # x_sfc_b = hdf['input_sca'][indices[0]:indices[-1]+1,:]
-            # y_lev_b = hdf['output_lev'][indices[0]:indices[-1]+1,:]
-            # y_sfc_b = hdf['output_sca'][indices[0]:indices[-1]+1,:]
+
             if self.include_prev_outputs:
                 prev_outputs = hdf['output_lev'][inds_prev,:,:,:]
                 prev_outputs = prev_outputs[:,:,:,[0,1,2,3,4]]
@@ -1266,23 +1262,14 @@ class generator_xy(torch.utils.data.Dataset):
             x_lev_b = np.concatenate((x_lev_b, prev_outputs),axis=-1)
 
         if self.include_prev_inputs:
-            # if indices[0]==0:
-            #     prev_inputs = np.concatenate((np.zeros_like(prev_inputs[0:1]),prev_inputs),axis=0)
             x_lev_b = np.concatenate((x_lev_b, prev_inputs),axis=-1)
 
         if self.separate_timedim:
-            # print("inds", indices)
-            # x_lev_b = x_lev_b.reshape(-1,self.nlev, self.nx)
-            # x_sfc_b = x_sfc_b.reshape(-1,self.nx_sfc)
-            # y_lev_b = y_lev_b.reshape(-1,self.nlev, self.ny)
-            # y_sfc_b = y_sfc_b.reshape(-1,self.ny_sfc)
             x_lev_b.shape = (-1,self.nlev, self.nx)
             x_sfc_b.shape = (-1,self.nx_sfc)
             y_lev_b.shape = (-1,self.nlev, self.ny)
             y_sfc_b.shape = (-1,self.ny_sfc)
-                
-        #hdf.close()
-  
+                  
         if self.reverse_input_norm:
             if self.use_numba:
                 reverse_input_norm_numba(x_lev_b, self.xcoeff_lev_ref[0], self.xcoeff_lev_ref[1])
@@ -1332,7 +1319,6 @@ class generator_xy(torch.utils.data.Dataset):
         if self.v4_to_v5_inputs:
             # qn and liq_ratio instead of cloud water and ice mixing ratios
             #  old array has  T, rh, qliq, qice, X..,.
-            ##  new array has  T, rh, qn,   qice, liqratio, X ...
             #  new array has  T, rh, qn,   liqratio, X ...
             # print("doing v4 to v5")
             liq_frac_constrained = self.compute_liq_ratio(x_lev_b[:,:,0])
@@ -1395,23 +1381,10 @@ class generator_xy(torch.utils.data.Dataset):
         
         # x_lev_b[np.isinf(x_lev_b)] = 0 
         x_lev_b[np.isnan(x_lev_b)] = 0
-        
-        # for i in range(x_lev_b.shape[-1]):
-        #     print("after new scaling", i, "minmax x", x_lev_b[:,:,i].min(), x_lev_b[:,:,i].max())
-        #     # for j in range(60):
-        #     #     print("liq rat",  x_lev_b[0,j,3])
-        # for i in range(x_sfc_b.shape[-1]):
-        #     print("after new scaling", i, "minmax xsfc", x_sfc_b[:,i].min(), x_sfc_b[:,i].max())
-                    
-        if self.reverse_output_norm:
+                if self.reverse_output_norm:
             y_lev_b = y_lev_b / self.yscale_lev_ref
             y_sfc_b = y_sfc_b / self.yscale_sca_ref
             
-
-        # for i in range(6):
-        #     print("OO", i, "minmax y ", y_lev_b[:,:,i].min(), y_lev_b[:,:,i].max())
-        
-        # if not self.reverse_input_norm:    
         y_lev_b_denorm = np.copy(y_lev_b)
         y_sfc_b_denorm = np.copy(y_sfc_b)
         
@@ -1421,12 +1394,7 @@ class generator_xy(torch.utils.data.Dataset):
             y_lev_b[:,:,2] = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
             y_lev_b = np.delete(y_lev_b, 3, axis=2) 
         elif self.pred_liq_ratio:
-            # total = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
-            # liq_frac = y_lev_b[:,:,2] / total 
-            # liq_frac[np.isinf(liq_ratio)] = 0 
-            # liq_frac[np.isnan(liq_ratio)] = 0
-            # # print("liq ratio", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
-            
+            T_before     = x_lev_b_denorm[:,:,0]
             qliq_before     = x_lev_b_denorm[:,:,2]
             qice_before     = x_lev_b_denorm[:,:,3]   
             qn_before       = qliq_before + qice_before 
@@ -1438,27 +1406,35 @@ class generator_xy(torch.utils.data.Dataset):
             qn_new          = qn_before + dqn*1200  
             qliq_new        = qliq_before + dqliq*1200
             # qice_new        = qice_before + dqice*1200
-            
-            inds = np.nonzero(qn_new)
-            liq_frac = np.zeros_like(qn_new)
-            liq_frac[inds] = qliq_new[inds] / qn_new[inds]
-            
-            # qn_new = np.clip(qn_new, 1.0e-7, 0.5 )
-            # liq_frac = qliq_new / qn_new
-            # liq_frac[np.isinf(liq_frac)] = 0 
-            # liq_frac[np.isnan(liq_frac)] = 0
-            
+            T_new           = T_before  +  y_lev_b[:,:,0]*1200
+
+            # inds = np.nonzero(qn_new)
+            inds = (qn_new>1e-20)  & (dqn>1e-20)
+            # liq_frac = np.zeros_like(qn_new)
+
+            liq_frac = (T_new - 253.16) / 20.0 
             liq_frac[liq_frac<0.0] = 0.0
             liq_frac[liq_frac>1.0] = 1.0
-            # print(" min max liq frac", liq_frac.min(), liq_frac.max())
-                        
+
+            liq_frac[inds] = qliq_new[inds] / qn_new[inds]
+            liq_frac[liq_frac<0.0] = 0.0
+            liq_frac[liq_frac>1.0] = 1.0
+
+            # #                            dqn
+            # qliq_neww    = liq_frac*qn_new
+            # qice_neww    = (1-liq_frac)*qn_new
+            # dqliq2       = (qliq_neww - qliq_before) * 0.0008333333333333334 #/1200  
+            # dqice2       = (qice_neww - qice_before) * 0.0008333333333333334 #/1200  
+        
+            # for jlev in range(8,60):
+            #     print("jlev ", jlev, "lfrac", liq_frac[100,jlev], "t dqliq", dqliq[100,jlev], "INF", dqliq2[100,jlev], "t qliqnew",qliq_new[100,jlev], "2", qliq_neww[100,jlev] )
+            #     print("jlev ", jlev, "lfrac", liq_frac[100,jlev], "t dqice", dqice[100,jlev], "INF", dqice2[100,jlev])
+
             # print("liq frac", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
             # print("len", liq_frac.size, "< -0.1 ", liq_frac[liq_frac<-0.1].size, ">1.1 ", liq_frac[liq_frac>1.1].size)
             y_lev_b[:,:,2] = dqn
             y_lev_b[:,:,3] = liq_frac 
 
-        # for i in range(5):
-        #     print("OOO", i, "minmax y ", y_lev_b[:,50,i].min(), y_lev_b[:,50,i].max())
         if self.use_numba:
             if self.output_sqrt_norm:
                 apply_output_norm_numba_sqrt(y_lev_b, self.yscale_lev)
@@ -1468,9 +1444,6 @@ class generator_xy(torch.utils.data.Dataset):
             y_lev_b  = y_lev_b * self.yscale_lev
             if self.output_sqrt_norm:
                 raise NotImplementedError()
-
-        # for ivar in range(6):
-        #     print(ivar, y_lev_b[:,:,ivar].min(), y_lev_b[:,:,ivar].max(), y_lev_b[:,:,ivar].std())
 
         if self.output_prune:
             y_lev_b[:,0:12,1:] = 0.0
@@ -1485,7 +1458,6 @@ class generator_xy(torch.utils.data.Dataset):
         y_lev_b_denorm = torch.from_numpy(y_lev_b_denorm)
         y_sfc_b_denorm = torch.from_numpy(y_sfc_b_denorm)
 
-        # print("gen x_lev shape", x_lev_b.shape)
         gc.collect()
 
         return x_lev_b, x_sfc_b, y_lev_b, y_sfc_b, x_lev_b_denorm, y_lev_b_denorm, y_sfc_b_denorm

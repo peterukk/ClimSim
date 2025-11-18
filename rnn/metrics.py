@@ -270,9 +270,22 @@ def get_water_conservation(hyai, hybi):
         # diff = torch.mean(lhs - rhs)
         diff = lhs - rhs
 
-        ind = 100
+        # ind = 100
         # print("lhs", lhs[ind].item(), "rhs", rhs[ind].item(), "diff", diff[ind])
-        # print("lhs mean", torch.mean(lhs).item(), "rhs mean", torch.mean(rhs).item(), "diff mean", torch.mean(diff))
+        # dp_water1 = torch.sum(thick*(pred_lev[:,:,1]),1)
+        # dp_water2 = torch.sum(thick*(pred_lev[:,:,2]),1)
+        # dp_water3 = torch.sum(thick*(pred_lev[:,:,3]),1)
+        # print("vint1", dp_water1[ind].item(), "vint2", dp_water2[ind].item(), "vint3", dp_water3[ind])
+
+        # print("mean max lhs", torch.mean(lhs).item(), torch.max(lhs).item(), "mean max rhs", torch.mean(rhs).item(),torch.max(rhs))
+        # print("mean min max diff", torch.mean(diff).item(), torch.min(diff).item(), torch.max(diff))
+        # print("mean lhs", torch.mean(lhs).item(), "rhs", torch.mean(rhs).item(), "diff", torch.mean(diff))
+
+
+        # print("mean dcld",  torch.mean(torch.sum(thick*torch.sum(pred_lev[:,:,2:4],dim=2),1)).item(), "dq",  
+        #                     torch.mean(torch.sum(thick*pred_lev[:,:,1])))
+        
+
         # print("fac ", torch.nanmean((lhs) / rhs).item())
         return diff 
     return wc
