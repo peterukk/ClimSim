@@ -347,7 +347,7 @@ class LSTM_autoreg_torchscript(nn.Module):
                 self.rnn2 = MyStochasticLSTMLayer4(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias)  
             else:
                 self.rnn2   = nn.LSTM(self.nx_rnn3, self.nh_rnn3,  batch_first=True)
-            self.rnn0.flatten_parameters()
+            # self.rnn0.flatten_parameters()
         else:
 
             self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)  # (input_size, hidden_size)
@@ -357,8 +357,8 @@ class LSTM_autoreg_torchscript(nn.Module):
             else:
                 self.rnn2 = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
                 
-        self.rnn1.flatten_parameters()
-        self.rnn2.flatten_parameters()
+        # self.rnn1.flatten_parameters()
+        # self.rnn2.flatten_parameters()
         self.sigmoid = nn.Sigmoid()
 
         if self.concat: 
