@@ -32,7 +32,7 @@ def eliq(T):
     """
     a_liq = np.array([-0.976195544e-15,-0.952447341e-13,0.640689451e-10,
                               0.206739458e-7,0.302950461e-5,0.264847430e-3,
-                              0.142986287e-1,0.443987641,6.11239921]);
+                              0.142986287e-1,0.443987641,6.11239921])
     c_liq = -80
     T0 = 273.16
     return 100*np.polyval(a_liq,np.maximum(c_liq,T-T0))
@@ -44,7 +44,7 @@ def eice(T):
     """
     a_ice = np.array([0.252751365e-14,0.146898966e-11,0.385852041e-9,
                       0.602588177e-7,0.615021634e-5,0.420895665e-3,
-                      0.188439774e-1,0.503160820,6.11147274]);
+                      0.188439774e-1,0.503160820,6.11147274])
     c_ice = np.array([273.15,185,-100,0.00763685,0.000151069,7.48215e-07])
     T0 = 273.16
     return (T>c_ice[0])*eliq(T)+\
@@ -119,7 +119,7 @@ class train_or_eval_one_epoch:
                  model, 
                  device, dtype,
                  cfg, 
-                 metrics_det, metric_h_con, metric_water_con, 
+                 metrics_det, metric_h_con, metric_water_con, metric_rh,
                  batch_size = 384, train=True, model_is_stochastic=False):
         super().__init__()
         self.loader = dataloader
@@ -145,6 +145,7 @@ class train_or_eval_one_epoch:
         self.metrics_det = metrics_det
         self.metric_h_con = metric_h_con
         self.metric_water_con = metric_water_con
+        self.metric_rh = metric_rh
         self.metric_R2 =  R2Score().to(self.device) 
         gel_lambda_prec = cfg.gel_lambda_prec
         self.metric_precip_gel = metrics.get_GEL_precip(gel_lambda_prec)
@@ -173,11 +174,11 @@ class train_or_eval_one_epoch:
     def eval_one_epoch(self, lossf, optim, epoch, timesteps=1, lr_scheduler=None):
         report_freq = self.report_freq
         # Initialize per-epoch metrics to zero (there's LOTS!)
-        running_loss = 0.0; running_energy = 0.0; running_water = 0.0
-        running_var=0.0; running_det=0.0; running_bias = 0.0; running_precip=0.0; running_gel = 0.0
+        running_loss = 0.0; running_energy = 0.0; running_water = 0.0; running_water_con = 0.0; running_water_con_true=0.0
+        running_var=0.0; running_det=0.0; running_bias = 0.0; running_precip=0.0; running_rh_mse= 0.0; running_cldpath=0.0
         epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0; epoch_mae = 0.0
         epoch_R2precc = 0.0; epoch_R2netsw = 0.0; epoch_R2flwds = 0.0; epoch_r2_lev = 0.0
-        epoch_hcon = 0.0; epoch_wcon = 0.0; epoch_wcon_long = 0.0; epoch_gel = 0.0
+        epoch_hcon = 0.0; epoch_wcon = 0.0; epoch_wcon_long = 0.0; epoch_rh_mse = 0.0
         epoch_ens_var = 0.0; epoch_det_skill = 0.0; epoch_spreadskill = 0.0
         epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
         epoch_bias_clw = 0.0; epoch_bias_cli = 0.0
@@ -288,18 +289,24 @@ class train_or_eval_one_epoch:
                 yto_sfc0 = yto_sfc_chk[ichunk]
 
                 tcomp0= time.time()    
-                                
                 if self.cfg.do_semi_online_training:
                     if j>0:
-                    # init x_ls_pred = x_ls_true
-                    # at current time step k:
-                    #  x_ls_pred[k] = x_ls_pred[k-1] + dx_phys_nn[k-1] + dx_dyn_k,
-                    #       where
-                    #  dx_dyn_k = (x_ls_true[k] - x_ls_true[k-1]) - dx_phys_true[k-1]
-                    #           = (x_ls_true[k] - x_ls_true[k-1]) - y[k-1]
-                        
-                    #   then use NN
-                    #   dx_phys_nn[k], x_sfc_pred = NN(x_ls_pred[k], L.S. forcings, sfc inp),
+                        # initialize X_pred = X_true where X = [T, qv, qliq, qice, u, v]
+                        #
+                        # at current time step k, use the time series of state variables and physics tendencies 
+                        # to work out what the dynamics contribution was:
+                        #  X_pred[k] = X_pred[k-1] + dX_phys_nn[k-1] + dX_dyn_k,
+                        #       where the dynamics contribution
+                        #  dX_dyn_k = (X_true[k] - X_true[k-1]) - dX_phys_true[k-1]
+                        #           = (X_true[k] - X_true[k-1]) - y[k-1]
+                            
+                        #   NN is used autoregressively for k2 timesteps (rollout window)
+                        #       dX_phys_nn[k], ysfc_phys_nn = NN(X_pred[k], L.S. forcings, surface inp., hidden memory)
+                        #   until k=k2 then reset:
+                        #      X_pred = X_true     
+                        #      dX_phys = dX_phys_true 
+                        # 
+
                     
                         dx_tot = x_lay_raw0[:,:,0:6] - x_true_prev
                         #                 dx_phys_true ( previous yto_lay0[:,:,0:6] )
@@ -341,7 +348,7 @@ class train_or_eval_one_epoch:
                     y_true_prev = yto_lay0[:,:,0:6]
                     x_true_prev = x_lay_raw0[:,:,0:6]
 
-                x_lay_raw0 = x_lay_raw0[:,:,0:8]
+                # x_lay_raw0 = x_lay_raw0[:,:,0:8]
                         
                 if self.use_ensemble:
                   x_lay0 = x_lay0.unsqueeze(0)
@@ -463,6 +470,7 @@ class train_or_eval_one_epoch:
                         else:
                             ypo_lay, ypo_sfc = self.model.postprocessing(preds_lay, preds_sfc)
 
+                        
                         # if (j) % 6400 == 0:
                         #     ind=100
 
@@ -510,17 +518,25 @@ class train_or_eval_one_epoch:
                             lhf = x_sfc[:,2]*self.model.xdiv_sca[2] + self.model.xmean_sca[2]
 
                         # Energy conservation metric
-                        h_con           = self.metric_h_con(yto_lay, ypo_lay, surf_pres_denorm, 1) #timesteps)
-                        
+                        # h_con           = self.metric_h_con(yto_lay, ypo_lay, surf_pres_denorm, 1) #timesteps)
+                        h_con           = self.metric_h_con(yto_lay, ypo_lay, surf_pres_denorm, timesteps)
                         # Water conservation metric (compute over multiple timesteps since the CRM has a prognostic,falling precip not exposed here?)
-                        water_con_p     = self.metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, 1)
-                        water_con_t     = self.metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, 1)#,printdebug=True)
+                        water_con_p, cld_pred    = self.metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, 1, return_cloudpath=True)
+                        water_con_t, cld_tot     = self.metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, 1, return_cloudpath=True)#,printdebug=True)
                         water_con       = torch.mean(torch.square(water_con_p - water_con_t))
-                        del water_con_p, water_con_t
+                        cloudpath_err   = torch.mean(torch.square(cld_pred - cld_tot))
+                        del water_con_p, water_con_t, cld_pred, cld_tot
                         water_con_p_long     = self.metric_water_con(ypo_lay, ypo_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)
                         water_con_t_long     = self.metric_water_con(yto_lay, yto_sfc, surf_pres_denorm, lhf, x_lay_raw, timesteps)#,printdebug=True)
                         water_con_long       = timesteps*torch.mean(torch.square(water_con_p_long - water_con_t_long))
+                        running_water_con += torch.mean(water_con_p_long).detach().cpu().numpy()
+                        running_water_con_true += torch.mean(water_con_t_long).detach().cpu().numpy()
                         del water_con_p_long, water_con_t_long 
+
+                        # Relative humidity metric 
+                        if self.cfg.include_q_input:
+                            rh_mse = self.metric_rh(ypo_lay, yto_lay, x_lay_raw, surf_pres_denorm)
+                            running_rh_mse += rh_mse.detach().cpu().numpy()
 
                         # precipitation accumulation
                         precip_sum_mse  = metrics.precip_sum_mse(yto_sfc, ypo_sfc, timesteps)
@@ -528,7 +544,7 @@ class train_or_eval_one_epoch:
                         precip_sum_gel  = self.metric_precip_gel(yto_sfc, ypo_sfc, timesteps)
 
                         targets_lay2 = targets_lay[:,12:]; preds_lay2 = preds_lay[:,12:]
-                        gel_lev        = self.metric_gel(targets_lay2, preds_lay2)
+                        # gel_lev        = self.metric_gel(targets_lay2, preds_lay2)
                             
                         raw_bias_lev, raw_bias_sfc = metrics.compute_absolute_biases(targets_lay2, targets_sfc, preds_lay2, preds_sfc)
                         bias_tot = torch.cat((raw_bias_lev, raw_bias_sfc))
@@ -553,9 +569,15 @@ class train_or_eval_one_epoch:
                             # losses.append(self.cfg.w_wcon * water_con)
                             losses.append(self.cfg.w_wcon * water_con_long)
 
+                        if self.cfg.use_rh_loss:
+                            losses.append(self.cfg.w_rh * rh_mse)
+
+                        if self.cfg.use_cloudpath_loss:
+                            losses.append(self.cfg.w_cld * cloudpath_err)
+
                         if self.model_is_stochastic and self.cfg.use_det_loss:
                             losses.append(self.cfg.w_det * (det_skill**2))
-
+                            
 
                         if self.cfg.use_conflictfree: 
                             # optim.zero_grad()     
@@ -619,9 +641,11 @@ class train_or_eval_one_epoch:
                     h_con = h_con.detach() 
                     water_con = water_con.detach()
                     water_con_long = water_con_long.detach()
+                    rh_mse = rh_mse.detach()
+                    cloudpath_err = cloudpath_err.detach()
                     precip_sum_mse = precip_sum_mse.detach()
                     precip_sum_gel = precip_sum_gel.detach()
-                    gel_lev = gel_lev.detach()
+                    # gel_lev = gel_lev.detach()
                     losses = []; grads = []
 
                     if self.cfg.do_semi_online_training:
@@ -640,9 +664,10 @@ class train_or_eval_one_epoch:
                     running_loss    += loss.item()
                     running_energy  += h_con.item()
                     running_water   += water_con.item()
+                    running_cldpath += cloudpath_err.item()
                     running_bias    += bias_tot.item() 
                     running_precip  += precip_sum_mse.item() 
-                    running_gel     += gel_lev.item() 
+                    # running_gel     += gel_lev.item() 
 
                     if self.model_is_stochastic: 
                         running_var += ens_var.item() 
@@ -657,10 +682,11 @@ class train_or_eval_one_epoch:
                             epoch_huber += huber.item()
                             epoch_mse += mse.item()
                             epoch_mae += mae.item()
-                            epoch_gel += gel_lev.item()                 
+                            # epoch_gel += gel_lev.item()                 
                             epoch_hcon  += h_con.item()
                             epoch_wcon  += water_con.item()
                             epoch_wcon_long += water_con_long.item()
+                            epoch_rh_mse  += rh_mse.item()
                             epoch_accumprec += precip_sum_mse.item()
                             epoch_prec_gel += precip_sum_gel.item()
 
@@ -759,9 +785,13 @@ class train_or_eval_one_epoch:
                     running_loss = running_loss / fac
                     running_energy = running_energy / fac
                     running_water = running_water / fac
+                    running_cldpath = running_cldpath / fac
                     running_bias = running_bias / fac
                     running_precip = running_precip / fac
-                    running_gel = running_gel / fac
+                    running_rh_mse = running_rh_mse / fac
+                    # running_gel = running_gel / fac
+                    running_water_con = running_water_con/fac
+                    running_water_con_true = running_water_con_true/fac
 
                     r2raw = self.metric_R2.compute()
 
@@ -772,13 +802,18 @@ class train_or_eval_one_epoch:
                                                         j+1, running_loss,running_var, running_det, running_energy,running_water, running_precip, running_bias, r2raw, elaps, t_comp), flush=True)
                         running_var = 0.0; running_det = 0.0
                     else:
-                        print("[{:d}, {:d}] Loss: {:.2e}  h-con: {:.2e}  w-con: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f},  took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
-                                                        j+1, running_loss,running_energy,running_water,running_precip, running_bias, r2raw, elaps, t_comp), flush=True)
+                        print("[{:d}, {:d}] Loss: {:.2e}  h: {:.2e}  w: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f} rh-MSE: {:.2e}, took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
+                                                        j+1, running_loss,running_energy,running_water,running_precip, running_bias, r2raw, running_rh_mse, elaps, t_comp), flush=True)
                     # print("R2 q {:.2f} liq {:.2f} ice {:.2f}".format(np.nanmean(r2_lev[:,1]),np.nanmean(r2_lev[:,2]),np.nanmean(r2_lev[:,3])))
-                    print("R2 raw qv {:.2f} qn {:.2f} frac {:.2f}".format(np.nanmean(r2_lev_raw[:,1]),np.nanmean(r2_lev_raw[:,2]),np.nanmean(r2_lev_raw[:,3])))
+                    print("R2 raw qv {:.2f} qn {:.2f} frac {:.2f} wcon-p {:.2e}  wcon-t {:.2e}  cldpath {:.2e}".format(np.nanmean(r2_lev_raw[:,1]),np.nanmean(r2_lev_raw[:,2]),np.nanmean(r2_lev_raw[:,3]), 
+                                                                                                       running_water_con, running_water_con_true, running_cldpath))
+                    if self.cfg.physical_precip:
+                        if self.model.store_precip_and_include_evap:
+                            print("Stored precipitation mean {:.2f}  max {:.2f} ".format(torch.mean(rnn1_mem[:,-1,-1]).item(), torch.max(rnn1_mem[:,-1,-1]).item()))
                     running_loss = 0.0
-                    running_energy = 0.0; running_water=0.0
+                    running_energy = 0.0; running_water=0.0; running_cldpath=0.0
                     running_bias = 0.0; running_precip=0.0; running_gel = 0.0
+                    running_water_con = 0.0; running_water_con_true = 0.0; running_rh_mse=0.0
                     t0_it = time.time()
                     t_comp = 0
                 if len(prec_pred_daily) ==72:
@@ -830,8 +865,9 @@ class train_or_eval_one_epoch:
         self.metrics["h_conservation"] =  epoch_hcon / k
         self.metrics["water_conservation"] =  epoch_wcon / k
         self.metrics["water_con_long"] =  epoch_wcon_long / k
+        self.metrics["rh_mse"] =  epoch_rh_mse / k
         self.metrics["precip_accum_mse"] = epoch_accumprec / k
-        self.metrics['gel'] = epoch_gel / k
+        # self.metrics['gel'] = epoch_gel / k
 
         self.metrics["bias_lev"] = epoch_bias_lev / k 
         self.metrics["bias_lev_noabs"] = epoch_bias_lev_tot / k 
@@ -977,8 +1013,9 @@ def apply_output_norm_numba_sqrt(y, ycoeff):
                 # y[ii,jj,kk] = np.sqrt(np.abs(y[ii,jj,kk]))
                 y[ii,jj,kk] = signs[ii,jj,kk] * (y[ii,jj,kk] * ycoeff[jj,kk])
     
+
 class generator_xy(torch.utils.data.Dataset):
-    def __init__(self, filepath, nloc=384, cache=False, add_refpres=True,
+    def __init__(self, filepath, nloc=384, cache=False,
                  ycoeffs=None, xcoeffs=None, 
                  xcoeffs_ref=None,
                  ycoeffs_ref=None,
@@ -988,7 +1025,8 @@ class generator_xy(torch.utils.data.Dataset):
                  output_sqrt_norm=False,
                  remove_past_sfc_inputs=False,
                  qinput_prune=False,
-                 rh_input_to_wv=False,
+                 rh_input_to_q=False, # convert rh to q
+                 include_q_input=False, # also include q in addition to rh
                  rh_prune=False,
                  output_prune=False,
                  mp_mode=0,
@@ -1014,7 +1052,8 @@ class generator_xy(torch.utils.data.Dataset):
         self.no_multiprocessing=no_multiprocessing
         self.snowhice_fix = snowhice_fix
         self.qinput_prune = qinput_prune
-        self.rh_input_to_wv=rh_input_to_wv
+        self.rh_input_to_q=rh_input_to_q
+        self.include_q_input = include_q_input
         self.rh_prune = rh_prune 
         self.output_prune=output_prune
         self.include_prev_inputs = include_prev_inputs
@@ -1031,28 +1070,37 @@ class generator_xy(torch.utils.data.Dataset):
             self.pred_liq_ratio = True 
 
         self.v4_to_v5_inputs    = v4_to_v5_inputs
+        # if input_norm_per_level:
+        #     self.lbd_qc = lbd_qc_lev
+        #     self.lbd_qi = lbd_qi_lev
+        #     self.lbd_qn = lbd_qn_lev
+        # else:
         self.lbd_qc = lbd_qc
         self.lbd_qi = lbd_qi
         self.lbd_qn = lbd_qn
-        if self.rh_input_to_wv and hyam==None:
+        if self.rh_input_to_q and hyam==None:
             raise NotImplementedError("Please provide hyam,hybm")
         if hyam is not None:
             hyam = hyam.cpu().numpy(); hybm = hybm.cpu().numpy()
         self.hyam=hyam
         self.hybm=hybm
         if xcoeffs_ref is None:
+            # self.v4_to_v5_inputs    = False
             self.reverse_input_norm = False
         else:
+            # self.v4_to_v5_inputs    = True
             self.reverse_input_norm = True 
             self.xcoeff_lev_ref, self.xcoeff_sca_ref  = xcoeffs_ref
         if ycoeffs_ref is None:
+            # self.v4_to_v5_inputs    = False
             self.reverse_output_norm = False
         else:
+            # self.v4_to_v5_inputs    = True
             self.reverse_output_norm = True 
             self.yscale_lev_ref, self.yscale_sca_ref  = ycoeffs_ref   
             
         # if ref coefficients are provided, undo scaling
-        # if new coefficients are provided, apply new scaling
+        # if new coefficients are provided, apply new scaling, assume v4_to_V5 inputs=True
         # could be that reference but not new coefficients are provided,
         # in this case the preprocessing is done inside the model,
         # and the old scaling should be reversed (only)
@@ -1166,24 +1214,36 @@ class generator_xy(torch.utils.data.Dataset):
             os.system("df -h /dev/shm/")
 
         hdf.close()
-        self.refpres = np.array([7.83478113e-02,1.41108318e-01,2.52923297e-01,4.49250635e-01,
-                    7.86346161e-01,1.34735576e+00,2.24477729e+00,3.61643148e+00,
-                    5.61583643e+00,8.40325322e+00,1.21444894e+01,1.70168280e+01,
-                    2.32107981e+01,3.09143463e+01,4.02775807e+01,5.13746323e+01,
-                    6.41892284e+01,7.86396576e+01,9.46300920e+01,1.12091274e+02,
-                    1.30977804e+02,1.51221318e+02,1.72673905e+02,1.95087710e+02,
-                    2.18155935e+02,2.41600379e+02,2.65258515e+02,2.89122322e+02,
-                    3.13312087e+02,3.38006999e+02,3.63373492e+02,3.89523338e+02,
-                    4.16507922e+02,4.44331412e+02,4.72957206e+02,5.02291917e+02,
-                    5.32152273e+02,5.62239392e+02,5.92149276e+02,6.21432841e+02,
-                    6.49689897e+02,6.76656485e+02,7.02242188e+02,7.26498589e+02,
-                    7.49537645e+02,7.71445217e+02,7.92234260e+02,8.11856675e+02,
-                    8.30259643e+02,8.47450653e+02,8.63535902e+02,8.78715875e+02,
-                    8.93246018e+02,9.07385213e+02,9.21354397e+02,9.35316717e+02,
-                    9.49378056e+02,9.63599599e+02,9.78013432e+02,9.92635544e+02],dtype=np.float32)
-        self.refpres_norm = np.log(self.refpres)
+        # self.nloc = int(os.path.basename(self.filepath).split('_')[-1])
+        # self.stateful = stateful
+        # self.refpres = np.array([7.83478113e-02,1.41108318e-01,2.52923297e-01,4.49250635e-01,
+        #             7.86346161e-01,1.34735576e+00,2.24477729e+00,3.61643148e+00,
+        #             5.61583643e+00,8.40325322e+00,1.21444894e+01,1.70168280e+01,
+        #             2.32107981e+01,3.09143463e+01,4.02775807e+01,5.13746323e+01,
+        #             6.41892284e+01,7.86396576e+01,9.46300920e+01,1.12091274e+02,
+        #             1.30977804e+02,1.51221318e+02,1.72673905e+02,1.95087710e+02,
+        #             2.18155935e+02,2.41600379e+02,2.65258515e+02,2.89122322e+02,
+        #             3.13312087e+02,3.38006999e+02,3.63373492e+02,3.89523338e+02,
+        #             4.16507922e+02,4.44331412e+02,4.72957206e+02,5.02291917e+02,
+        #             5.32152273e+02,5.62239392e+02,5.92149276e+02,6.21432841e+02,
+        #             6.49689897e+02,6.76656485e+02,7.02242188e+02,7.26498589e+02,
+        #             7.49537645e+02,7.71445217e+02,7.92234260e+02,8.11856675e+02,
+        #             8.30259643e+02,8.47450653e+02,8.63535902e+02,8.78715875e+02,
+        #             8.93246018e+02,9.07385213e+02,9.21354397e+02,9.35316717e+02,
+        #             9.49378056e+02,9.63599599e+02,9.78013432e+02,9.92635544e+02],dtype=np.float32)
+        # # self.refpres_norm = self.refpres
+        # self.refpres_norm = np.log(self.refpres)
+        # # self.refpres_norm = (self.refpres-self.refpres.min())/(self.refpres.max()-self.refpres.min())*2 - 1
+    
+        #if 'train' in self.filepath:
+        #    self.is_validation = False
+        #    print("Training dataset, path is: {}".format(self.filepath))
+        #else:
+        #    self.is_validation = True
+        #    print("Validation dataset, path is: {}".format(self.filepath))
 
-        self.add_refpres = add_refpres
+        # self.add_refpres = add_refpres
+        # batch_idx_expanded =  [0,1,2,3...ntime*1024]
 
         print("Number of locations {}; colums {}, time steps {}".format(self.nloc,self.ncol, self.ntimesteps), flush=True)
         # indices_all = list(np.arange(self.ntimesteps*self.nloc))
@@ -1209,6 +1269,7 @@ class generator_xy(torch.utils.data.Dataset):
                 
     def __getitem__(self, indices):
         # t0_it = time.time()
+        # print("inds ", indices[0:3], "...", indices[-1])
 
         if self.include_prev_inputs or self.include_prev_outputs:
             if indices[0]>0:
@@ -1218,6 +1279,7 @@ class generator_xy(torch.utils.data.Dataset):
                 raise NotImplementedError("First time index cannot be zero as it's used for memory")
                 # inds_prev = indices[0:-1]
                 # inds_prev.insert(0,inds_prev[0])
+        # print(indices, "|||||||||", inds_prev)
           
         if self.cache and self.cache_loaded: 
             x_lev_b = self.input_lev[indices,:]
@@ -1235,12 +1297,16 @@ class generator_xy(torch.utils.data.Dataset):
                 prev_inputs = prev_inputs[:,:,:,[0,1,2,3,4,5]]
         else:
             hdf = h5py.File(self.filepath, 'r')
+            # hdf = self.hdf
 
             x_lev_b = hdf['input_lev'][indices,:]
             x_sfc_b = hdf['input_sca'][indices,:]
             y_lev_b = hdf['output_lev'][indices,:]
             y_sfc_b = hdf['output_sca'][indices,:]
-
+            # x_lev_b = hdf['input_lev'][indices[0]:indices[-1]+1,:]
+            # x_sfc_b = hdf['input_sca'][indices[0]:indices[-1]+1,:]
+            # y_lev_b = hdf['output_lev'][indices[0]:indices[-1]+1,:]
+            # y_sfc_b = hdf['output_sca'][indices[0]:indices[-1]+1,:]
             if self.include_prev_outputs:
                 prev_outputs = hdf['output_lev'][inds_prev,:,:,:]
                 prev_outputs = prev_outputs[:,:,:,[0,1,2,3,4]]
@@ -1262,6 +1328,8 @@ class generator_xy(torch.utils.data.Dataset):
             x_lev_b = np.concatenate((x_lev_b, prev_outputs),axis=-1)
 
         if self.include_prev_inputs:
+            # if indices[0]==0:
+            #     prev_inputs = np.concatenate((np.zeros_like(prev_inputs[0:1]),prev_inputs),axis=0)
             x_lev_b = np.concatenate((x_lev_b, prev_inputs),axis=-1)
 
         if self.separate_timedim:
@@ -1269,7 +1337,9 @@ class generator_xy(torch.utils.data.Dataset):
             x_sfc_b.shape = (-1,self.nx_sfc)
             y_lev_b.shape = (-1,self.nlev, self.ny)
             y_sfc_b.shape = (-1,self.ny_sfc)
-                  
+                
+        #hdf.close()
+  
         if self.reverse_input_norm:
             if self.use_numba:
                 reverse_input_norm_numba(x_lev_b, self.xcoeff_lev_ref[0], self.xcoeff_lev_ref[1])
@@ -1291,26 +1361,29 @@ class generator_xy(torch.utils.data.Dataset):
         if self.rh_prune:
             x_lev_b[:,:,1] = np.clip(x_lev_b[:,:,1], 0.0, 1.2)
             
-        if self.rh_input_to_wv:
+        if self.rh_input_to_q:
             rh = x_lev_b[:,:,1]
             temp = x_lev_b[:,:,0]
             sp = x_sfc_b[:,0:1]
             pressure = (sp * (self.hybm.reshape(1,-1)) + 100000.0 * (self.hyam.reshape(1,-1)))
-            qwv = relative_to_specific_humidity(rh, temp, pressure)
-            x_lev_b[:,:,1] = qwv
+            qwv = np.float32(relative_to_specific_humidity(rh, temp, pressure))
+            if self.include_q_input:
+                x_lev_b = np.concatenate((x_lev_b, qwv.reshape(-1,60,1)),axis=2)
+            else:
+                x_lev_b[:,:,1] = qwv
             
+        # if self.add_refpres:
+        #     dim0,dim1,dim2 = x_lev_b.shape
+        #     # if self.norm=="minmax":
+        #     refpres_norm = self.refpres_norm.reshape((1,-1,1))
+        #     refpres_norm = np.repeat(refpres_norm, dim0,axis=0)
+        #     #self.x[:,:,nx-1] = refpres_norm
+        #     x_lev_b = np.concatenate((x_lev_b, refpres_norm),axis=2)
+        #     # self.x  = torch.cat((self.x,refpres_norm),dim=3)
+        #     del refpres_norm 
+
         # x_lev_b_denorm = np.copy(x_lev_b[:,:,0:8])
         x_lev_b_denorm = np.copy(x_lev_b)
-
-        if self.add_refpres:
-            dim0,dim1,dim2 = x_lev_b.shape
-            # if self.norm=="minmax":
-            refpres_norm = self.refpres_norm.reshape((1,-1,1))
-            refpres_norm = np.repeat(refpres_norm, dim0,axis=0)
-            #self.x[:,:,nx-1] = refpres_norm
-            x_lev_b = np.concatenate((x_lev_b, refpres_norm),axis=2)
-            # self.x  = torch.cat((self.x,refpres_norm),dim=3)
-            del refpres_norm 
             
         # elaps = time.time() - t0_it
         # print("Runtime refp {:.2f}s".format(elaps))
@@ -1319,6 +1392,7 @@ class generator_xy(torch.utils.data.Dataset):
         if self.v4_to_v5_inputs:
             # qn and liq_ratio instead of cloud water and ice mixing ratios
             #  old array has  T, rh, qliq, qice, X..,.
+            ##  new array has  T, rh, qn,   qice, liqratio, X ...
             #  new array has  T, rh, qn,   liqratio, X ...
             # print("doing v4 to v5")
             liq_frac_constrained = self.compute_liq_ratio(x_lev_b[:,:,0])
@@ -1371,21 +1445,38 @@ class generator_xy(torch.utils.data.Dataset):
             # x_sfc_b = (x_sfc_b - self.xcoeff_sca[0] ) / (self.xcoeff_sca[2] - self.xcoeff_sca[1])
             x_sfc_b = (x_sfc_b - self.xcoeff_sca[0] ) / (self.xcoeff_sca[1])
             # print("min max q", x_lev_b[:,:,1].min(), x_lev_b[:,:,1].max())
-            if self.rh_input_to_wv:
-                q = x_lev_b[:,:,1] 
-                q[q<0.0] = 0.0
-                x_lev_b[:,:,1] = q
-            
+            if self.rh_input_to_q:
+                if self.include_q_input:
+                    q = x_lev_b[:,:,-1] 
+                    q[q<0.0] = 0.0
+                    x_lev_b[:,:,-1] = q
+                else:     
+                    q = x_lev_b[:,:,1] 
+                    q[q<0.0] = 0.0
+                    x_lev_b[:,:,1] = q
+                
         # elaps = time.time() - t0_it
         # print("Runtime in norm {:.2f}s".format(elaps))
         
         # x_lev_b[np.isinf(x_lev_b)] = 0 
         x_lev_b[np.isnan(x_lev_b)] = 0
         
+        # for i in range(x_lev_b.shape[-1]):
+        #     print("after new scaling", i, "minmax x", x_lev_b[:,:,i].min(), x_lev_b[:,:,i].max())
+        #     # for j in range(60):
+        #     #     print("liq rat",  x_lev_b[0,j,3])
+        # for i in range(x_sfc_b.shape[-1]):
+        #     print("after new scaling", i, "minmax xsfc", x_sfc_b[:,i].min(), x_sfc_b[:,i].max())
+                    
         if self.reverse_output_norm:
             y_lev_b = y_lev_b / self.yscale_lev_ref
             y_sfc_b = y_sfc_b / self.yscale_sca_ref
             
+
+        # for i in range(6):
+        #     print("OO", i, "minmax y ", y_lev_b[:,:,i].min(), y_lev_b[:,:,i].max())
+        
+        # if not self.reverse_input_norm:    
         y_lev_b_denorm = np.copy(y_lev_b)
         y_sfc_b_denorm = np.copy(y_sfc_b)
         
@@ -1395,6 +1486,11 @@ class generator_xy(torch.utils.data.Dataset):
             y_lev_b[:,:,2] = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
             y_lev_b = np.delete(y_lev_b, 3, axis=2) 
         elif self.pred_liq_ratio:
+            # total = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
+            # liq_frac = y_lev_b[:,:,2] / total 
+            # liq_frac[np.isinf(liq_ratio)] = 0 
+            # liq_frac[np.isnan(liq_ratio)] = 0
+            # # print("liq ratio", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
             T_before     = x_lev_b_denorm[:,:,0]
             qliq_before     = x_lev_b_denorm[:,:,2]
             qice_before     = x_lev_b_denorm[:,:,3]   
@@ -1418,8 +1514,16 @@ class generator_xy(torch.utils.data.Dataset):
             liq_frac[liq_frac>1.0] = 1.0
 
             liq_frac[inds] = qliq_new[inds] / qn_new[inds]
+            
+            # qn_new = np.clip(qn_new, 1.0e-7, 0.5 )
+            # liq_frac = qliq_new / qn_new
+            # liq_frac[np.isinf(liq_frac)] = 0 
+            # liq_frac[np.isnan(liq_frac)] = 0
+            # print("0 liq frac", liq_frac[100])
+      
             liq_frac[liq_frac<0.0] = 0.0
             liq_frac[liq_frac>1.0] = 1.0
+            # print("1 liq frac", liq_frac[100])
 
             # #                            dqn
             # qliq_neww    = liq_frac*qn_new
@@ -1436,6 +1540,8 @@ class generator_xy(torch.utils.data.Dataset):
             y_lev_b[:,:,2] = dqn
             y_lev_b[:,:,3] = liq_frac 
 
+        # for i in range(5):
+        #     print("OOO", i, "minmax y ", y_lev_b[:,50,i].min(), y_lev_b[:,50,i].max())
         if self.use_numba:
             if self.output_sqrt_norm:
                 apply_output_norm_numba_sqrt(y_lev_b, self.yscale_lev)
@@ -1445,6 +1551,10 @@ class generator_xy(torch.utils.data.Dataset):
             y_lev_b  = y_lev_b * self.yscale_lev
             if self.output_sqrt_norm:
                 raise NotImplementedError()
+        # print("after min max mean liq frac", y_lev_b[100,:,3].min(), y_lev_b[100,:,3].max(),y_lev_b[100,:,3])
+
+        # for ivar in range(6):
+        #     print(ivar, y_lev_b[:,:,ivar].min(), y_lev_b[:,:,ivar].max(), y_lev_b[:,:,ivar].std())
 
         if self.output_prune:
             y_lev_b[:,0:12,1:] = 0.0
@@ -1459,6 +1569,7 @@ class generator_xy(torch.utils.data.Dataset):
         y_lev_b_denorm = torch.from_numpy(y_lev_b_denorm)
         y_sfc_b_denorm = torch.from_numpy(y_sfc_b_denorm)
 
+        # print("gen x_lev shape", x_lev_b.shape)
         gc.collect()
 
         return x_lev_b, x_sfc_b, y_lev_b, y_sfc_b, x_lev_b_denorm, y_lev_b_denorm, y_sfc_b_denorm

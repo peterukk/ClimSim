@@ -218,13 +218,14 @@ def main(cfg: DictConfig):
     if cfg.include_prev_inputs:
         nx = nx + 6 
 
+    if cfg.include_q_input:
+        nx = nx + 1 
+        cfg.rh_input_to_q = True 
+
     if cfg.include_prev_inputs or cfg.include_prev_outputs:
         skip_first_index=True 
     else:
         skip_first_index=False
-
-    if cfg.add_refpres:
-        nx = nx + 1
 
     # if cfg.use_surface_memory:
     #     nx_sfc = nx_sfc + 2
@@ -245,6 +246,9 @@ def main(cfg: DictConfig):
     print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
 
     yscale_sca = output_scale[vars_1D_outp].to_dataarray(dim='features', name='outputs_sca').transpose().values
+    print("yscale sca", yscale_sca)
+    
+    loss_weights=None 
 
     if cfg.output_norm_per_level:
         yscale_lev = output_scale[vars_2D_outp].to_dataarray(dim='features', name='outputs_lev').transpose().values
@@ -272,19 +276,21 @@ def main(cfg: DictConfig):
             raise NotImplementedError()
             
         if cfg.physical_precip:
-            scaleval = 1.0e8
             # scaleval = 1.0
-            scalelev = scaleval*np.ones((nlev),dtype=np.float32)
-            yscale_lev[:,1] = scalelev
-            yscale_lev[:,2] = scalelev
-            # if cfg.mp_mode == 1: 
-            #   yscale_lev[:,3] = scalelev
+            # scaleval = 1.0e8
+            scaleval = 1.58e8
+            # scalelev = scaleval*np.ones((nlev),dtype=np.float32)
+            # yscale_lev[:,1] = scalelev
+            # yscale_lev[:,2] = scalelev
 
+            yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval, scaleval, 1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            loss_weights =  yscale_lev / yscale_lev_new
+            yscale_lev = yscale_lev_new
             yscale_sca[2:4] = scaleval
             # print("scale lev 3", yscale_lev[:,3])
             if cfg.mp_mode == 0:
                 raise NotImplementedError()
-            print("yscale lev 3", yscale_lev[:,3])
+            # print("yscale lev 3", yscale_lev[:,3])
 
 
     if cfg.input_norm_per_level:
@@ -300,12 +306,17 @@ def main(cfg: DictConfig):
             from norm_coefficients import cldliq_sqrt_max_lev, cldice_sqrt_max_lev
             xmax_lev[:,2] = cldliq_sqrt_max_lev 
             xmax_lev[:,3] = cldice_sqrt_max_lev 
-        if cfg.rh_input_to_wv:
+        if cfg.rh_input_to_q:
             from norm_coefficients import q_min_lev, q_max_lev, q_mean_lev
-            xmin_lev[:,1] = q_min_lev 
-            xmax_lev[:,1] = q_max_lev 
-            # xmean_lev[:,1] = q_mean_lev 
-            xmean_lev[:,1] = np.zeros((60), dtype=np.float32)
+            if cfg.include_q_input:
+                xmax_lev = np.concatenate((xmax_lev, q_max_lev.reshape((1,-1))),axis=1)
+                xmin_lev = np.concatenate((xmin_lev, q_min_lev.reshape((1,-1))),axis=1)
+                xmean_lev = np.concatenate((xmean_lev,  np.zeros((1,60), dtype=np.float32)),axis=1)
+            else:
+                xmin_lev[:,1] = q_min_lev 
+                xmax_lev[:,1] = q_max_lev 
+                # xmean_lev[:,1] = q_mean_lev 
+                xmean_lev[:,1] = np.zeros((60), dtype=np.float32)
 
     else:
         from norm_coefficients import lbd_qc_mean, lbd_qi_mean, lbd_qn_mean
@@ -327,36 +338,44 @@ def main(cfg: DictConfig):
                     7.8239331e+00,  4.0367767e-02,  1.8644631e-06,  2.8351113e-09,
                     -6.8700395e-08,  1.8643551e-06,  2.8350911e-09, -6.9796215e-08,
                     1.9556560e-06,  8.2271487e-07,  3.8844493e-07], dtype=np.float32).reshape((1,-1))
-        
-        if cfg.rh_input_to_wv:
-            xmax_lev[0,1] = 0.025; xmin_lev[0,1] = 3.0e-8
-            # xmean_lev[0,1] = 0.0
-            xmean_lev[0,1] = 0.0025
 
         if cfg.cld_inp_transformation=="sqrt": 
             xmax_lev[0,2:4] = np.array([0.0007122298, 0.000688873])
             xmin_lev[0,2:4] = np.array([0.0,0.0])
             xmean_lev[0,2:4] = np.array([0.020437788,0.017036619])
 
+        if cfg.include_prev_outputs:
+            xmax_prevout = np.array([1.6314061e-03, 8.9240649e-07, 2.0485280e-07, 4.7505119e-07,
+                   1.1354494e-03], dtype=np.float32).reshape((1,-1))
+            
+            xmin_prevout = np.array([-1.3457362e-03, -9.0609535e-07, -1.1949140e-07, -2.0962088e-07,
+                   -1.3081296e-03], dtype=np.float32).reshape((1,-1))
+            # xmean_lev_prevout = np.zeros((5), dtype=np.float32).reshape((1,-1))
+            xmean_prevout = np.array([-1.7993794e-06, -2.8229272e-09,  7.1136300e-12, -9.3221915e-13, 3.6559445e-07], dtype=np.float32).reshape((1,-1))
+
+            xmax_lev = np.concatenate((xmax_lev, xmax_prevout),axis=1)
+            xmin_lev = np.concatenate((xmin_lev, xmin_prevout),axis=1)
+            xmean_lev = np.concatenate((xmean_lev, xmean_prevout),axis=1)
+
+        if cfg.rh_input_to_q:
+            q_max = np.array([0.025], dtype=np.float32).reshape((1,-1)) 
+            q_min = np.array([3.0e-8], dtype=np.float32).reshape((1,-1)) 
+            # q_mean = 0.0  np.array([0.0], dtype=np.float32).reshape((1,-1)) 
+            q_mean = np.array([0.0025], dtype=np.float32).reshape((1,-1)) 
+            if cfg.include_q_input:
+                xmax_lev = np.concatenate((xmax_lev, q_max),axis=1)
+                xmin_lev = np.concatenate((xmin_lev, q_min),axis=1)
+                xmean_lev = np.concatenate((xmean_lev, q_mean),axis=1)
+            else:
+                xmax_lev[0,1] = q_max; xmin_lev[0,1] = q_min
+                # xmean_lev[0,1] = 0.0
+                xmean_lev[0,1] = q_mean
+
+
         xmin_lev = np.repeat(xmin_lev,nlev,axis=0)
         xmax_lev = np.repeat(xmax_lev,nlev,axis=0)
         xmean_lev = np.repeat(xmean_lev, nlev,axis=0)
 
-        if cfg.include_prev_outputs:
-            xmax_lev_prevout = np.repeat(np.array([1.6314061e-03, 8.9240649e-07, 2.0485280e-07, 4.7505119e-07,
-                   1.1354494e-03], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            
-            xmin_lev_prevout = np.repeat(np.array([-1.3457362e-03, -9.0609535e-07, -1.1949140e-07, -2.0962088e-07,
-                   -1.3081296e-03], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            # xmean_lev_prevout = np.repeat(np.zeros((5), dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            xmean_lev_prevout =  np.repeat(np.array([-1.7993794e-06, -2.8229272e-09,  7.1136300e-12, -9.3221915e-13, 
-                                          3.6559445e-07], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-
-            xmax_lev = np.concatenate((xmax_lev, xmax_lev_prevout),axis=1)
-            xmin_lev = np.concatenate((xmin_lev, xmin_lev_prevout),axis=1)
-            xmean_lev = np.concatenate((xmean_lev, xmean_lev_prevout),axis=1)
-
-    weights=None 
     
     ycoeffs = (yscale_lev, yscale_sca)
     print("Y coeff shapes:", yscale_lev.shape, yscale_sca.shape)
@@ -377,11 +396,7 @@ def main(cfg: DictConfig):
     if cfg.include_prev_inputs:
         xmean_lev = np.concatenate((xmean_lev, xmean_lev[:,0:6]), axis=1)
         xdiv_lev =  np.concatenate((xdiv_lev, xdiv_lev[:,0:6]), axis=1)
-                 
-    if cfg.add_refpres:
-        xmean_lev = np.concatenate((xmean_lev, np.zeros(nlev).reshape(nlev,1)), axis=1)
-        xdiv_lev =  np.concatenate((xdiv_lev, np.ones(nlev).reshape(nlev,1)), axis=1)
-            
+                   
     xmean_sca = input_mean[vars_1D_inp].to_dataarray(dim='features', name='inputs_sca').transpose().values
     xmax_sca = input_max[vars_1D_inp].to_dataarray(dim='features', name='inputs_sca').transpose().values
     xmin_sca = input_min[vars_1D_inp].to_dataarray(dim='features', name='inputs_sca').transpose().values
@@ -411,7 +426,7 @@ def main(cfg: DictConfig):
     xcoeff_sca = np.stack((xmean_sca, xdiv_sca))
     xcoeff_lev = np.stack((xmean_lev, xdiv_lev))
     xcoeffs = np.float32(xcoeff_lev), np.float32(xcoeff_sca)
-
+    loss_weights = torch.from_numpy(loss_weights).to(device, torch.float32)
     # ------------------------------------------------------------------------------------------------
 
     
@@ -659,10 +674,10 @@ def main(cfg: DictConfig):
 
     # To improve IO, which is a bottleneck, increase the batch size by a factor of chunk_factor and load this many
     # batches at once. These chk then need to be manually split into batches within the data iteration loop  
-    train_data = generator_xy(tr_data_path, cache = cfg.cache, nloc = nloc, add_refpres = cfg.add_refpres, 
+    train_data = generator_xy(tr_data_path, cache = cfg.cache, nloc = nloc,
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune,  
-                    rh_input_to_wv=cfg.rh_input_to_wv, 
+                    rh_input_to_q=cfg.rh_input_to_q,  include_q_input=cfg.include_q_input,
                     hyam=hyam,hybm=hybm,
                     lbd_qc=lbd_qc, lbd_qi=lbd_qi, lbd_qn=lbd_qn,
                     cld_inp_transformation=cfg.cld_inp_transformation,
@@ -683,10 +698,10 @@ def main(cfg: DictConfig):
                               pin_memory=pin, persistent_workers=persistent)
     
 
-    val_data = generator_xy(val_data_path, cache=cfg.val_cache, add_refpres = cfg.add_refpres, 
+    val_data = generator_xy(val_data_path, cache=cfg.val_cache, 
                     remove_past_sfc_inputs = cfg.remove_past_sfc_inputs, mp_mode = cfg.mp_mode,
                     v4_to_v5_inputs = cfg.v4_to_v5_inputs, rh_prune = cfg.rh_prune, 
-                    rh_input_to_wv=cfg.rh_input_to_wv, 
+                    rh_input_to_q=cfg.rh_input_to_q, include_q_input=cfg.include_q_input,
                     hyam=hyam,hybm=hybm,
                     lbd_qc=lbd_qc, lbd_qi=lbd_qi, lbd_qn=lbd_qn,
                     cld_inp_transformation=cfg.cld_inp_transformation,
@@ -719,9 +734,11 @@ def main(cfg: DictConfig):
 
     metric_h_con = metrics.get_energy_metric(hyai, hybi)
     metric_water_con = metrics.get_water_conservation(hyai, hybi)
+
+    metric_rh = metrics.get_rh_loss(hyam,hybm)
     
     # mse = metrics.get_mse_flatten(weights)
-    metrics_det = metrics.get_metrics_flatten(weights)
+    metrics_det = metrics.get_metrics_flatten(loss_weights)
     
     if cfg.loss_fn_type == "mse":
         loss_fn = metrics_det
@@ -816,9 +833,9 @@ def main(cfg: DictConfig):
         )       
     
     train_runner = train_or_eval_one_epoch(train_loader, model, device, dtype, cfg, metrics_det, 
-                                           metric_h_con, metric_water_con, batch_size_tr,  train=True, model_is_stochastic=is_stochastic)
+                                           metric_h_con, metric_water_con, metric_rh, batch_size_tr,  train=True, model_is_stochastic=is_stochastic)
     val_runner = train_or_eval_one_epoch(val_loader, model, device, dtype, cfg, metrics_det,
-                                           metric_h_con, metric_water_con, batch_size_val, train=False, model_is_stochastic=is_stochastic)
+                                           metric_h_con, metric_water_con, metric_rh, batch_size_val, train=False, model_is_stochastic=is_stochastic)
     
     # Strings for saving model 
     inpstr = "v5" if cfg.v4_to_v5_inputs else "v4"
@@ -898,6 +915,8 @@ def main(cfg: DictConfig):
             if (np.isnan(logged_metrics['train_loss']) or (logged_metrics['train_R2'] < 0.0)):
                 if prev_nan:
                     sys.exit("Loss was NaN or R-squared was below 0 two epochs in a row - something's wrong, stopping training") 
+                else:
+                    print("WARNING: Loss was NaN or R-squared was below 0")
                 prev_nan = True 
             else:
                 prev_nan = False 
@@ -929,6 +948,7 @@ def main(cfg: DictConfig):
             # val_loss = val_runner.metrics["R2"]
 
             # MODEL CHECKPOINT IF VALIDATION LOSS IMPROVED
+            labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
             # if True:
             if cfg.save_model and val_loss < best_val_loss:
             # if cfg.save_model and val_loss > best_val_loss:
@@ -960,7 +980,6 @@ def main(cfg: DictConfig):
                 print("model saved!")
 
                 R2 = val_runner.metrics["R2_lev"]
-                labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
                 ncols, nrows = 3,2
                 fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(9.5, 4.5),
                                         layout="constrained")

@@ -38,7 +38,8 @@ input_norm_per_level: true
 output_norm_per_level: true
 new_nolev_scaling: false
 cld_inp_transformation: "exp"
-rh_input_to_wv: false
+rh_input_to_q: false
+include_q_input: false
 output_prune: true
 qinput_prune: true
 rh_prune: true
@@ -63,6 +64,10 @@ use_energy_loss: true
 w_hcon: 6.0e-06
 use_water_loss: true
 w_wcon: 6.0e7
+use_rh_loss: false 
+w_rh: 0.5
+use_cloudpath_loss: false 
+w_cld: 1.0e8
 use_bias_loss: false
 w_bias: 1.0e5
 use_precip_accum_loss: false 
