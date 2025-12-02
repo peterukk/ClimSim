@@ -25,7 +25,8 @@ Actual per-epoch training code is in train_or_eval_one_epoch in utils.py
 """
 import matplotlib
 import matplotlib.pyplot as plt
-matplotlib.use('TkAgg')
+# matplotlib.use('TkAgg')
+matplotlib.use('Agg')
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import sys
@@ -87,9 +88,10 @@ def main(cfg: DictConfig):
     
     # SELECT OUTPUTS / MICROPHYSICS CONSTRAINT
     # mp_mode = 0   # regular 6 outputs
-    # mp_mode = 1   # 5 outputs, predict qn, liq_ratio DIAGNOSED from temperature (mp_constraint) (Hu et al.)
-    # mp_mode = -1  # 6 outputs, predict qn + liq_ratio PREDICTED
-    # physical_precip: attempt to incorporate some physics in the way precip is predicted (see models.py)
+    # mp_mode = 1   # 5 outputs, predict qn, liq_frac DIAGNOSED from temperature (mp_constraint) (Hu et al.)
+    # mp_mode = -1  # 6 outputs, predict qn + liq_frac 
+    # mp_mode = -2  # 6 outputs, predict qn + liq_frac (fraction of cloud that is liquid) + cld_water_frac (fraction of total water that is cloud)
+    # physical_precip: attempt to incorporate mass conservation via predicting fluxes and microphysical tendencies, diagnose precipitation  (see models.py)
     if cfg.physical_precip and cfg.mp_mode==0:
       raise NotImplementedError("Physical_precip=true as it not compatible with mp_mode=0 as it requires qn")
 
@@ -238,10 +240,10 @@ def main(cfg: DictConfig):
         ny_pp = ny 
         
     if cfg.mp_mode<0:
-        predict_liq_ratio=True
+        predict_liq_frac=True
         print("mp mode was <0, we are PREDICTING liquid fraction")
     else:
-        predict_liq_ratio=False
+        predict_liq_frac=False
 
     print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
 
@@ -262,15 +264,17 @@ def main(cfg: DictConfig):
         if cfg.mp_mode==1:  #  ['ptend_t', 'ptend_q0001', 'ptend_qn', 'ptend_u', 'ptend_v']
             yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.58085550e+08, 5.00182069e+04,
                     6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        elif cfg.mp_mode==0: #  ['ptend_t', 'ptend_q0001', 'ptend_q0002', 'ptend_q0003', 'ptend_u', 'ptend_v']
+        elif cfg.mp_mode==0 : #  ['ptend_t', 'ptend_q0001', 'ptend_q0002', 'ptend_q0003', 'ptend_u', 'ptend_v']
             yscale_lev = np.repeat(np.array([1.87819239e+04, 3.25021485e+07, 1.91623978e+08, 3.23919949e+08, 
                 5.00182069e+04, 6.21923225e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-        elif cfg.mp_mode==-1: #                ['dt',     'dqv',       'dqn',      'liqfrac', 'du',      'dv']
-            # yscale_lev = np.repeat(np.array([1.87819e+04, 3.25021e+07, 1.58085e+08, 2.3,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            yscale_lev = np.repeat(np.array([1.87819e+04, 3.25021e+07, 1.58085e+08, 1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-
+        elif cfg.mp_mode==-1: #                ['dt',     'dqv',       'dqn',         'liqratio', 'du',         'dv']
+            # yscale_lev = np.repeat(np.array([1.87819e+04, 3.25021e+07, 1.58085e+08,  2.3,      5.00182e+04,   6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            yscale_lev = np.repeat(np.array([1.87819e+04, 3.25021e+07, 1.58085e+08,    1.0,      5.00182e+04,   6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+        elif cfg.mp_mode==-2: #                ['dt',     'dqtot',       'cloud_frac',      'liqratio', 'du',         'dv']
+            yscale_lev = np.repeat(np.array([1.87819e+04, 3.25021e+07,    5.914,              1.0,       5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
         else:
             raise NotImplementedError()
+
 
         if cfg.input_norm_per_level:
             raise NotImplementedError()
@@ -283,7 +287,12 @@ def main(cfg: DictConfig):
             # yscale_lev[:,1] = scalelev
             # yscale_lev[:,2] = scalelev
 
-            yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval, scaleval, 1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            if cfg.mp_mode==-1:
+                yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval, scaleval, 1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            elif cfg.mp_mode==-2:
+                yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval,  5.914,   1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            else:
+                raise NotImplementedError()
             loss_weights =  yscale_lev / yscale_lev_new
             yscale_lev = yscale_lev_new
             yscale_sca[2:4] = scaleval
@@ -467,11 +476,12 @@ def main(cfg: DictConfig):
                         add_stochastic_layer = cfg.add_stochastic_layer, 
                         output_prune = cfg.output_prune,
                         # repeat_mu = cfg.repeat_mu,
+                        mp_mode = cfg.mp_mode,
                         separate_radiation = cfg.separate_radiation,
                         physical_precip = cfg.physical_precip,
                         # diagnose_precip = diagnose_precip,
                         # diagnose_precip_v2 = diagnose_precip_v2,
-                        predict_liq_ratio=predict_liq_ratio,
+                        predict_liq_frac=predict_liq_frac,
                         randomly_initialize_cellstate=cfg.randomly_initialize_cellstate,
                         output_sqrt_norm=cfg.new_nolev_scaling,
                         use_third_rnn = use_third_rnn,
@@ -865,7 +875,7 @@ def main(cfg: DictConfig):
             lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch']
         print("LOADED FROM MODEL CHECKPOINT SUCCESSFULLY")
-        
+
     prev_nan = False
     # --------------------------------------------------------------------------------------------------------
     # ----------------------------------------- START TRAINING -----------------------------------------------
@@ -994,7 +1004,7 @@ def main(cfg: DictConfig):
                         j = j + 1
                     
                 fig.subplots_adjust(hspace=0)
-                plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_R2.pdf')
+                plt.savefig('val_eval/' + MODEL_STR + 'val_R2.pdf')
 
             plt.clf()
             rmse = val_runner.metrics["rmse_perlev"]
@@ -1006,7 +1016,7 @@ def main(cfg: DictConfig):
                 axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
 
             fig.subplots_adjust(hspace=0.6)                                                     
-            plt.savefig('saved_models/val_eval/' + MODEL_STR + 'val_rmse.pdf')
+            plt.savefig('val_eval/' + MODEL_STR + 'val_rmse.pdf')
             
             if batch_size_val==384:
                 dt_diff = val_runner.epoch_bias_collev[:,:,0]
@@ -1020,7 +1030,7 @@ def main(cfg: DictConfig):
                 lat = grid_info.lat
                 grid_area =  grid_info.area
                 fig = plot_bias_diff(vars_stacked, grid_area, lat, level)
-                fig.savefig('saved_models/val_eval/' + MODEL_STR + 'val_zonalmeanbias.png')
+                fig.savefig('val_eval/' + MODEL_STR + 'val_zonalmeanbias.png')
 
 
         print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timesteps))

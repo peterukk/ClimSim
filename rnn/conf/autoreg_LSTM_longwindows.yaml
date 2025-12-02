@@ -72,6 +72,10 @@ use_bias_loss: false
 w_bias: 1.0e5
 use_precip_accum_loss: false 
 w_precmse: 1.66e12
+use_qv_positivity_loss: false 
+w_qvpos: 1e-3
+use_qn_positivity_loss: false 
+w_qnpos: 1e-3
 use_precip_gel_loss: false 
 w_precgel: 0.001
 gel_lambda_prec: 20.0

@@ -277,9 +277,10 @@ def get_water_conservation(hyai, hybi):
         # dp_water3 = torch.sum(thick*(pred_lev[:,:,3]),1)
         # print("vint1", dp_water1[ind].item(), "vint2", dp_water2[ind].item(), "vint3", dp_water3[ind])
 
+        # print("mean lhs", torch.mean(lhs).item(), "rhs", torch.mean(rhs).item(), "diff", torch.mean(diff))
+
         # print("mean max lhs", torch.mean(lhs).item(), torch.max(lhs).item(), "mean max rhs", torch.mean(rhs).item(),torch.max(rhs))
         # print("mean min max diff", torch.mean(diff).item(), torch.min(diff).item(), torch.max(diff))
-        # print("mean lhs", torch.mean(lhs).item(), "rhs", torch.mean(rhs).item(), "diff", torch.mean(diff))
         # print("t", timesteps, "max diff", torch.max(diff), torch.min(diff))
 
 
@@ -446,14 +447,16 @@ def get_rh_loss(hyam, hybm):
         # rh_new2      = specific_to_relative_humidity_torch(qv_new, T_new, pres)
         # rh_new_pred2 = specific_to_relative_humidity_torch(qv_new_pred, T_new_pred, pres)
 
-
+        # print("min max mean dqv new-true", torch.min(true_lev[:,:,1:2]*1200).item(),  torch.max(true_lev[:,:,1:2]*1200).item(), torch.mean(true_lev[:,:,1:2]*1200).item())
+        # print("min max mean dqv new-pred", torch.min(pred_lev[:,:,1:2]*1200).item(),  torch.max(pred_lev[:,:,1:2]*1200).item(), torch.mean(pred_lev[:,:,1:2]*1200).item())
+        # # print("min max mean qv old", torch.min(qv_before).item(),  torch.max(qv_before).item(), torch.mean(qv_before).item())
         # print("min max mean qv new-true", torch.min(qv_new).item(),  torch.max(qv_new).item(), torch.mean(qv_new).item())
         # print("min max mean qv new-pred", torch.min(qv_new_pred).item(),  torch.max(qv_new_pred).item(), torch.mean(qv_new_pred).item())
 
         # qliq_before       = x_denorm[:,:,2:3]
         # qliq_new          = qliq_before +  true_lev[:,:,2:3]*1200
         # qliq_new_pred     = qliq_before +  pred_lev[:,:,2:3]*1200
-
+        # # print("min max mean qliq old", torch.min(qliq_before).item(),  torch.max(qliq_before).item(), torch.mean(qliq_before).item())
         # print("min max mean qliq new-true", torch.min(qliq_new).item(),  torch.max(qliq_new).item(), torch.mean(qliq_new).item())
         # print("min max mean qliq new-pred", torch.min(qliq_new_pred).item(),  torch.max(qliq_new_pred).item(), torch.mean(qliq_new_pred).item())
 
