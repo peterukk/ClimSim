@@ -554,19 +554,19 @@ class train_or_eval_one_epoch:
                             # losses.append(self.cfg.w_wcon * wcon)
                             losses.append(self.cfg.w_wcon * wcon_long)
 
-                        if self.cfg.use_rh_loss:
+                        if self.cfg.use_rh_loss and self.cfg.include_q_input:
                             losses.append(self.cfg.w_rh * rh_mse)
 
                         if self.cfg.use_cloudpath_loss:
                             losses.append(self.cfg.w_cld * cloudpath_err)
 
-                        if self.cfg.use_qv_positivity_loss:
+                        if self.cfg.use_qv_positivity_loss and self.model.physical_precip:
                             losses.append(self.cfg.w_qvpos * qv_pos_loss)
 
-                        if self.cfg.use_qn_positivity_loss and self.cfg.mp_mode!=-2:
+                        if self.cfg.use_qn_positivity_loss and self.cfg.mp_mode!=-2 and self.model.physical_precip:
                             losses.append(self.cfg.w_qnpos * qn_pos_loss)
 
-                        if self.cfg.use_neg_precip_loss:
+                        if self.cfg.use_neg_precip_loss and self.model.physical_precip:
                             losses.append(self.cfg.w_precip_neg * precip_neg_mse)
 
                         if self.model_is_stochastic and self.cfg.use_det_loss:
@@ -594,11 +594,14 @@ class train_or_eval_one_epoch:
                     h_con = h_con.detach() 
                     wcon = wcon.detach()
                     wcon_long = wcon_long.detach()
-                    rh_mse = rh_mse.detach()
+                    if self.cfg.include_q_input: 
+                        rh_mse = rh_mse.detach()
                     cloudpath_err = cloudpath_err.detach()
                     # if self.cfg.use_water_positivity_loss and self.cfg.mp_mode!=-2:
-                    qv_pos_loss = qv_pos_loss.detach()
-                    if self.cfg.mp_mode != -2: qn_pos_loss = qn_pos_loss.detach()
+                    if self.model.physical_precip: 
+                        qv_pos_loss = qv_pos_loss.detach()
+                        if self.cfg.mp_mode != -2: 
+                            qn_pos_loss = qn_pos_loss.detach()
                     precip_sum_mse = precip_sum_mse.detach()
                     precip_sum_gel = precip_sum_gel.detach()
 
@@ -624,9 +627,10 @@ class train_or_eval_one_epoch:
                     running_cldpath += cloudpath_err.item()
                     running_bias    += bias_tot.item() 
                     running_precip  += precip_sum_mse.item()
-                    running_qv_pos  += qv_pos_loss.item()
-                    if self.cfg.mp_mode != -2: 
-                      running_qn_pos  += qn_pos_loss.item()
+                    if self.model.physical_precip:
+                        running_qv_pos  += qv_pos_loss.item()
+                        if self.cfg.mp_mode != -2: 
+                            running_qn_pos  += qn_pos_loss.item()
 
                     if self.model_is_stochastic: 
                         running_var += ens_var.item() 
@@ -650,11 +654,13 @@ class train_or_eval_one_epoch:
                             epoch_hcon  += h_con.item()
                             epoch_wcon  += wcon.item()
                             epoch_wcon_long += wcon_long.item()
-                            epoch_rh_mse  += rh_mse.item()
+                            if self.cfg.include_q_input:
+                                epoch_rh_mse  += rh_mse.item()
                             epoch_accumprec += precip_sum_mse.item()
-                            epoch_qv_pos += qv_pos_loss.item()
-                            if self.cfg.mp_mode != -2:
-                              epoch_qn_pos += qn_pos_loss.item()
+                            if self.model.physical_precip:
+                                epoch_qv_pos += qv_pos_loss.item()
+                                if self.cfg.mp_mode != -2:
+                                    epoch_qn_pos += qn_pos_loss.item()
 
                             if self.model_is_stochastic:
                                 epoch_ens_var += ens_var.item()
@@ -751,11 +757,13 @@ class train_or_eval_one_epoch:
                     running_energy = running_energy / fac
                     running_water = running_water / fac
                     running_cldpath = running_cldpath / fac
-                    running_qv_pos = running_qv_pos / fac
-                    running_qn_pos = running_qn_pos / fac
+                    if self.model.physical_precip:
+                        running_qv_pos = running_qv_pos / fac
+                        running_qn_pos = running_qn_pos / fac
                     running_bias = running_bias / fac
                     running_precip = running_precip / fac
-                    running_rh_mse = running_rh_mse / fac
+                    if self.cfg.include_q_input:
+                        running_rh_mse = running_rh_mse / fac
                     running_wcon = running_wcon/fac
                     running_wcon_true = running_wcon_true/fac
 

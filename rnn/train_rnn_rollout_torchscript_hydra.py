@@ -245,6 +245,11 @@ def main(cfg: DictConfig):
     else:
         predict_liq_frac=False
 
+    if cfg.use_rh_loss:
+        if not cfg.include_q_input:
+            print("use_rh_loss was on, need q input, setting include_q_input to true")
+            cfg.include_q_input = True 
+
     print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
 
     yscale_sca = output_scale[vars_1D_outp].to_dataarray(dim='features', name='outputs_sca').transpose().values
@@ -435,7 +440,8 @@ def main(cfg: DictConfig):
     xcoeff_sca = np.stack((xmean_sca, xdiv_sca))
     xcoeff_lev = np.stack((xmean_lev, xdiv_lev))
     xcoeffs = np.float32(xcoeff_lev), np.float32(xcoeff_sca)
-    loss_weights = torch.from_numpy(loss_weights).to(device, torch.float32)
+    if loss_weights is not None:
+        loss_weights = torch.from_numpy(loss_weights).to(device, torch.float32)
     # ------------------------------------------------------------------------------------------------
 
     
@@ -451,14 +457,12 @@ def main(cfg: DictConfig):
     # ---------------------------------------- SELECT MODEL  -----------------------------------------
 
     print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
-    if len(cfg.nneur)==3:
-      use_third_rnn = True 
-    elif len(cfg.nneur)==2:
-      use_third_rnn = False 
-    else: 
-      raise NotImplementedError()
 
-    if cfg.model_type=="LSTM":
+    if cfg.model_type in ["LSTM","GRU"]:
+        if cfg.model_type=="LSTM":
+            use_lstm=True 
+        else:
+            use_lstm=False 
         if cfg.autoregressive:
             model = LSTM_autoreg_torchscript(hyam,hybm,hyai,hybi,
                         out_scale = yscale_lev,
@@ -470,6 +474,7 @@ def main(cfg: DictConfig):
                         nx = nx, nx_sfc=nx_sfc, 
                         ny = ny, ny_sfc=ny_sfc, 
                         nneur=cfg.nneur, 
+                        use_lstm = use_lstm, 
                         use_initial_mlp = cfg.use_initial_mlp,
                         use_intermediate_mlp = cfg.use_intermediate_mlp,
                         add_pres = cfg.add_pres,
@@ -479,15 +484,11 @@ def main(cfg: DictConfig):
                         mp_mode = cfg.mp_mode,
                         separate_radiation = cfg.separate_radiation,
                         physical_precip = cfg.physical_precip,
-                        # diagnose_precip = diagnose_precip,
-                        # diagnose_precip_v2 = diagnose_precip_v2,
                         predict_liq_frac=predict_liq_frac,
                         randomly_initialize_cellstate=cfg.randomly_initialize_cellstate,
                         output_sqrt_norm=cfg.new_nolev_scaling,
-                        use_third_rnn = use_third_rnn,
                         concat = cfg.concat,
-                        nh_mem = cfg.nh_mem)#,
-                        #ensemble_size = ensemble_size)
+                        nh_mem = cfg.nh_mem)
         else:
             model = LSTM_torchscript(hyam,hybm,hyai,hybi,
                         out_scale = yscale_lev,
@@ -597,7 +598,6 @@ def main(cfg: DictConfig):
                     add_pres = cfg.add_pres,
                     add_stochastic_layer = cfg.add_stochastic_layer, 
                     output_prune = cfg.output_prune,
-                    use_third_rnn = use_third_rnn,
                     concat = cfg.concat,
                     nh_mem = cfg.nh_mem,
                     mp_mode = cfg.mp_mode)
@@ -618,28 +618,6 @@ def main(cfg: DictConfig):
                     use_memory = cfg.autoregressive,
                     nh_mem = cfg.nh_mem,
                     mp_mode = cfg.mp_mode)
-    elif cfg.model_type=="LSTM_sepmp":
-        model = LSTM_autoreg_torchscript_mp(hyam,hybm,hyai,hybi,
-                        out_scale = yscale_lev,
-                        out_sfc_scale = yscale_sca, 
-                        xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                        xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                        device=device,
-                        nx = nx, nx_sfc=nx_sfc, 
-                        ny = ny, ny_sfc=ny_sfc, 
-                        nneur=cfg.nneur, 
-                        use_initial_mlp = cfg.use_initial_mlp,
-                        use_intermediate_mlp = cfg.use_intermediate_mlp,
-                        add_pres = cfg.add_pres,
-                        add_stochastic_layer = cfg.add_stochastic_layer, 
-                        output_prune = cfg.output_prune,
-                        use_memory = cfg.autoregressive,
-                        # separate_radiation = cfg.separate_radiation,
-                        # diagnose_precip = diagnose_precip,
-                        # use_third_rnn = use_third_rnn,
-                        concat = cfg.concat,
-                        nh_mem = cfg.nh_mem)#,
-                        #ensemble_size = ensemble_size)               
     else:
       print("using SSM")
       model = SpaceStateModel_autoreg(hyam,hybm,hyai,hybi,

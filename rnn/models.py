@@ -276,7 +276,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.nh_mem0 = self.nh_mem - 1 
         else:
             self.nh_mem0 = self.nh_mem
-        if self.include_evap:
+        if self.include_evap and self.physical_precip:
             self.ny_sfc0 = self.ny_sfc0 + 2
         if physical_precip:
           print("conserve_water:",self.conserve_water, "storeprec:", self.store_precip, "constrainprec:", self.constrain_precip, 
@@ -468,8 +468,11 @@ class LSTM_autoreg_torchscript(nn.Module):
         if self.add_stochastic_layer: 
             # LSTM downwards --> LSTM upwards --> stochastic RNN downwards
             hx0 = torch.randn((batch_size, self.nh_rnn1),device=inputs_main.device)  # (batch, hidden_size)
-            cx0 = torch.randn((batch_size, self.nh_rnn1),device=inputs_main.device)
-            hidden0 = (torch.unsqueeze(hx0,0), torch.unsqueeze(cx0,0))  
+            if self.use_lstm: 
+                cx0 = torch.randn((batch_size, self.nh_rnn1),device=inputs_main.device)
+                hidden0 = (torch.unsqueeze(hx0,0), torch.unsqueeze(cx0,0))  
+            else:
+                hidden = torch.unsqueeze(hx0,0)
             rnn0out, states = self.rnn0(inputs_main_crm, hidden0)
             
             rnn1_input =  torch.flip(rnn0out, [1])
@@ -547,11 +550,7 @@ class LSTM_autoreg_torchscript(nn.Module):
           rnn2out = self.mlp_latent(rnn2out)
           
         # if self.use_memory:
-        if self.use_third_rnn:
-          rnn1_mem = rnn2out
-        else:
-          # rnn1_mem = torch.flip(rnn2out, [1])
-          rnn1_mem = rnn2out
+        rnn1_mem = rnn2out
 
         out = self.mlp_output(rnn2out)
 
@@ -787,7 +786,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             # print("model mean max min dqn_evap_cond_vapor", torch.mean(dqn_evap_cond_vapor).item(),  torch.max(dqn_evap_cond_vapor).item(), torch.min(dqn_evap_cond_vapor).item())
             # print("model mean max min dqv_evap_prec", torch.mean(dqv_evap_prec).item(),  torch.max(dqv_evap_prec).item(), torch.min(dqv_evap_prec).item())
             # print("model mean dqn_aa", torch.mean(dqn_aa).item())
-            # print("model mean max min d_precip_sourcesink", torch.mean(d_precip_sourcesink).item(),  torch.max(d_precip_sourcesink).item(), torch.min(d_precip_sourcesink).item())
+        #   print("model mean max min d_precip_sourcesink", torch.mean(d_precip_sourcesink).item(),  torch.max(d_precip_sourcesink).item(), torch.min(d_precip_sourcesink).item())
           
           out = out_neww   
 
@@ -974,7 +973,6 @@ class LSTM_autoreg_torchscript(nn.Module):
             out_denorm  = torch.cat((out_denorm[:,:,0:2], dqliq, dqice, out_denorm[:,:,3:]),dim=2)
 
         return out_denorm, out_sfc_denorm
-    
 
 
 class LSTM_autoreg_torchscript_perturb(nn.Module):

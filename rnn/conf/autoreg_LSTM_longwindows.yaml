@@ -39,7 +39,7 @@ output_norm_per_level: true
 new_nolev_scaling: false
 cld_inp_transformation: "exp"
 rh_input_to_q: false
-include_q_input: false
+include_q_input: true
 output_prune: true
 qinput_prune: true
 rh_prune: true
