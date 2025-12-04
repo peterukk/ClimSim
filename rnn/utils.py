@@ -167,17 +167,13 @@ class train_or_eval_one_epoch:
         self.model_is_stochastic = model_is_stochastic 
         if self.batch_size==384:
             self.epoch_bias_collev = np.zeros((384,  self.model.nlev,  self.ny_pp))
-        if self.cfg.use_conflictfree: 
-            from conflictfree.momentum_operator import PseudoMomentumOperator
-            from conflictfree.grad_operator import ConFIG_update
-            from conflictfree.utils import get_gradient_vector,apply_gradient_vector
 
     def eval_one_epoch(self, lossf, optim, epoch, timesteps=1, lr_scheduler=None):
         report_freq = self.report_freq
         # Initialize per-epoch metrics to zero (there's LOTS!)
         running_loss = 0.0; running_energy = 0.0; running_water = 0.0; running_wcon = 0.0; running_wcon_true=0.0
         running_var=0.0; running_det=0.0; running_bias = 0.0; running_precip=0.0; running_rh_mse= 0.0; running_cldpath=0.0
-        running_qv_pos = 0.0; running_qn_pos = 0.0
+        running_qv_pos = 0.0; running_qn_pos = 0.0; running_precip_neg = 0.0
         epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0; epoch_mae = 0.0
         epoch_R2precc = 0.0; epoch_R2netsw = 0.0; epoch_R2flwds = 0.0; epoch_r2_lev = 0.0
         epoch_hcon = 0.0; epoch_wcon = 0.0; epoch_wcon_long = 0.0; epoch_rh_mse = 0.0
@@ -191,7 +187,7 @@ class train_or_eval_one_epoch:
         epoch_prec_99p_day = 0.0; epoch_prec_99p_hour = 0.0
         epoch_prec_50p_day = 0.0; epoch_accumprec = 0.0; epoch_qn_pos=0.0; epoch_qv_pos=0.0
         prec_true_daily = []; prec_pred_daily = []
-        prec_true_hourly = []; prec_pred_hourly = []
+        prec_true_hourly = []; prec_pred_hourly = []; precip_neg_mse = 0.0
         epoch_dt_std = 0.0; epoch_dq_std = 0.0; epoch_q_err_corr = 0.0
         t_comp =0 
         t0_it = time.time()
@@ -227,17 +223,12 @@ class train_or_eval_one_epoch:
             num_loss += 1
         if self.cfg.use_precip_gel_loss:
             num_loss += 1
-        if self.cfg.use_bias_loss:
-            num_loss += 1
         if self.cfg.use_energy_loss: 
             num_loss += 1
         if self.cfg.use_water_loss:
             num_loss += 1
         if self.model_is_stochastic and self.cfg.use_det_loss:
             num_loss += 1
-
-        if self.cfg.use_conflictfree:
-          operator=PseudoMomentumOperator(num_vectors=num_loss) 
 
         # Option ar_noise_mode for training stochastic RNNs
         # 0 : Fully uncorrelated noise. The sampled noise (eps) used in the stochastic RNN has no temporal correlation, is
@@ -395,11 +386,12 @@ class train_or_eval_one_epoch:
                       else:
                         if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb" and self.model_is_stochastic:
                           dummy=outs[3]
-                      # if self.model.physical_precip:
-                      #   precip_negative = outs[3]
-                      #   print("mean max prec neg", torch.mean(precip_negative).item(), torch.max(precip_negative))
-                      #   precip_neg_mse = torch.mean(torch.square(precip_negative))
-                          
+                      if self.model.physical_precip:
+                        if self.model.return_neg_precip:
+                          precip_negative = outs[3]
+                          precip_neg_mse += torch.mean(torch.square(precip_negative))
+                          # print("mean max prec neg", torch.mean(precip_negative).item(), torch.max(precip_negative), "mse", precip_neg_mse.item())
+
                     # if self.cfg.autoregressive:
                     #     if use_ar_noise:
                     #         if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb" and self.model_is_stochastic:
@@ -487,48 +479,6 @@ class train_or_eval_one_epoch:
                         else:
                             ypo_lay, ypo_sfc = self.model.postprocessing(preds_lay, preds_sfc)
 
-                        
-                        # if (j) % 6400 == 0:
-                        #     ind=100
-
-                        #     for jlev in range(20,55):
-
-                        #         qvt = targets_lay[ind,jlev,1].detach().cpu().numpy()
-                        #         qvp = preds_lay[ind,jlev,1].detach().cpu().numpy()
-                        #         qnt = targets_lay[ind,jlev,2].detach().cpu().numpy()
-                        #         qnp = preds_lay[ind,jlev,2].detach().cpu().numpy()
-                        #         ratiot = targets_lay[ind,jlev,3].detach().cpu().numpy()
-                        #         ratiop = preds_lay[ind,jlev,3].detach().cpu().numpy()
-                        #         liqt = yto_lay[ind,jlev,2].detach().cpu().numpy()
-                        #         liqp = ypo_lay[ind,jlev,2].detach().cpu().numpy()
-                        #         icet = yto_lay[ind,jlev,3].detach().cpu().numpy()
-                        #         icep = ypo_lay[ind,jlev,3].detach().cpu().numpy()
-                        #         print(jlev, "Qv", qvt, qvp, "Qn", qnt, qnp, "ratio", ratiot, ratiop, "dLIQ",liqt, liqp,"dICE", icet, icep)
-
-                        #     print("MEAN qn T", torch.mean(targets_lay[:,:,2]).item(),  "MIN", torch.min(targets_lay[:,:,2]).item() , "MAx", torch.max(targets_lay[:,:,2]).item() )
-                        #     print("MEAN qn P", torch.mean(preds_lay[:,:,2]).item(), "MIN", torch.min(preds_lay[:,:,2]).item(),  "MAx", torch.max(preds_lay[:,:,2]).item() )
-                        #     print("MEAN absqn T", torch.mean(torch.abs(targets_lay[:,:,2])).item())
-                        #     print("MEAN absqn P", torch.mean(torch.abs(preds_lay[:,:,2])).item())
-
-                        #     print("MEAN qv T", torch.mean(targets_lay[:,:,1]).item(),  "MIN", torch.min(targets_lay[:,:,1]).item() , "MAx", torch.max(targets_lay[:,:,1]).item() )
-                        #     print("MEAN qv P", torch.mean(preds_lay[:,:,1]).item(), "MIN", torch.min(preds_lay[:,:,1]).item(),  "MAx", torch.max(preds_lay[:,:,1]).item() )
-                        #     print("MEAN absqv T", torch.mean(torch.abs(targets_lay[:,:,1])).item())
-                        #     print("MEAN absqv P", torch.mean(torch.abs(preds_lay[:,:,1])).item())
-
-                        #     print("MEAN ratio T", torch.mean(targets_lay[:,:,3]).item(),  "MIN", torch.min(targets_lay[:,:,3]).item() , "MAx", torch.max(targets_lay[:,:,3]).item() )
-                        #     print("MEAN ratio P", torch.mean(preds_lay[:,:,3]).item(), "MIN", torch.min(preds_lay[:,:,3]).item(),  "MAx", torch.max(preds_lay[:,:,3]).item() )
-
-                        #     print("MEAN dliq T", torch.mean(yto_lay[:,:,2]).item(), "MIN", torch.min(yto_lay[:,:,2]).item() , "MAx", torch.max(yto_lay[:,:,2]).item() )
-                        #     print("MEAN dliq P", torch.mean(ypo_lay[:,:,2]).item(), "MIN", torch.min(ypo_lay[:,:,2]).item(),  "MAx", torch.max(ypo_lay[:,:,2]).item() )
-                                            
-                        #     print("MEAN abs dliq T", torch.mean(torch.abs(yto_lay[:,:,2])).item())
-                        #     print("MEAN abs dliq P", torch.mean(torch.abs(ypo_lay[:,:,2])).item())
-                            
-                        #     print("MEAN dice T", torch.mean(yto_lay[:,:,3]).item(),  "MIN", torch.min(yto_lay[:,:,3]).item() , "MAx", torch.max(yto_lay[:,:,3]).item() )
-                        #     print("MEAN dice P", torch.mean(ypo_lay[:,:,3]).item(), "MIN", torch.min(ypo_lay[:,:,3]).item(),  "MAx", torch.max(ypo_lay[:,:,3]).item() )
-                        #     print("MEAN abs dice T", torch.mean(torch.abs(yto_lay[:,:,3])).item())
-                        #     print("MEAN abs dice P", torch.mean(torch.abs(ypo_lay[:,:,3])).item())
-                            
                         with torch.no_grad():
                             # x_sfc = x_sfc*self.model.xdiv_sca + self.model.xmean_sca 
                             surf_pres_denorm = x_sfc[:,0:1]*self.model.xdiv_sca[0:1] + self.model.xmean_sca[0:1]
@@ -566,10 +516,13 @@ class train_or_eval_one_epoch:
                             qn_new = qn_old + 1200*(preds_lay[:,:,2])/self.model.yscale_lev[:,2] + 1200*(preds_lay[:,:,3])/self.model.yscale_lev[:,3]
                             qn_pos_loss = torch.mean(torch.square(F.relu(-qn_new)))
                           qv_old = x_lay_raw[:,:,-1] 
+                          # hang on. if mp_mode=-2, whats below is actually incorrect? qv_old is just qv but preds_lay_1 is the total water
                           qv_new = qv_old + 1200*preds_lay[:,:,1]/self.model.yscale_lev[:,1]
                           # print("min qv_old",qv_old.min().item(), "max", qv_old.max().item())
                           # print("min qv new",qv_new.min().item(), "max", qv_new.max().item())
                           qv_pos_loss = torch.mean(torch.square(F.relu(-qv_new)))
+                          if self.model.return_neg_precip: 
+                            precip_neg_mse = precip_neg_mse / timesteps
                         # print("ut min max mean qn new-pred", torch.min(qn_new).item(),  torch.max(qn_new).item(), torch.mean(qn_new).item())
                         # print("qn pos loss: ", q_pos_loss.item())
 
@@ -592,11 +545,8 @@ class train_or_eval_one_epoch:
                             losses.append(self.cfg.w_precmse*precip_sum_mse)
 
                         if self.cfg.use_precip_gel_loss:
-                            losses.append(self.cfg.w_precgel*precip_sum_mse)
+                            losses.append(self.cfg.w_precgel*precip_sum_gel)
 
-                        if self.cfg.use_bias_loss:
-                            losses.append(self.cfg.w_bias*(bias_tot**2))
-                                          
                         if self.cfg.use_energy_loss: 
                             losses.append(self.cfg.w_hcon*h_con)
                             
@@ -616,64 +566,26 @@ class train_or_eval_one_epoch:
                         if self.cfg.use_qn_positivity_loss and self.cfg.mp_mode!=-2:
                             losses.append(self.cfg.w_qnpos * qn_pos_loss)
 
+                        if self.cfg.use_neg_precip_loss:
+                            losses.append(self.cfg.w_precip_neg * precip_neg_mse)
+
                         if self.model_is_stochastic and self.cfg.use_det_loss:
                             losses.append(self.cfg.w_det * (det_skill**2))
-                            
 
-                        if self.cfg.use_conflictfree: 
-                            # optim.zero_grad()     
-                            # index=j2 % num_loss
-                            # loss=losses[index]
-                            # # loss.backward()
-                            # if self.cfg.use_scaler:
-                            #     self.scaler.scale(loss).backward(retain_graph=True)
-                            # else:
-                            #     loss.backward(retain_graph=True)            
-                            
-                            # g_config=operator.calculate_gradient(index,get_gradient_vector(self.model)) # calculate the conflict-free direction
-                            # apply_gradient_vector(self.model,g_config) # or simply use `operator.update_gradient(network,grads)` to calculate and set the conflict-free direction to the network
-                            # # optimizer.step()
-                            # if self.cfg.use_scaler:
-                            #     self.scaler.step(optim)
-                            #     self.scaler.update()
-                            # else: 
-                            #     optim.step()
-                            # global_step+=1
-                            
-                            for loss_i in losses:
-                                optim.zero_grad()
-                                # print("loss_i", loss_i)
-                                if self.cfg.use_scaler:
-                                    self.scaler.scale(loss_i).backward(retain_graph=True)
-                                else:
-                                    loss_i.backward(retain_graph=True)       
-                                # curgrad = get_gradient_vector(self.model)
-                                # print("curgrad", curgrad, "shape", curgrad.shape)
-                                grads.append(get_gradient_vector(self.model)) #get loss-specfic gradient
-                            g_config=ConFIG_update(grads) # calculate the conflict-free direction
-                            apply_gradient_vector(self.model,g_config) # set the conflict-free direction to the network
-                            if self.cfg.use_scaler:
-                                self.scaler.step(optim)
-                                self.scaler.update()
-                            else: 
-                                optim.step()
-                            loss = torch.stack(losses).sum()
+                        optim.zero_grad()
+                        loss = torch.stack(losses).sum()
 
+                        if self.cfg.use_scaler:
+                            self.scaler.scale(loss).backward(retain_graph=True)
                         else:
-                            optim.zero_grad()
-                            loss = torch.stack(losses).sum()
+                            loss.backward(retain_graph=True)      
 
-                            if self.cfg.use_scaler:
-                                self.scaler.scale(loss).backward(retain_graph=True)
-                            else:
-                                loss.backward(retain_graph=True)      
+                        if self.cfg.use_scaler:
+                            self.scaler.step(optim)
+                            self.scaler.update()
+                        else:
+                            optim.step()
 
-                            if self.cfg.use_scaler:
-                                self.scaler.step(optim)
-                                self.scaler.update()
-                            else:
-                                optim.step()
-    
                     loss = loss.detach()
                     if self.model_is_stochastic:
                         det_skill = det_skill.detach(); ens_var = ens_var.detach()
@@ -689,6 +601,7 @@ class train_or_eval_one_epoch:
                     if self.cfg.mp_mode != -2: qn_pos_loss = qn_pos_loss.detach()
                     precip_sum_mse = precip_sum_mse.detach()
                     precip_sum_gel = precip_sum_gel.detach()
+
                     # gel_lev = gel_lev.detach()
                     losses = []; grads = []
 
@@ -719,6 +632,11 @@ class train_or_eval_one_epoch:
                         running_var += ens_var.item() 
                         running_det += det_skill.item() 
 
+                    if self.cfg.physical_precip:
+                      if self.model.return_neg_precip:
+                        precip_neg_mse = precip_neg_mse.detach()
+                        running_precip_neg += precip_neg_mse.item()
+                        
                     if j>loss_update_start_index:
                         with torch.no_grad():
                             epoch_loss      += loss.item()
@@ -746,7 +664,7 @@ class train_or_eval_one_epoch:
                                 epoch_dq_std += dq_std.item()
                                 err_dq_ens1 = dq_true.flatten() - dq_ens1.flatten()
                                 err_dq_ens2 = dq_true.flatten() - dq_ens2.flatten() 
-                                epoch_q_err_corr += np.corrcoef(err_dq_ens1,err_dq_ens2)[0,1]
+                                epoch_q_err_corr += np.corrcoef(err_dq_ens1,err_dq_ens2)[0,1]**2
                                 
                             biases_lev, biases_sfc = metrics.compute_absolute_biases(yto_lay, yto_sfc, ypo_lay, ypo_sfc, numpy=True)
                             epoch_bias_lev += np.mean(biases_lev)
@@ -767,12 +685,12 @@ class train_or_eval_one_epoch:
                             sfc_pred = ypo_sfc.reshape(-1,self.model.ny_sfc).cpu().numpy().transpose()
                             sfc_true = yto_sfc.reshape(-1,self.model.ny_sfc).cpu().numpy().transpose()
 
-                            epoch_R2netsw += np.corrcoef((sfc_pred[0,:],sfc_true[0,:]))[0,1]
-                            epoch_R2flwds += np.corrcoef((sfc_pred[1,:],sfc_true[1,:]))[0,1]
+                            epoch_R2netsw += np.corrcoef((sfc_pred[0,:],sfc_true[0,:]))[0,1]**2
+                            epoch_R2flwds += np.corrcoef((sfc_pred[1,:],sfc_true[1,:]))[0,1]**2
 
                             prec_pred = sfc_pred[3,:]
                             prec_true = sfc_true[3,:]
-                            epoch_R2precc += np.corrcoef((prec_pred,prec_true))[0,1]
+                            epoch_R2precc += np.corrcoef((prec_pred,prec_true))[0,1]**2
                             epoch_prec_std_frac += prec_pred.std()/prec_true.std()
                             
                             pp = np.percentile(prec_true,99.9)
@@ -801,7 +719,6 @@ class train_or_eval_one_epoch:
                             preds_lay = preds_lay.reshape(-1,self.model.nlev,self.model.ny).cpu().numpy()
 
                             r2_lev_raw = metrics.corrcoeff_pairs_batchfirst(preds_lay, targets_lay)**2
-
 
                             epoch_mae_lev_clw +=  np.nanmean(np.abs(ypo_lay[:,:,2] - yto_lay[:,:,2]),axis=0)
                             epoch_mae_lev_cli +=  np.nanmean(np.abs(ypo_lay[:,:,3] - yto_lay[:,:,3]),axis=0)
@@ -839,7 +756,6 @@ class train_or_eval_one_epoch:
                     running_bias = running_bias / fac
                     running_precip = running_precip / fac
                     running_rh_mse = running_rh_mse / fac
-                    # running_gel = running_gel / fac
                     running_wcon = running_wcon/fac
                     running_wcon_true = running_wcon_true/fac
 
@@ -864,10 +780,13 @@ class train_or_eval_one_epoch:
                             np.nanmean(r2_lev_raw[:,2]),np.nanmean(r2_lev_raw[:,3]),running_wcon, running_wcon_true, running_cldpath, running_qv_pos, running_qn_pos))
                                                                                                                              
                     if self.cfg.physical_precip:
+                        if self.model.return_neg_precip:
+                            running_precip_neg  = running_precip_neg / fac
+                            print("Negative precipitation mse {:.2f}".format(running_precip_neg))
                         if self.model.store_precip:
                             prec = rnn1_mem[:,-1,-1].detach()
                             print("Stored precipitation mean {:.2f}  max {:.2f} min {:.2f}".format(torch.mean(prec).item(), torch.max(prec).item(), torch.min(prec).item()))
-                    running_loss = 0.0; running_energy = 0.0; running_water=0.0; running_cldpath=0.0; running_precip=0.0; 
+                    running_loss = 0.0; running_energy = 0.0; running_water=0.0; running_cldpath=0.0; running_precip=0.0; running_precip_neg=0.0
                     running_bias = 0.0; running_wcon = 0.0; running_wcon_true = 0.0; running_rh_mse=0.0; running_qv_pos=0.0; running_qn_pos=0.0
                     t0_it = time.time()
                     t_comp = 0
@@ -940,12 +859,10 @@ class train_or_eval_one_epoch:
         self.metrics["rmse_perlev"] = epoch_rmse_perlev / k 
 
         self.metrics['mean_absolute_error'] = epoch_mae / k
-        #self.metrics['ks'] =  epoch_ks / k2
         
         self.metrics['R2'] = self.metric_R2.compute()        
         self.metrics['R2_lev'] = epoch_r2_lev / k
         self.metrics['R2_heating'] = epoch_r2_lev[:,0].mean() / k
-        # self.metrics['R2_moistening'] =  epoch_r2_lev[:,1].mean() / k
         R2_moistening = epoch_r2_lev[:,1].mean() / k
         R2 = epoch_r2_lev[:,2] / k
         R2[np.isnan(R2)] = 0.0; R2[np.isinf(R2)] = 0.0
@@ -1131,11 +1048,7 @@ class generator_xy(torch.utils.data.Dataset):
             self.pred_cld_water_frac=False
 
         self.v4_to_v5_inputs    = v4_to_v5_inputs
-        # if input_norm_per_level:
-        #     self.lbd_qc = lbd_qc_lev
-        #     self.lbd_qi = lbd_qi_lev
-        #     self.lbd_qn = lbd_qn_lev
-        # else:
+
         self.lbd_qc = lbd_qc
         self.lbd_qi = lbd_qi
         self.lbd_qn = lbd_qn
@@ -1275,36 +1188,6 @@ class generator_xy(torch.utils.data.Dataset):
             os.system("df -h /dev/shm/")
 
         hdf.close()
-        # self.nloc = int(os.path.basename(self.filepath).split('_')[-1])
-        # self.stateful = stateful
-        # self.refpres = np.array([7.83478113e-02,1.41108318e-01,2.52923297e-01,4.49250635e-01,
-        #             7.86346161e-01,1.34735576e+00,2.24477729e+00,3.61643148e+00,
-        #             5.61583643e+00,8.40325322e+00,1.21444894e+01,1.70168280e+01,
-        #             2.32107981e+01,3.09143463e+01,4.02775807e+01,5.13746323e+01,
-        #             6.41892284e+01,7.86396576e+01,9.46300920e+01,1.12091274e+02,
-        #             1.30977804e+02,1.51221318e+02,1.72673905e+02,1.95087710e+02,
-        #             2.18155935e+02,2.41600379e+02,2.65258515e+02,2.89122322e+02,
-        #             3.13312087e+02,3.38006999e+02,3.63373492e+02,3.89523338e+02,
-        #             4.16507922e+02,4.44331412e+02,4.72957206e+02,5.02291917e+02,
-        #             5.32152273e+02,5.62239392e+02,5.92149276e+02,6.21432841e+02,
-        #             6.49689897e+02,6.76656485e+02,7.02242188e+02,7.26498589e+02,
-        #             7.49537645e+02,7.71445217e+02,7.92234260e+02,8.11856675e+02,
-        #             8.30259643e+02,8.47450653e+02,8.63535902e+02,8.78715875e+02,
-        #             8.93246018e+02,9.07385213e+02,9.21354397e+02,9.35316717e+02,
-        #             9.49378056e+02,9.63599599e+02,9.78013432e+02,9.92635544e+02],dtype=np.float32)
-        # # self.refpres_norm = self.refpres
-        # self.refpres_norm = np.log(self.refpres)
-        # # self.refpres_norm = (self.refpres-self.refpres.min())/(self.refpres.max()-self.refpres.min())*2 - 1
-    
-        #if 'train' in self.filepath:
-        #    self.is_validation = False
-        #    print("Training dataset, path is: {}".format(self.filepath))
-        #else:
-        #    self.is_validation = True
-        #    print("Validation dataset, path is: {}".format(self.filepath))
-
-        # self.add_refpres = add_refpres
-        # batch_idx_expanded =  [0,1,2,3...ntime*1024]
 
         print("Number of locations {}; colums {}, time steps {}".format(self.nloc,self.ncol, self.ntimesteps), flush=True)
         # indices_all = list(np.arange(self.ntimesteps*self.nloc))
@@ -1353,7 +1236,6 @@ class generator_xy(torch.utils.data.Dataset):
                 prev_outputs = prev_outputs[:,:,:,[0,1,2,3,4]]
 
             if self.include_prev_inputs:
-                # prev_inputs = self.input_lev[inds_prev,:,:,[0,1,2,3,4,5]]
                 prev_inputs = self.input_lev[inds_prev,:,:,:]
                 prev_inputs = prev_inputs[:,:,:,[0,1,2,3,4,5]]
         else:
@@ -1364,16 +1246,11 @@ class generator_xy(torch.utils.data.Dataset):
             x_sfc_b = hdf['input_sca'][indices,:]
             y_lev_b = hdf['output_lev'][indices,:]
             y_sfc_b = hdf['output_sca'][indices,:]
-            # x_lev_b = hdf['input_lev'][indices[0]:indices[-1]+1,:]
-            # x_sfc_b = hdf['input_sca'][indices[0]:indices[-1]+1,:]
-            # y_lev_b = hdf['output_lev'][indices[0]:indices[-1]+1,:]
-            # y_sfc_b = hdf['output_sca'][indices[0]:indices[-1]+1,:]
             if self.include_prev_outputs:
                 prev_outputs = hdf['output_lev'][inds_prev,:,:,:]
                 prev_outputs = prev_outputs[:,:,:,[0,1,2,3,4]]
 
             if self.include_prev_inputs:
-                # prev_inputs = hdf['input_lev'][inds_prev,:,:,[0,1,2,3,4,5]]
                 prev_inputs = hdf['input_lev'][inds_prev]
                 prev_inputs = prev_inputs[:,:,:,[0,1,2,3,4,5]]
 
@@ -1404,7 +1281,6 @@ class generator_xy(torch.utils.data.Dataset):
         if self.reverse_input_norm:
             if self.use_numba:
                 reverse_input_norm_numba(x_lev_b, self.xcoeff_lev_ref[0], self.xcoeff_lev_ref[1])
-
             else:
                 x_lev_b = x_lev_b * (self.xcoeff_lev_ref[1]) + self.xcoeff_lev_ref[0] 
 
@@ -1533,12 +1409,7 @@ class generator_xy(torch.utils.data.Dataset):
         if self.reverse_output_norm:
             y_lev_b = y_lev_b / self.yscale_lev_ref
             y_sfc_b = y_sfc_b / self.yscale_sca_ref
-            
-
-        # for i in range(6):
-        #     print("OO", i, "minmax y ", y_lev_b[:,:,i].min(), y_lev_b[:,:,i].max())
         
-        # if not self.reverse_input_norm:    
         y_lev_b_denorm = np.copy(y_lev_b)
         y_sfc_b_denorm = np.copy(y_sfc_b)
         
@@ -1548,12 +1419,7 @@ class generator_xy(torch.utils.data.Dataset):
             y_lev_b[:,:,2] = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
             y_lev_b = np.delete(y_lev_b, 3, axis=2) 
         elif self.pred_liq_frac:
-            # total = y_lev_b[:,:,2] + y_lev_b[:,:,3] 
-            # liq_frac = y_lev_b[:,:,2] / total 
-            # liq_frac[np.isinf(liq_frac)] = 0 
-            # liq_frac[np.isnan(liq_frac)] = 0
-            # # print("liq ratio", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
-            T_before     = x_lev_b_denorm[:,:,0]
+            T_before        = x_lev_b_denorm[:,:,0]
             qliq_before     = x_lev_b_denorm[:,:,2]
 
             qice_before     = x_lev_b_denorm[:,:,3]   
@@ -1578,29 +1444,10 @@ class generator_xy(torch.utils.data.Dataset):
             liq_frac[liq_frac>1.0] = 1.0
 
             liq_frac[inds] = qliq_new[inds] / qn_new[inds]
-            
-            # qn_new = np.clip(qn_new, 1.0e-7, 0.5 )
-            # liq_frac = qliq_new / qn_new
-            # liq_frac[np.isinf(liq_frac)] = 0 
-            # liq_frac[np.isnan(liq_frac)] = 0
-            # print("0 liq frac", liq_frac[100])
-      
+
             liq_frac[liq_frac<0.0] = 0.0
             liq_frac[liq_frac>1.0] = 1.0
-            # print("1 liq frac", liq_frac[100])
 
-            # #                            dqn
-            # qliq_neww    = liq_frac*qn_new
-            # qice_neww    = (1-liq_frac)*qn_new
-            # dqliq2       = (qliq_neww - qliq_before) * 0.0008333333333333334 #/1200  
-            # dqice2       = (qice_neww - qice_before) * 0.0008333333333333334 #/1200  
-        
-            # for jlev in range(8,60):
-            #     print("jlev ", jlev, "lfrac", liq_frac[100,jlev], "t dqliq", dqliq[100,jlev], "INF", dqliq2[100,jlev], "t qliqnew",qliq_new[100,jlev], "2", qliq_neww[100,jlev] )
-            #     print("jlev ", jlev, "lfrac", liq_frac[100,jlev], "t dqice", dqice[100,jlev], "INF", dqice2[100,jlev])
-
-            # print("liq frac", liq_frac[200,35], "min", liq_frac.min(), "max", liq_frac.max())
-            # print("len", liq_frac.size, "< -0.1 ", liq_frac[liq_frac<-0.1].size, ">1.1 ", liq_frac[liq_frac>1.1].size)
             if self.pred_cld_water_frac:
                 qv_before   = x_lev_b_denorm[:,:,-1]
                 dqv         = y_lev_b[:,:,1]  

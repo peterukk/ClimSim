@@ -56,8 +56,6 @@ snowhice_fix: true
 
 # loss_fn_type: mse
 loss_fn_type: huber
-# use "conlict-free" method that supposedly better way of combining loss functions? github.com/tum-pbs/ConFIG
-use_conflictfree: false
 crps_sumvar: true
 use_energy_loss: true
 # w_hcon: 1.0e-05
@@ -76,18 +74,18 @@ use_qv_positivity_loss: false
 w_qvpos: 1e-3
 use_qn_positivity_loss: false 
 w_qnpos: 1e-3
+use_neg_precip_loss: false 
+w_precip_neg: 1e-7
 use_precip_gel_loss: false 
 w_precgel: 0.001
 gel_lambda_prec: 20.0
-use_gel_loss: false 
-w_gel: 0.01
 use_det_loss: false 
 w_det: 2e1 
 
 nh_mem: 16
 nneur:
-- 160
-- 160
+- 144
+- 144
 cfc_nout: 24 
 
 add_pres: true

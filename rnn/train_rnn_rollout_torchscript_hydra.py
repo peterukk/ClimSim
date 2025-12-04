@@ -968,6 +968,11 @@ def main(cfg: DictConfig):
                 # print("New best validation result obtained, saving model to", SAVE_PATH)
                 if is_stochastic:
                     model.use_ensemble=False
+                if cfg.physical_precip:
+                  return_neg_precip=False
+                  if model.return_neg_precip:
+                    return_neg_precip=True 
+                    model.return_neg_precip = False
                 # model = model.to("cpu")
                 torch.save({
                             'epoch': epoch,
@@ -986,6 +991,9 @@ def main(cfg: DictConfig):
                 best_val_loss = val_loss 
                 if is_stochastic:
                     model.use_ensemble=True
+                if cfg.physical_precip:
+                  if return_neg_precip: 
+                    model.return_neg_precip = True    
                 model = model.to(device)
                 print("model saved!")
 

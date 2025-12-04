@@ -3,7 +3,9 @@ rnn/wandb
 rnn/predfrac
 rnn/*.pt 
 rnn/outputs
-rnn/saved_models/*.pt
+rnn/saved_models/*
+*.pdf
+*.png
 
 *.out
 website/_build/

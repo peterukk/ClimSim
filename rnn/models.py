@@ -150,8 +150,8 @@ class LSTM_autoreg_torchscript(nn.Module):
     add_pres: Final[bool]
     add_stochastic_layer: Final[bool]
     output_prune: Final[bool]
+    use_lstm: Final[bool]
     separate_radiation: Final[bool]
-    use_third_rnn: Final[bool]
     physical_precip: Final[bool]
     predict_liq_frac: Final[bool]
     randomly_initialize_cellstate: Final[bool]
@@ -163,7 +163,8 @@ class LSTM_autoreg_torchscript(nn.Module):
     pour_excess: Final[bool]
     pred_total_water: Final[bool]
     conserve_water: Final[bool]
-    positive_precip: Final[bool]
+    constrain_precip: Final[bool]
+    return_neg_precip: Final[bool]
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca, lbd_qc, lbd_qi, lbd_qn,
@@ -174,10 +175,10 @@ class LSTM_autoreg_torchscript(nn.Module):
                 # useful for smaller convective memory (e.g. 16 per level)
                 add_pres=False, # add layer pressure to inputs
                 add_stochastic_layer=False,
+                use_lstm=True,
                 output_prune=False,
                 repeat_mu=False, # repeat solar zenith angle to each vertical level?
                 separate_radiation=False,
-                use_third_rnn=False,
                 mp_mode=0, # see train_rnn_rollout_torchscript_hydra
                 physical_precip=False,
                 predict_liq_frac=False,
@@ -224,23 +225,26 @@ class LSTM_autoreg_torchscript(nn.Module):
         if self.add_pres:
             self.preslay = LayerPressure(hyam,hybm)
             nx = nx +1
-            # self.preslay_nonorm = LayerPressure(hyam, hybm, norm=False)
             self.preslev_nonorm = LevelPressure(hyai, hybi)
+        self.use_lstm = use_lstm
         self.randomly_initialize_cellstate = randomly_initialize_cellstate
+        self.add_stochastic_layer = add_stochastic_layer
         self.nx = nx
         self.nh_rnn1 = self.nneur[0]
         self.nx_rnn2 = self.nneur[0]
         self.nh_rnn2 = self.nneur[1]
-        self.use_third_rnn = use_third_rnn
-        # if len(nneur)==3:
-            # self.use_third_rnn = True 
-        if self.use_third_rnn:
-            self.nx_rnn3 = self.nneur[1]
-            self.nh_rnn3 = self.nneur[2]
-        # elif len(nneur)==2:
-        #     self.use_third_rnn = False 
-        # else:
-        #     raise NotImplementedError()
+        if len(nneur) != 2 and not self.add_stochastic_layer:
+            raise NotImplementedError()
+        if add_stochastic_layer:
+            if len(nneur) == 3:        
+                self.nx_rnn3 = self.nneur[1]
+                self.nh_rnn3 = self.nneur[2]   
+            elif len(nneur) == 2:
+                self.nx_rnn3 = self.nneur[0]
+                self.nh_rnn3 = self.nneur[1]     
+            else:
+                raise NotImplementedError()
+    
         self.concat=concat
         self.output_sqrt_norm=output_sqrt_norm
         if self.output_sqrt_norm:
@@ -250,21 +254,22 @@ class LSTM_autoreg_torchscript(nn.Module):
             nx = nx + 1
         self.use_intermediate_mlp=use_intermediate_mlp  
         if self.use_intermediate_mlp:
-            # self.nh_mem = self.nneur[1] // 4
-            # if nh_mem is None:
-            #     self.nh_mem = self.nneur[1] // 8
-            # else:
             self.nh_mem = nh_mem
         else:
             self.nh_mem = self.nneur[1]
 
-        # for physical_precip
-        self.conserve_water = False
-        self.positive_precip = False
+        # lots of options for physical_precip (ignored if physical_precip=false!)
+        self.conserve_water = True
         self.store_precip = True
-        self.pour_excess = False
+        self.constrain_precip = False
+        self.pour_excess = True
         self.include_sedimentation_term = True 
         self.include_evap = True 
+        self.return_neg_precip = True
+        if self.pred_total_water:
+          self.influde_evap = False 
+        if self.constrain_precip:
+          self.pour_excess = False
         if not self.physical_precip:
             self.store_precip=False
         if self.store_precip: 
@@ -273,7 +278,9 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.nh_mem0 = self.nh_mem
         if self.include_evap:
             self.ny_sfc0 = self.ny_sfc0 + 2
-
+        if physical_precip:
+          print("conserve_water:",self.conserve_water, "storeprec:", self.store_precip, "constrainprec:", self.constrain_precip, 
+            "pour:", self.pour_excess, "sedimentation:", self.include_sedimentation_term, "evap:", self.include_evap )
 
         # in ClimSim config of E3SM, the CRM physics first computes 
         # moist physics on 50 levels, and then computes radiation on 60 levels!
@@ -304,7 +311,6 @@ class LSTM_autoreg_torchscript(nn.Module):
         else:
             self.nx_rnn1 = nx
                 
-        self.add_stochastic_layer = add_stochastic_layer
         self.nonlin = nn.Tanh()
         self.relu = nn.ReLU()
 
@@ -339,7 +345,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         
         print("nx rnn1", self.nx_rnn1, "nh rnn1", self.nh_rnn1)
         print("nx rnn2", self.nx_rnn2, "nh rnn2", self.nh_rnn2)  
-        if self.use_third_rnn: print("nx rnn3", self.nx_rnn3, "nh rnn3", self.nh_rnn3) 
+        if self.add_stochastic_layer: print("nx rnn3", self.nx_rnn3, "nh rnn3", self.nh_rnn3) 
         print("nx sfc", self.nx_sfc)
         print("ny", self.ny, "ny0", self.ny0)
 
@@ -347,32 +353,23 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.mlp_initial = nn.Linear(nx, self.nneur[0])
 
         self.mlp_surface1  = nn.Linear(self.nx_sfc, self.nh_rnn1)
-        if not self.randomly_initialize_cellstate:
+        if not self.randomly_initialize_cellstate and self.use_lstm:
             self.mlp_surface2  = nn.Linear(self.nx_sfc, self.nh_rnn1)
 
-        # self.rnn1      = nn.LSTMCell(self.nx_rnn1, self.nh_rnn1)  # (input_size, hidden_size)
-        # self.rnn2      = nn.LSTMCell(self.nx_rnn2, self.nh_rnn2)
-        if self.use_third_rnn:
-
-            self.rnn0   = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)
-            self.rnn1   = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)  # (input_size, hidden_size)
-            if self.add_stochastic_layer:
-                use_bias=False
-                self.rnn2 = MyStochasticLSTMLayer4(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias)  
-            else:
-                self.rnn2   = nn.LSTM(self.nx_rnn3, self.nh_rnn3,  batch_first=True)
-            # self.rnn0.flatten_parameters()
+        if self.use_lstm:
+            rnn_layer = nn.LSTM 
         else:
+            rnn_layer = nn.GRU
 
-            self.rnn1      = nn.LSTM(self.nx_rnn1, self.nh_rnn1,  batch_first=True)  # (input_size, hidden_size)
-            if self.add_stochastic_layer:
-                use_bias=False
-                self.rnn2 = MyStochasticLSTMLayer4(self.nx_rnn2, self.nh_rnn2, use_bias=use_bias)  
-            else:
-                self.rnn2 = nn.LSTM(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
+        if self.add_stochastic_layer:
+            self.rnn0   = rnn_layer(self.nx_rnn1, self.nh_rnn1,  batch_first=True)
+            self.rnn1   = rnn_layer(self.nx_rnn2, self.nh_rnn2,  batch_first=True)  # (input_size, hidden_size)
+            use_bias=False
+            self.rnn2 = MyStochasticLSTMLayer4(self.nx_rnn3, self.nh_rnn3, use_bias=use_bias)  
+        else:
+            self.rnn1   = rnn_layer(self.nx_rnn1, self.nh_rnn1,  batch_first=True)  # (input_size, hidden_size)
+            self.rnn2   = rnn_layer(self.nx_rnn2, self.nh_rnn2,  batch_first=True)
                 
-        # self.rnn1.flatten_parameters()
-        # self.rnn2.flatten_parameters()
         self.sigmoid = nn.Sigmoid()
 
         if self.concat: 
@@ -427,7 +424,6 @@ class LSTM_autoreg_torchscript(nn.Module):
         if self.output_sqrt_norm:
             signs = torch.sign(out)
             out = signs*torch.pow(out, 4)
-            # out = signs*torch.square(out)
         return out, out_sfc
         
 
@@ -435,21 +431,16 @@ class LSTM_autoreg_torchscript(nn.Module):
         inputs_main   = inp_list[0]
         inputs_aux    = inp_list[1]
         rnn1_mem      = inp_list[2]
-        # if self.pred_total_water:
         if self.physical_precip:
           inputs_denorm = inp_list[3]
 
         batch_size, seq_size, feature_size = inputs_main.shape
-        # print("shape inputs main", inputs_main.shape, "xmean", self.xmean_lev.shape)
-        # print("max q", torch.max(inputs_main[:,:,-1]), "shape", inputs_main.shape)
 
         if self.add_pres:
             sp = torch.unsqueeze(inputs_aux[:,0:1],1)
-            # undo scaling
-            # sp = sp*35451.17 + 98623.664 
+            # surface pressure, undo scaling
             sp = sp*self.xdiv_sca[0] + self.xmean_sca[0]
             pres  = self.preslay(sp)
-            # pres_nonorm  = torch.squeeze(self.preslay_nonorm(sp))
             pres_nonorm  = torch.squeeze(self.preslev_nonorm(sp))
             inputs_main = torch.cat((inputs_main,pres),dim=2)
 
@@ -469,13 +460,13 @@ class LSTM_autoreg_torchscript(nn.Module):
             inputs_main_crm = self.nonlin(inputs_main_crm)  
             
         # if self.use_memory:
-        # rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
         if self.physical_precip and self.store_precip: 
           P_old = rnn1_mem[:,-1,-1] 
         
         inputs_main_crm = torch.cat((inputs_main_crm,rnn1_mem[:,:,0:self.nh_mem0]), dim=2)
             
-        if self.use_third_rnn: # use initial downward RNN
+        if self.add_stochastic_layer: 
+            # LSTM downwards --> LSTM upwards --> stochastic RNN downwards
             hx0 = torch.randn((batch_size, self.nh_rnn1),device=inputs_main.device)  # (batch, hidden_size)
             cx0 = torch.randn((batch_size, self.nh_rnn1),device=inputs_main.device)
             hidden0 = (torch.unsqueeze(hx0,0), torch.unsqueeze(cx0,0))  
@@ -483,6 +474,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             
             rnn1_input =  torch.flip(rnn0out, [1])
         else:
+            # LSTM upwards --> LSTM downwards
             # TOA is first in memory, so to start at the surface we need to go backwards
             rnn1_input = torch.flip(inputs_main_crm, [1])
         
@@ -495,37 +487,40 @@ class LSTM_autoreg_torchscript(nn.Module):
             inputs_sfc = inputs_aux
         hx = self.mlp_surface1(inputs_sfc)
         hx = self.nonlin(hx)
-        if self.randomly_initialize_cellstate:
-            cx = torch.randn_like(hx)
-        else:
-            cx = self.mlp_surface2(inputs_sfc)
-        # cx = self.nonlin(cx)
-        hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
-
+        if self.use_lstm:
+            if self.randomly_initialize_cellstate:
+                cx = torch.randn_like(hx)
+            else:
+                cx = self.mlp_surface2(inputs_sfc)
+            hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))
+        else: 
+            hidden = torch.unsqueeze(hx,0)
         rnn1out, states = self.rnn1(rnn1_input, hidden)
         del rnn1_input
-
-        # if self.predict_flux:
-        #     rnn1out = torch.cat((torch.unsqueeze(hx,1),rnn1out),dim=1)
 
         rnn1out = torch.flip(rnn1out, [1])
 
         if self.separate_radiation:
           hx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)  # (batch, hidden_size)
-          cx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)
+          if self.use_lstm or self.add_stochastic_layer: 
+              cx2 = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device)
         else: 
           inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
           hx2 = self.mlp_toa1(inputs_toa)
-          cx2 = self.mlp_toa2(inputs_toa)
+          if self.use_lstm or self.add_stochastic_layer: 
+              cx2 = self.mlp_toa2(inputs_toa)
         
         if self.add_stochastic_layer:
             input_rnn2 = torch.transpose(rnn1out,0,1)
             hidden2 = (hx2, cx2)
         else:
             input_rnn2 = rnn1out
-            hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
+            if self.use_lstm:
+                hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
+            else:
+                hidden2 = torch.unsqueeze(hx2,0)
 
-        if self.add_stochastic_layer and self.use_third_rnn:
+        if self.add_stochastic_layer:
           z, states = self.rnn2(input_rnn2, hidden2)
           # SPPT
         #   z = F.hardtanh(z, 0.0, 2.0)
@@ -533,13 +528,16 @@ class LSTM_autoreg_torchscript(nn.Module):
           # rnn2out = rnn1out + 0.01*z 
         #   rnn2out = z
           rnn2out = torch.transpose(rnn2out,0,1)
-
         else:
           rnn2out, states = self.rnn2(input_rnn2, hidden2)
 
         del input_rnn2
 
-        (last_h, last_c) = states
+        if self.use_lstm or self.add_stochastic_layer:
+            (last_h, last_c) = states
+        else:
+            last_h = states
+
         final_sfc_inp = last_h.squeeze() 
             
         if self.concat:
@@ -558,7 +556,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         out = self.mlp_output(rnn2out)
 
         if self.output_prune and (not self.separate_radiation):
-          # Only temperature tendency is computed for the top 10 levels
+          # Only temperature tendency is computed for the top 10 levels, by the radiation scheme, after CRM runs on lowest 50 levels
           # if self.separate_radiation:
           #     out[:,0:12,:] = out[:,0:12,:].clone().zero_()
           # else:
@@ -620,7 +618,7 @@ class LSTM_autoreg_torchscript(nn.Module):
           zeroes = torch.zeros(batch_size, 1, device=inputs_main.device)
 
           # Pmax = 5e3
-          Pmax = 1e4
+          Pmax = 2e4
 
           if self.pred_total_water:
             #  model outputs ['ptend_t', 'dqtot', 'cld_water_frac', 'liq_frac', 'ptend_u', 'ptend_v']
@@ -684,7 +682,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             # amount of stored precipitation: new precipitation P1 = P0 + P_diagnosed will then be zero
             # this reflects evaporation of precipitation that hasn't fallen out yet
 
-            if self.positive_precip:
+            if self.constrain_precip:
               # Precipitation constraints:
               #  1) dqtot_mp => -P0 (positivity)
               #  2) dqtot_mp <= Pmax -P0 (stored precip. can't get larger than Pmax)
@@ -735,8 +733,8 @@ class LSTM_autoreg_torchscript(nn.Module):
             dqn_aa        = self.relu(dqn_aa) + 1.0e-6 # force positive
             dqv_evap_prec = self.relu(dqv_evap_prec) + 1.0e-6 # force positive
 
-            if self.store_precip and self.include_evap:
-              if not self.pour_excess:
+            if self.include_evap:
+              if self.constrain_precip and self.store_precip:
                 # We have two constraints for (d_precip_sourcesink = dqn_aa - dqv_evap_prec), which is vertically
                 # integrated to get precipitation:
                 # 1/g*vint(dqn_aa - dqv_evap_prec) => -P0,
@@ -759,10 +757,7 @@ class LSTM_autoreg_torchscript(nn.Module):
                 # print("adjusted",  new_sum[100].item(),new_sum.min().item(), new_sum.max().item(), new_sum.mean().item())
                 fac = target_sum.unsqueeze(1) / predicted_sum.unsqueeze(1)
                 # print("scalefac", fac[100].item() ,  "min", torch.min(fac).item(), "max", torch.max(fac).item(), "mean", torch.mean(fac).item())
-              else:
-                # ensure positive precip
-                dqv_evap_prec = torch.clamp(dqv_evap_prec, max=dqn_aa)
-
+      
               if self.conserve_water: 
                 qv_old = inputs_denorm[:,:,-1]
                 minval = -(self.yscale_lev[:,1]*qv_old/1200) - flux_qv_dp - dqv_evap_prec
@@ -775,6 +770,7 @@ class LSTM_autoreg_torchscript(nn.Module):
               #                      source,       sink   of precipitation  (note: signs already reversed w.r.t. above)
               d_precip_sourcesink    = dqn_aa      - dqv_evap_prec 
             else:
+              
               dqn_aa        = self.relu(dqn_aa) # force positive
 
               if self.conserve_water:
@@ -805,7 +801,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             water_new = P_old + water_new
             # print("model min max mean water_new 2",  torch.min(water_new).item(), torch.max(water_new).item(),torch.mean(water_new).item())
             prec_negative = self.relu(-water_new) # punish model for diagnosing negative precip from column water changes?
-            # water_new = self.relu(water_new)
+            water_new = self.relu(water_new)
             precc_release_fraction = torch.sigmoid(self.mlp_precip_release(last_h)).squeeze()
             # precc_release_fraction = 1.0
             # print("precc_release_fraction ", precc_release_fraction.shape, "water_new", water_new.shape)
@@ -904,11 +900,11 @@ class LSTM_autoreg_torchscript(nn.Module):
         # print("shape out pred", out.shape, "sfc", out_sfc.shape)
         # print("model PREC fin2",torch.mean(out_sfc[:,3:4]).item())
 
-        return out, out_sfc, rnn1_mem
-        # if self.physical_precip:
-        #   return out, out_sfc, rnn1_mem, prec_negative
-        # else:
-        #   return out, out_sfc, rnn1_mem
+        # return out, out_sfc, rnn1_mem
+        if self.physical_precip and self.return_neg_precip:
+          return out, out_sfc, rnn1_mem, prec_negative
+        else:
+          return out, out_sfc, rnn1_mem
     
     @torch.jit.export
     def pp_mp(self, out, out_sfc, x_denorm):
@@ -927,35 +923,22 @@ class LSTM_autoreg_torchscript(nn.Module):
         qice_old     = x_denorm[:,:,3:4]   
         qn_old       = qliq_old + qice_old 
 
-        # if self.physical_precip:
-        # qv_old        = x_denorm[:,:,-1:]
-        # qv_new        = qv_old + out_denorm[:,:,1:2]*1200 
-        # qv_new[qv_new<0.0] = 0.0
-        # dqv           = (qv_new - qv_old) * 0.0008333333333333334  #/1200  
-        # print("pp mp min  max qv_old", torch.min(qv_old).item(), torch.max(qv_old).item())
-        # print("pp mp min  max qv_new", torch.min(qv_new).item(), torch.max(qv_new).item())
-        
         if self.pred_total_water:
           # Predicting total water tendency and fraction of total water that is clouds 
-          dqtot           = out_denorm[:,:,1:2]
-          cld_water_frac  = out_denorm[:,:,2:3].clone()
-          cld_water_frac  = torch.square(torch.square(cld_water_frac)) 
-          cld_water_frac  = torch.clamp(cld_water_frac, min=0.0, max=1.0)
-          qv_old          = x_denorm[:,:,-1:]
-          qtot_old        = qn_old + qv_old
-          qtot_new        = qtot_old + dqtot*1200  
+          dqtot                 = out_denorm[:,:,1:2]
+          cld_water_frac        = out_denorm[:,:,2:3].clone()
+          cld_water_frac        = torch.square(torch.square(cld_water_frac)) 
+          cld_water_frac        = torch.clamp(cld_water_frac, min=0.0, max=1.0)
+          qv_old                = x_denorm[:,:,-1:]
+          qtot_old              = qn_old + qv_old
+          qtot_new              = qtot_old + dqtot*1200  
           #   qtot_new[qtot_new<0.0] = 0.0
-          qv_new          = (1-cld_water_frac)*qtot_new
-          qn_new          = (cld_water_frac)*qtot_new
-          dqv             = (qv_new - qv_old) * 0.0008333333333333334  #/1200  
-          dqn             = (qn_new - qn_old) * 0.0008333333333333334  #/1200  
-          # print("pp mp mean max cld water frac", torch.mean(cld_water_frac).item(), torch.max(cld_water_frac).item())
-          # print("pp mp mean max qv_old", torch.mean(qv_old).item(), torch.max(qv_old).item())
-          # print("pp mp mean max qtot_old", torch.mean(qtot_old).item(), torch.max(qtot_old).item())
-          # print("pp mp mean max qtot_new", torch.mean(qtot_new).item(), torch.max(qtot_new).item())
-          out_denorm[:,:,1:2]      = dqv 
-          out_denorm[:,:,2:3]      = dqn 
-
+          qv_new                = (1-cld_water_frac)*qtot_new
+          qn_new                = (cld_water_frac)*qtot_new
+          dqv                   = (qv_new - qv_old) * 0.0008333333333333334  #/1200  
+          dqn                   = (qn_new - qn_old) * 0.0008333333333333334  #/1200  
+          out_denorm[:,:,1:2]   = dqv 
+          out_denorm[:,:,2:3]   = dqn 
 
         # print("shape x denorm", x_denorm.shape, "T", T_old.shape)
         T_new           = T_old  + out_denorm[:,:,0:1]*1200
@@ -973,9 +956,6 @@ class LSTM_autoreg_torchscript(nn.Module):
             liq_frac_constrained = torch.clamp(liq_frac_pred, min=min_frac, max=max_frac)
             # print("pp2 MEAN FRAC P", torch.mean(liq_frac_constrained).item(), "MIN", torch.min(liq_frac_constrained).item(),  "MAx", torch.max(liq_frac_constrained).item() )
 
-        # liq_frac_constrained = out_denorm[:,:,3:4]
-        # print("pp_mp 2 frac100, ", liq_frac_constrained[100,:].detach().cpu().numpy())
-
         #                            dqn
         # print("mean DQN", torch.mean(torch.sum(out_denorm[:,:,2:3],1)))
         qn_new      = qn_old + out_denorm[:,:,2:3]*1200  
@@ -992,10 +972,6 @@ class LSTM_autoreg_torchscript(nn.Module):
             out_denorm  = torch.cat((out_denorm[:,:,0:2], dqliq, dqice, out_denorm[:,:,4:]),dim=2)
         else:
             out_denorm  = torch.cat((out_denorm[:,:,0:2], dqliq, dqice, out_denorm[:,:,3:]),dim=2)
-        # if self.predict_liq_frac:              # replace         dqn,  liqfrac
-        #     out_denorm  = torch.cat((out_denorm[:,:,0:1], dqv,  dqliq, dqice, out_denorm[:,:,4:]),dim=2)
-        # else:
-        #     out_denorm  = torch.cat((out_denorm[:,:,0:1], dqv,  dqliq, dqice, out_denorm[:,:,3:]),dim=2)
 
         return out_denorm, out_sfc_denorm
     

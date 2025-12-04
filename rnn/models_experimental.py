@@ -1315,9 +1315,11 @@ class SpaceStateModel_autoreg(nn.Module):
     
     # def forward(self, inputs_main, inputs_aux):
         
-    def forward(self, inputs_main, inputs_aux, rnn1_mem):
 
-        batch_size = inputs_main.shape[0]
+    def forward(self, inp_list : List[Tensor]):
+        inputs_main   = inp_list[0]
+        inputs_aux    = inp_list[1]
+        rnn1_mem      = inp_list[2]
         # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         device=self.device
 
