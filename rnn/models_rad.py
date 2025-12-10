@@ -284,27 +284,6 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         out_sfc         = out_sfc / self.yscale_sca
         return out, out_sfc
         
-    def pp_mp(self, out, out_sfc, x_denorm):
-        out_denorm      = out / self.yscale_lev
-        out_sfc_denorm  = out_sfc / self.yscale_sca
-
-        T_before        = x_denorm[:,:,0:1]
-        qliq_before     = x_denorm[:,:,2:3]
-        qice_before     = x_denorm[:,:,3:4]   
-        qn_before       = qliq_before + qice_before 
-        
-        T_new           = T_before  + out_denorm[:,:,0:1]*1200
-        liq_frac_constrained    = self.temperature_scaling(T_new)
-
-        #                            dqn
-        qn_new      = qn_before + out_denorm[:,:,2:3]*1200  
-        qliq_new    = liq_frac_constrained*qn_new
-        qice_new    = (1-liq_frac_constrained)*qn_new
-        dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
-        dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
-        out_denorm  = torch.cat((out_denorm[:,:,0:2], dqliq, dqice, out_denorm[:,:,3:]),dim=2)
-        
-        return out_denorm, out_sfc_denorm
     
     def outgoing_lw(self, temp):
         # Stefan-Boltzmann constant (W/m²/K⁴)
@@ -814,8 +793,9 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         rh_before       = x_denorm[:,:,1:2]
 
         # rh_before =  torch.clamp(rh_before, min=0.1, max=1.4)
-        q_before        = self.relative_to_specific_humidity(rh_before, T_before, play)
-        q_before        = torch.clamp(q_before, min=0.0, max=0.5)
+        # q_before        = self.relative_to_specific_humidity(rh_before, T_before, play)
+        # q_before        = torch.clamp(q_before, min=0.0, max=0.5)
+        q_before        = x_denorm[:,:,-1:]
 
         qliq_before     = x_denorm[:,:,2:3]
         qice_before     = x_denorm[:,:,3:4]   
@@ -827,16 +807,24 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
           liq_frac_constrained    = self.temperature_scaling(T_new)
           #                            dqn
           qn_new      = qn_before + out_denorm[:,:,2:3]*1200  
+          qn_new      = torch.clamp(qn_new, min=0.0)
           qliq_new    = liq_frac_constrained*qn_new
           qice_new    = (1-liq_frac_constrained)*qn_new
+          out_new[:,:,2:3] = (qn_new - qn_before)/1200 * self.yscale_lev[:,2:3]
         else:
           qliq_new    = qliq_before + out_denorm[:,:,2:3]*1200 
           qice_new    = qice_before + out_denorm[:,:,3:4]*1200 
+          qliq_new = torch.clamp(qliq_new, min=0.0)
+          qice_new = torch.clamp(qice_new, min=0.0)
+          out_new[:,:,2:3] = (qliq_new - qliq_before)/1200 * self.yscale_lev[:,2:3]
+          out_new[:,:,3:4] = (qice_new - qice_before)/1200 * self.yscale_lev[:,3:4]
 
 
         dq          = out_denorm[:,:,1:2]
         q_new       = q_before + dq*1200 
         q_new       = torch.clamp(q_new, min=0.0)
+        out_new[:,:,1:2] = (q_new - q_before)/1200 * self.yscale_lev[:,1:2]
+
         # assert not torch.isnan(q_new).any()
         # print("q new raw min max",  torch.min(q_new[:,:]).item(), torch.max(q_new[:,:]).item())
 
@@ -863,7 +851,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         temp = (T_new - 160 ) / (180)
         pressure = (torch.log(play) - 0.00515) / (11.59485)
         vmr_h2o = (torch.sqrt(torch.sqrt(vmr_h2o))  - 0.0101) / 0.497653
-        # print("q new  min max", torch.min(q_new[:,:]).item(), torch.max(q_new[:,:]).item())
+        # print("q new  min max", torch.min(vmr_h2o[:,:]).item(), torch.max(vmr_h2o[:,:]).item())
         # print("q nans", torch.nonzero(torch.isnan(q_new.view(-1))))
         # assert not torch.isnan(q_new).any()
         
@@ -877,7 +865,13 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
 
         inputs_rad = torch.cat((pressure, temp, vmr_h2o, qliq_new, qice_new, inputs_main[:,:,12:15], cloudfrac),dim=2)
         # inputs_rad = torch.transpose(inputs_rad, 0, 1) 
-                
+        # print("pressure min max", torch.min(pressure[:,:]).item(), torch.max(pressure[:,:]).item())
+        # print("temp min max", torch.min(temp[:,:]).item(), torch.max(temp[:,:]).item())
+        # print("vmr_h2o min max", torch.min(vmr_h2o[:,:]).item(), torch.max(vmr_h2o[:,:]).item())
+        # print("qliq_new min max", torch.min(qliq_new[:,:]).item(), torch.max(qliq_new[:,:]).item())
+        # print("qice_new min max", torch.min(qice_new[:,:]).item(), torch.max(qice_new[:,:]).item())
+        # print("inputs_rad min max", torch.min(inputs_rad[:,:]).item(), torch.max(inputs_rad[:,:]).item())
+
         # 1. MLP TO PREDICT OPTICAL PROPERTIES
         
 
@@ -896,6 +890,8 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         tau_lw      = tau_lw*(1e-24*col_dry)
         tau_lw      = torch.clamp(tau_lw, min=1e-6, max=400.0)
         pfrac       = pfrac.squeeze() # 
+        # print("pfrac0 min max", torch.min(pfrac[:,:]).item(), torch.max(pfrac[:,:]).item())
+
         pfrac       = self.softmax(pfrac)
         # T_new       = torch.transpose(T_new.squeeze(),0,1)
         # play        = torch.transpose(play.squeeze(),0,1)
@@ -914,8 +910,10 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         # source_lev  = torch.zeros(nlev+1, batch_size, self.ng_lw, device=pfrac.device)
         # source_lev[-1,:,:] = pfrac[-1,:,:] * lwup_lev[-1,:,:]
         # source_lev[0:-1,:] = pfrac[:,:,:]  * lwup_lev[0:-1,:,:]
-        
         lwup_lev    = torch.unsqueeze(self.outgoing_lw(tlev),1) # (nb, ng, nlev+1)
+        # print("pfrac min max", torch.min(pfrac[:,:]).item(), torch.max(pfrac[:,:]).item())
+        # print("lwup_lev min max", torch.min(lwup_lev[:,:]).item(), torch.max(lwup_lev[:,:]).item())
+
         source_lev  = torch.zeros(batch_size, self.ng_lw, nlev+1, device=device)
         source_lev[:,:,-1] = pfrac[:,:,-1] * lwup_lev[:,:,-1]
         source_lev[:,:,0:-1] = pfrac[:,:,:]  * lwup_lev[:,:,0:-1]
@@ -936,6 +934,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         # one_plus_coeff = 1.0 + coeff
         # source_dn = one_minus_trans * (planck_fl + coeff * planck_bot) / one_plus_coeff
         # source_up = one_minus_trans * (planck_fl + coeff * planck_top) / one_plus_coeff
+        # print("source_lev min max", torch.min(source_lev[:,:]).item(), torch.max(source_lev[:,:]).item())
 
         source_up, source_dn, trans_lw = self.reftrans_lw(source_lev, tau_lw)
 
@@ -946,7 +945,9 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         source_up       = torch.reshape(source_up, (-1,nlev))
         source_dn       = torch.reshape(source_dn, (-1,nlev))
         trans_lw        = torch.reshape(trans_lw, (-1,nlev))
-        
+        # print("trans_lw min max", torch.min(trans_lw[:,:]).item(), torch.max(trans_lw[:,:]).item())
+        # print("source_up min max", torch.min(source_up[:,:]).item(), torch.max(source_up[:,:]).item())
+
         # calc_fluxes_no_scattering_lw
         # At top-of-atmosphere there is no diffuse downwelling radiation
         # flux_lw_dn = torch.zeros(nlev+1, batch_size*self.ng_lw,  device=pfrac.device)
@@ -973,7 +974,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         flux_lw_dn = torch.sum(flux_lw_dn_gpt,dim=1)
         del flux_lw_dn_gpt, flux_lw_up_gpt
         
-        # print("flux up  min max", torch.min(flux_lw_up[:,:]).item(), torch.max(flux_lw_up[:,:]).item())
+        # print("flux lw up  min max", torch.min(flux_lw_up[:,:]).item(), torch.max(flux_lw_up[:,:]).item())
 
         # -------------------------- SHORTWAVE -----------------------------
         optprops_sw = self.mlp_optprops_sw(inputs_rad)
@@ -1227,3 +1228,26 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         # tau_cld_sw = torch.clamp(tau_cld_sw, max=500.0)
     
         return out_new, out_sfc, rnn1_mem
+    
+    @torch.jit.export
+    def pp_mp(self, out, out_sfc, x_denorm):
+        out_denorm      = out / self.yscale_lev
+        out_sfc_denorm  = out_sfc / self.yscale_sca
+
+        T_before        = x_denorm[:,:,0:1]
+        qliq_before     = x_denorm[:,:,2:3]
+        qice_before     = x_denorm[:,:,3:4]   
+        qn_before       = qliq_before + qice_before 
+        
+        T_new           = T_before  + out_denorm[:,:,0:1]*1200
+        liq_frac_constrained    = self.temperature_scaling(T_new)
+
+        #                            dqn
+        qn_new      = qn_before + out_denorm[:,:,2:3]*1200  
+        qliq_new    = liq_frac_constrained*qn_new
+        qice_new    = (1-liq_frac_constrained)*qn_new
+        dqliq       = (qliq_new - qliq_before) * 0.0008333333333333334 #/1200  
+        dqice       = (qice_new - qice_before) * 0.0008333333333333334 #/1200   
+        out_denorm  = torch.cat((out_denorm[:,:,0:2], dqliq, dqice, out_denorm[:,:,3:]),dim=2)
+        
+        return out_denorm, out_sfc_denorm

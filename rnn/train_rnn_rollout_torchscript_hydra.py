@@ -88,7 +88,7 @@ def main(cfg: DictConfig):
     
     # SELECT OUTPUTS / MICROPHYSICS CONSTRAINT
     # mp_mode = 0   # regular 6 outputs
-    # mp_mode = 1   # 5 outputs, predict qn, liq_frac DIAGNOSED from temperature (mp_constraint) (Hu et al.)
+    # mp_mode = 1   # 5 outputs, predict qn, liq_frac DIAGNOSED from temperature (Hu et al.)
     # mp_mode = -1  # 6 outputs, predict qn + liq_frac 
     # mp_mode = -2  # 6 outputs, predict qn + liq_frac (fraction of cloud that is liquid) + cld_water_frac (fraction of total water that is cloud)
     # physical_precip: attempt to incorporate mass conservation via predicting fluxes and microphysical tendencies, diagnose precipitation  (see models.py)
@@ -583,6 +583,8 @@ def main(cfg: DictConfig):
                     ar_tau = cfg.ar_tau,
                     use_surface_memory=cfg.use_surface_memory)#,
     elif cfg.model_type=="physrad":
+        torch._functorch.config.donated_buffer=False
+        
         from models_rad import LSTM_autoreg_torchscript_physrad
         model = LSTM_autoreg_torchscript_physrad(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
@@ -953,7 +955,7 @@ def main(cfg: DictConfig):
                     model.return_neg_precip = False
                 # model = model.to("cpu")
                 torch.save({
-                            'epoch': epoch,
+                            'epoch': epoch+1,
                             'model_state_dict': model.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict(),
                             'scheduler_state_dict': lr_scheduler.state_dict(),

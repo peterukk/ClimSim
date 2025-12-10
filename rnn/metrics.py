@@ -209,6 +209,8 @@ def get_energy_metric(hyai, hybi):
             
         energy_pred = torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),1)
         energy_true = torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),1)
+        # energy_pred = torch.sum(thick*(dq_pred*Lv + dT_pred*cp),1)
+        # energy_true = torch.sum(thick*(dq_true*Lv + dT_true*cp),1)
         # (batch)
         
         energy_pred = torch.reshape(energy_pred,(timesteps, -1))
@@ -369,6 +371,8 @@ def specific_to_relative_humidity_torch_cc(sh, temp, pressure):
     
     # Calculate relative humidity
     rh = e_actual / e_sat
+
+    # print("max rh", rh.max().item())
     
     # Clamp to [0, 1] to handle numerical issues
     # rh = torch.clamp(rh, 0.0, 1.0)

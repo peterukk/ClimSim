@@ -60,6 +60,29 @@ class LayerPressure(nn.Module):
 
         return pres
     
+class LayerPressureThickness(nn.Module):
+    def __init__(self,hyai, hybi, name='LayerPressureThickness',
+                  # sp_min=62532.977,sp_max=104871.82,
+                  ):
+        super(LayerPressureThickness, self).__init__()
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # self.sp_min = sp_min
+        # self.sp_max = sp_max
+        # self.pres_min = 36.434
+        # self.pres_max = self.sp_max
+        self.nlev = hyai.shape[0] - 1
+        self.hyai = torch.reshape(hyai,(1,self.nlev+1,1)).to(device)
+           
+        self.hybi = torch.reshape(hybi,(1,self.nlev+1,1)).to(device)
+        
+    def forward(self, sp):
+        # sp  (batch, 1, 1)   
+        # hyai,hybi  (1, nlev+1, 1)
+        
+        dp = sp*(self.hybi[:,1:self.nlev+1]-self.hybi[:,0:self.nlev]) + 100000.0*(self.hyai[:,1:self.nlev+1]-self.hyai[:,0:self.nlev])
+
+        return dp
     
 class LevelPressure(nn.Module):
     def __init__(self,hyai, hybi, name='LevelPressure',

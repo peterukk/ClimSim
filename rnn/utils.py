@@ -386,7 +386,7 @@ class train_or_eval_one_epoch:
                       else:
                         if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb" and self.model_is_stochastic:
                           dummy=outs[3]
-                      if self.model.physical_precip:
+                      if self.cfg.physical_precip:
                         if self.model.return_neg_precip:
                           precip_negative = outs[3]
                           precip_neg_mse += torch.mean(torch.square(precip_negative))
@@ -507,7 +507,7 @@ class train_or_eval_one_epoch:
 
                         # Positive cloud water metric 
 
-                        if self.model.physical_precip:
+                        if self.cfg.physical_precip:
                           # Metrics for the predicted vapor and cloud water being positive after tendency update
                           # Note: if mp_mode=-2, we are predicting only total water, qv_new is actually qtot_new
                           # and no point measuring positivity of both
@@ -551,8 +551,8 @@ class train_or_eval_one_epoch:
                             losses.append(self.cfg.w_hcon*h_con)
                             
                         if self.cfg.use_water_loss:
-                            # losses.append(self.cfg.w_wcon * wcon)
-                            losses.append(self.cfg.w_wcon * wcon_long)
+                            losses.append(self.cfg.w_wcon * wcon)
+                            # losses.append(self.cfg.w_wcon * wcon_long)
 
                         if self.cfg.use_rh_loss and self.cfg.include_q_input:
                             losses.append(self.cfg.w_rh * rh_mse)
@@ -566,8 +566,9 @@ class train_or_eval_one_epoch:
                         if self.cfg.use_qn_positivity_loss and self.cfg.mp_mode!=-2 and self.model.physical_precip:
                             losses.append(self.cfg.w_qnpos * qn_pos_loss)
 
-                        if self.cfg.use_neg_precip_loss and self.model.physical_precip:
-                            losses.append(self.cfg.w_precip_neg * precip_neg_mse)
+                        if self.cfg.physical_precip:
+                            if self.cfg.use_neg_precip_loss:
+                                losses.append(self.cfg.w_precip_neg * precip_neg_mse)
 
                         if self.model_is_stochastic and self.cfg.use_det_loss:
                             losses.append(self.cfg.w_det * (det_skill**2))
@@ -598,7 +599,7 @@ class train_or_eval_one_epoch:
                         rh_mse = rh_mse.detach()
                     cloudpath_err = cloudpath_err.detach()
                     # if self.cfg.use_water_positivity_loss and self.cfg.mp_mode!=-2:
-                    if self.model.physical_precip: 
+                    if self.cfg.physical_precip: 
                         qv_pos_loss = qv_pos_loss.detach()
                         if self.cfg.mp_mode != -2: 
                             qn_pos_loss = qn_pos_loss.detach()
@@ -627,7 +628,7 @@ class train_or_eval_one_epoch:
                     running_cldpath += cloudpath_err.item()
                     running_bias    += bias_tot.item() 
                     running_precip  += precip_sum_mse.item()
-                    if self.model.physical_precip:
+                    if self.cfg.physical_precip:
                         running_qv_pos  += qv_pos_loss.item()
                         if self.cfg.mp_mode != -2: 
                             running_qn_pos  += qn_pos_loss.item()
@@ -657,7 +658,7 @@ class train_or_eval_one_epoch:
                             if self.cfg.include_q_input:
                                 epoch_rh_mse  += rh_mse.item()
                             epoch_accumprec += precip_sum_mse.item()
-                            if self.model.physical_precip:
+                            if self.cfg.physical_precip:
                                 epoch_qv_pos += qv_pos_loss.item()
                                 if self.cfg.mp_mode != -2:
                                     epoch_qn_pos += qn_pos_loss.item()
@@ -757,7 +758,7 @@ class train_or_eval_one_epoch:
                     running_energy = running_energy / fac
                     running_water = running_water / fac
                     running_cldpath = running_cldpath / fac
-                    if self.model.physical_precip:
+                    if self.cfg.physical_precip:
                         running_qv_pos = running_qv_pos / fac
                         running_qn_pos = running_qn_pos / fac
                     running_bias = running_bias / fac
@@ -920,6 +921,8 @@ class train_or_eval_one_epoch:
         del loss, h_con, wcon
         if self.cfg.autoregressive:
             del rnn1_mem
+        if self.cfg.physical_precip: 
+            print("Weight w1 value:", self.model.w1)
         # if self.cfg.use_surface_memory:
         #     del sfc_mem
         if device.type=="cuda": 
