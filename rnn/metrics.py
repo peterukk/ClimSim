@@ -864,7 +864,7 @@ def CRPS4(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, return_low_var_inds=F
     # else:
     return CRPS#, MSE, ens_var
 
-def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps, sumvar=True):
+def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps, sumvar=True, loss_weights=None):
     """
     Calculate Continuous Ranked Probability Score (CRPS)
 
@@ -892,6 +892,10 @@ def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps, sumvar=True):
     # yp: ntime*nbatch*nens, nseq, ny 
     import scoringrules as sr
     ns,seq_size,feature_size = y.shape
+    if loss_weights is not none:
+        y       = loss_weights*y
+        y_pred  = loss_weights*y_pred
+
     batch_size = ns // timesteps
     ens_size = y_pred.shape[0] // (timesteps*batch_size)          
     y_pred = torch.reshape(y_pred, (timesteps, ens_size, batch_size, seq_size*feature_size))
@@ -965,7 +969,16 @@ def variogram_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     
     return vs
 
-def energy_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
+def get_energy_score(weights=None):
+    def energyscore(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps):
+        return energy_score(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps,weights)
+
+    return energyscore
+
+def energy_score(y, y_sfc, y_pred, y_sfc_pred, timesteps, weights=None):
+    if weights is not None: 
+        y = weights*y 
+        y_pred = weights*y_pred
     # y:  ntime*nbatch,      nseq, ny 
     # yp: ntime*nbatch*nens, nseq, ny 
     # sr. es_ensemble needs 
@@ -1024,11 +1037,11 @@ def ds_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
     return ds
 
 # def get_CRPS(beta, sumvar): 
-def get_CRPS(sumvar): 
+def get_CRPS(sumvar, loss_weights=None): 
     def customCRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps):
         # return CRPS_anemoi(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps)#, beta)
         # return CRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, beta)
-        return CRPS_scoringrules(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, sumvar)
+        return CRPS_scoringrules(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, sumvar, loss_weights)
 
     return customCRPS
 

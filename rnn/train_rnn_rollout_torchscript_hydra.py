@@ -487,7 +487,7 @@ def main(cfg: DictConfig):
                         predict_liq_frac=predict_liq_frac,
                         randomly_initialize_cellstate=cfg.randomly_initialize_cellstate,
                         output_sqrt_norm=cfg.new_nolev_scaling,
-                        concat = cfg.concat,
+                       # concat = cfg.concat,
                         nh_mem = cfg.nh_mem)
         else:
             model = LSTM_torchscript(hyam,hybm,hyai,hybi,
@@ -735,12 +735,12 @@ def main(cfg: DictConfig):
     elif cfg.loss_fn_type == "huber":
         loss_fn = metrics_det
     elif cfg.loss_fn_type == "CRPS":
-        loss_fn = metrics.get_CRPS(cfg.crps_sumvar)
+        loss_fn = metrics.get_CRPS(cfg.crps_sumvar, loss_weights)
         print("CRPS sum variables first:", cfg.crps_sumvar)
     elif cfg.loss_fn_type == "variogram_score":
         loss_fn = metrics.variogram_score   
     elif cfg.loss_fn_type == "energy_score":
-        loss_fn = metrics.energy_score   
+        loss_fn = metrics.get_energy_score(loss_weights)   
     elif cfg.loss_fn_type == "ds_score":
         loss_fn = metrics.ds_score   
     else:

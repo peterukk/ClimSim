@@ -596,7 +596,13 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
                 albedo[:, jlev] = (reflectance[:, jlev] + 
                                   torch.square(transmittance[:, jlev]) * 
                                   albedoplusone * inv_denom)
-                
+
+                # TripleClouds :
+                # ng_nreg = self.nreg//3 
+                # A[0:ng_nreg]           = A[0:ng_nreg]*V[1,1] + A[ng_nreg:2*ng_nreg]*V[2,1] + A[2*ng_nreg:3*ng_nreg]*V[3,1]
+                # A[ng_nreg:2*ng_nreg]   = A[0:ng_nreg]*V[1,2] + A[ng_nreg:2*ng_nreg]*V[2,2] + A[2*ng_nreg:3*ng_nreg]*V[3,2]
+                # A[2*ng_nreg:3*ng_nreg] = A[0:ng_nreg]*V[1,3] + A[ng_nreg:2*ng_nreg]*V[2,3] + A[2*ng_nreg:3*ng_nreg]*V[3,3]         
+                                
                 # Shonk & Hogan (2008) Eq 11:
                 fluxdndir = flux_dn_direct[:, jlev].clone()
                 source[:, jlev] = (ref_dir[:, jlev] * fluxdndir +
@@ -635,6 +641,118 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
             
             return flux_up, flux_dn_diffuse, flux_dn_direct
    
+    @torch.compile
+    def adding_tc_sw_batchfirst(self, incoming_toa, albedo_surf_diffuse, albedo_surf_direct, cos_sza,
+                    reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir, V):
+            """
+            Adding method for shortwave radiation with TripleClouds
+            
+            Args:
+                incoming_toa: Incoming downwelling solar radiation at TOA (tensor of shape [ncol])
+                albedo_surf_diffuse: Surface albedo to diffuse radiation (tensor of shape [ncol])
+                albedo_surf_direct: Surface albedo to direct radiation (tensor of shape [ncol])
+                cos_sza: Cosine of solar zenith angle (tensor of shape [ncol])
+                reflectance: Diffuse reflectance of each layer (tensor of shape [ncol, nlev])
+                transmittance: Diffuse transmittance of each layer (tensor of shape [ncol, nlev])
+                ref_dir: Direct beam reflectance of each layer (tensor of shape [ncol, nlev])
+                trans_dir_diff: Direct beam to diffuse transmittance (tensor of shape [ncol, nlev])
+                trans_dir_dir: Direct transmittance of each layer (tensor of shape [ncol, nlev])
+                v_matrix: Overlap matrix [ncol, 3, 3]
+            Returns:
+                tuple: (flux_up, flux_dn_diffuse, flux_dn_direct) each of shape [ncol, nlev+1]
+            """
+            
+            ncol, nlev = reflectance.shape
+            device = reflectance.device
+            dtype = reflectance.dtype
+            
+            # Initialize output arrays
+            flux_up = torch.zeros(ncol, nlev + 1, dtype=dtype, device=device)
+            flux_dn_diffuse = torch.zeros(ncol, nlev + 1, dtype=dtype, device=device)
+            flux_dn_direct = torch.zeros(ncol, nlev + 1, dtype=dtype, device=device)
+            
+            # Initialize working arrays
+            A = torch.zeros(ncol, nlev + 1, dtype=dtype, device=device) # albedo
+            source = torch.zeros(ncol, nlev + 1, dtype=dtype, device=device)
+            inv_denominator = torch.zeros(ncol, nlev, dtype=dtype, device=device)
+            
+            # Compute profile of direct (unscattered) solar fluxes at each half-level
+            # by working down through the atmosphere
+            flux_dn_direct[:, 0] = incoming_toa
+            for jlev in range(nlev):
+                flux_dn_direct[:, jlev + 1] = flux_dn_direct[:, jlev].clone() * trans_dir_dir[:, jlev]
+            
+            # Set surface albedo
+            A[:, nlev] = albedo_surf_diffuse
+            
+            # At the surface, the direct solar beam is reflected back into the diffuse stream
+            source[:, nlev] = albedo_surf_direct * flux_dn_direct[:, nlev] #* cos_sza
+            
+            # Work back up through the atmosphere and compute the albedo of the entire
+            # earth/atmosphere system below that half-level, and also the "source"
+            for jlev in range(nlev - 1, -1, -1):  # nlev down to 1 in Fortran indexing
+                # Lacis and Hansen (1974) Eq 33, Shonk & Hogan (2008) Eq 10:
+                # inv_denominator[:, jlev] = 1.0 / (1.0 - albedo[:, jlev + 1].clone() * reflectance[:, jlev])
+                
+                Aplusone = A[:, jlev + 1].clone()
+                Adirplusone = Adir[:, jlev + 1].clone()
+
+                inv_denominator[:, jlev] = 1.0 / (1.0 - Aplusone * reflectance[:, jlev])
+    
+                # Shonk & Hogan (2008) Eq 9, Petty (2006) Eq 13.81:
+                # albedo[:, jlev] = (reflectance[:, jlev] + 
+                #                   transmittance[:, jlev] * transmittance[:, jlev] * 
+                #                   albedo[:, jlev + 1] * inv_denominator[:, jlev])
+                
+                inv_denom = inv_denominator[:, jlev].clone()
+                A[:,jlev] = (reflectance[:, jlev] + torch.square(transmittance[:,jlev]) * Aplusone * inv_denom)
+                Adir[:,jlev] = (ref_dir[:, jlev] + (trans_dir_dir[:,jlev]*Adirplusone + trans_dir_diff[:,jlev]*Aplusone)  * 
+                            transmittance[:,jlev] * inv_denom)
+
+                # TripleClouds :
+                # ng_nreg = self.nreg//3 
+                A[0:ng_nreg]           = A[0:ng_nreg]*V[1,1] + A[ng_nreg:2*ng_nreg]*V[2,1] + A[2*ng_nreg:3*ng_nreg]*V[3,1]
+                A[ng_nreg:2*ng_nreg]   = A[0:ng_nreg]*V[1,2] + A[ng_nreg:2*ng_nreg]*V[2,2] + A[2*ng_nreg:3*ng_nreg]*V[3,2]
+                A[2*ng_nreg:3*ng_nreg] = A[0:ng_nreg]*V[1,3] + A[ng_nreg:2*ng_nreg]*V[2,3] + A[2*ng_nreg:3*ng_nreg]*V[3,3]         
+                                
+                # Shonk & Hogan (2008) Eq 11:
+                fluxdndir = flux_dn_direct[:, jlev].clone()
+                source[:, jlev] = (ref_dir[:, jlev] * fluxdndir +
+                                  transmittance[:, jlev] * 
+                                  (source[:, jlev + 1] + 
+                                  Aplusone * trans_dir_diff[:, jlev] * fluxdndir) *
+                                  inv_denom)
+            
+            # At top-of-atmosphere there is no diffuse downwelling radiation
+            flux_dn_diffuse[:, 0] = 0.0
+            
+            # At top-of-atmosphere, all upwelling radiation is due to scattering
+            # by the direct beam below that level
+            flux_up[:, 0] = source[:, 0]
+            
+            # Work back down through the atmosphere computing the fluxes at each half-level
+            for jlev in range(nlev):  # 1 to nlev in Fortran indexing
+                # Shonk & Hogan (2008) Eq 14 (after simplification):
+                fluxdndir = flux_dn_direct[:, jlev].clone()
+                fluxdndiff = flux_dn_diffuse[:, jlev].clone()
+    
+                flux_dn_diffuse[:, jlev + 1] = ((transmittance[:, jlev] * fluxdndiff +  
+                                                 reflectance[:, jlev] * source[:, jlev + 1] + 
+                                                 trans_dir_diff[:, jlev] * fluxdndir) *
+                                               inv_denominator[:, jlev])      
+          
+                # Shonk & Hogan (2008) Eq 12:
+                flux_up[:, jlev + 1] = (A[:, jlev + 1] * flux_dn_diffuse[:, jlev + 1].clone() +
+                                       source[:, jlev + 1])
+                
+                # Apply cosine correction to direct flux
+                # flux_dn_direct[:, jlev] = fluxdndir * cos_sza
+            
+            # Final cosine correction for surface direct flux
+            # flux_dn_direct[:, nlev] = flux_dn_direct[:, nlev] * cos_sza
+            
+            return flux_up, flux_dn_diffuse, flux_dn_direct
+
     @torch.compile
     def lw_solver_noscat_batchfirst(self, flux_lw_dn, flux_lw_up, trans_lw, 
                               source_dn, source_up, source_sfc, albedo_surf):
@@ -1116,6 +1234,10 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         flux_sw_dn_sfc      = flux_sw_dn[:,-1].unsqueeze(1)             # NETSW
 
         flux_sw_net         = flux_sw_dn - flux_sw_up
+        mu = torch.reshape(inputs_aux[:,6:7],(-1,1))
+        mu_rep = torch.repeat_interleave(mu,nlev+1,dim=1)
+        inds_zero = mu_rep < 1e-3
+        flux_sw_net[inds_zero] = 0.0
         
         flux_lw_dn_sfc      = flux_lw_dn[:,-1].unsqueeze(1)             # FLWDS 
 

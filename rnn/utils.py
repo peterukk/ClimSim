@@ -350,6 +350,12 @@ class train_or_eval_one_epoch:
                   x_sfc0 = x_sfc0.unsqueeze(0)
                   x_sfc0 = torch.repeat_interleave(x_sfc0,repeats=self.cfg.ensemble_size,dim=0)
                   x_sfc0 = x_sfc0.flatten(0,1)
+                  if self.cfg.model_type in ["physrad", "radflux"] or self.cfg.physical_precip: #or self.cfg.mp_mode==-2:
+                    x_lay_raw1 = x_lay_raw0.unsqueeze(0)
+                    x_lay_raw1 = torch.repeat_interleave(x_lay_raw1,repeats=self.cfg.ensemble_size,dim=0)
+                    x_lay_raw1 = x_lay_raw1.flatten(0,1)
+                else:
+                    x_lay_raw1 = x_lay_raw0
                   # print("shape inp main", inputs_main.shape)          
                 
                 with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
@@ -372,8 +378,8 @@ class train_or_eval_one_epoch:
                     if use_ar_noise:
                         inp_list.append(eps_prev)
                     if self.cfg.model_type in ["physrad", "radflux"] or self.cfg.physical_precip: #or self.cfg.mp_mode==-2:
-                        inp_list.append(x_lay_raw0)
-                        
+                        inp_list.append(x_lay_raw1)
+                    # print("1 xlayraw shape", x_lay_raw0.shape)
                     outs = self.model(inp_list)
                         
                     preds_lay0, preds_sfc0 = outs[0], outs[1]
@@ -776,6 +782,8 @@ class train_or_eval_one_epoch:
                         print("[{:d}, {:d}] Loss: {:.2e} var: {:.2e} det: {:.2e} h: {:.2e}  w: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
                                                         j+1, running_loss,running_var, running_det, running_energy,running_water, running_precip, running_bias, r2raw, elaps, t_comp), flush=True)
                         running_var = 0.0; running_det = 0.0
+                        print("[{:d}, {:d}] Loss: {:.2e}  h: {:.2e}  w: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f} rh-MSE: {:.2e}, took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
+                                                                                j+1, running_loss,running_energy,running_water,running_precip, running_bias, r2raw, running_rh_mse, elaps, t_comp), flush=True)
                     else:
                         print("[{:d}, {:d}] Loss: {:.2e}  h: {:.2e}  w: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f} rh-MSE: {:.2e}, took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
                                                         j+1, running_loss,running_energy,running_water,running_precip, running_bias, r2raw, running_rh_mse, elaps, t_comp), flush=True)
