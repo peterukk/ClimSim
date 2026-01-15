@@ -381,6 +381,8 @@ class train_or_eval_one_epoch:
                         inp_list.append(x_lay_raw1)
                     # print("1 xlayraw shape", x_lay_raw0.shape)
                     outs = self.model(inp_list)
+
+                    del x_lay0, inp_list
                         
                     preds_lay0, preds_sfc0 = outs[0], outs[1]
                     if self.cfg.autoregressive:
@@ -518,12 +520,12 @@ class train_or_eval_one_epoch:
                           # Note: if mp_mode=-2, we are predicting only total water, qv_new is actually qtot_new
                           # and no point measuring positivity of both
                           if self.cfg.mp_mode != -2:
-                            qn_old = x_lay_raw[:,:,2] +  x_lay_raw[:,:,3]
-                            qn_new = qn_old + 1200*(preds_lay[:,:,2])/self.model.yscale_lev[:,2] + 1200*(preds_lay[:,:,3])/self.model.yscale_lev[:,3]
+                            qn_new = ((x_lay_raw[:,:,2] +  x_lay_raw[:,:,3]) + 1200*(preds_lay[:,:,2])/self.model.yscale_lev[:,2] + 
+                                    1200*(preds_lay[:,:,3])/self.model.yscale_lev[:,3])
                             qn_pos_loss = torch.mean(torch.square(F.relu(-qn_new)))
-                          qv_old = x_lay_raw[:,:,-1] 
+                          # qv_old = x_lay_raw[:,:,-1] 
                           # hang on. if mp_mode=-2, whats below is actually incorrect? qv_old is just qv but preds_lay_1 is the total water
-                          qv_new = qv_old + 1200*preds_lay[:,:,1]/self.model.yscale_lev[:,1]
+                          qv_new = x_lay_raw[:,:,-1] + 1200*preds_lay[:,:,1]/self.model.yscale_lev[:,1]
                           # print("min qv_old",qv_old.min().item(), "max", qv_old.max().item())
                           # print("min qv new",qv_new.min().item(), "max", qv_new.max().item())
                           qv_pos_loss = torch.mean(torch.square(F.relu(-qv_new)))
@@ -531,6 +533,7 @@ class train_or_eval_one_epoch:
                             precip_neg_mse = precip_neg_mse / timesteps
                         # print("ut min max mean qn new-pred", torch.min(qn_new).item(),  torch.max(qn_new).item(), torch.mean(qn_new).item())
                         # print("qn pos loss: ", q_pos_loss.item())
+                          del qn_new, qv_new
 
                         # precipitation accumulation
                         precip_sum_mse  = metrics.precip_sum_mse(yto_sfc, ypo_sfc, timesteps)
@@ -697,6 +700,9 @@ class train_or_eval_one_epoch:
                                    
                             sfc_pred = ypo_sfc.reshape(-1,self.model.ny_sfc).cpu().numpy().transpose()
                             sfc_true = yto_sfc.reshape(-1,self.model.ny_sfc).cpu().numpy().transpose()
+
+                            # for isfc in np.arange(self.model.ny_sfc):
+                            #   print("i=", isfc,"mean", sfc_pred[isfc].mean(), "max", sfc_pred[isfc].max())
 
                             epoch_R2netsw += np.corrcoef((sfc_pred[0,:],sfc_true[0,:]))[0,1]**2
                             epoch_R2flwds += np.corrcoef((sfc_pred[1,:],sfc_true[1,:]))[0,1]**2

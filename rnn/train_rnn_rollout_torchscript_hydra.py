@@ -28,7 +28,10 @@ import matplotlib.pyplot as plt
 # matplotlib.use('TkAgg')
 matplotlib.use('Agg')
 import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "backend:cudaMallocAsync"
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "graph_capture_record_stream_reuse:True"
 import sys
 import inspect
 import gc
@@ -71,7 +74,7 @@ def main(cfg: DictConfig):
     tr_data_path = cfg.tr_data_dir + cfg.tr_data_fname
     val_data_path = cfg.val_data_dir + cfg.val_data_fname
 
-    #torch.set_float32_matmul_precision("medium")
+    torch.set_float32_matmul_precision("medium")
     #torch.backends.cuda.matmul.allow_tf32 = True    
     # torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
     print("Allow TF32:", torch.backends.cuda.matmul.allow_tf32)

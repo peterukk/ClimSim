@@ -159,6 +159,8 @@ class LSTM_autoreg_torchscript(nn.Module):
     output_sqrt_norm: Final[bool]
     concat: Final[bool]
     store_precip: Final[bool]
+    include_evap: Final[bool]
+    do_heat_advection: Final[bool]
     pour_excess: Final[bool]
     pred_total_water: Final[bool]
     conserve_water: Final[bool]
@@ -261,6 +263,8 @@ class LSTM_autoreg_torchscript(nn.Module):
         self.store_precip = True
         self.constrain_precip = False
         self.pour_excess = True
+        self.do_heat_advection = True 
+        self.include_evap = True 
         self.return_neg_precip = True
         if self.pred_total_water:
           self.influde_evap = False 
@@ -273,23 +277,31 @@ class LSTM_autoreg_torchscript(nn.Module):
         else:
             self.nh_mem0 = self.nh_mem
         
+        # if self.include_evap and self.physical_precip:
+        #     self.ny_sfc0 = self.ny_sfc0 + 2
         if physical_precip:
             print("conserve_water:",self.conserve_water, "storeprec:", self.store_precip, "constrainprec:", self.constrain_precip, 
-                "pour:", self.pour_excess)
+                "pour:", self.pour_excess, "do heat:", self.do_heat_advection, "evap:", self.include_evap )
 
             self.mp_ncol = 16
             self.mlp_qn_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
             self.mlp_qv_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
             self.mlp_mp_aa_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
-            self.mlp_flux_crm_qv_alpha = nn.Linear(self.nh_rnn2, self.mp_ncol)
-            self.mlp_flux_crm_qn_alpha = nn.Linear(self.nh_rnn2, self.mp_ncol)
+            # self.mlp_mp_aa2_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
+            self.mlp_flux_crm_qv = nn.Linear(self.nh_rnn2, self.mp_ncol)
+            self.mlp_flux_crm_qn = nn.Linear(self.nh_rnn2, self.mp_ncol)
+            self.mlp_evap_prec_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
+            self.mlp_evap_cond_vapor_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
+            if self.do_heat_advection:
+              self.mlp_t_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
+              self.mlp_flux_crm_t = nn.Linear(self.nh_rnn2, self.mp_ncol)
 
             self.softmax = nn.Softmax(dim=2)
             self.softmax_dim1 = nn.Softmax(dim=1)
 
         # in ClimSim config of E3SM, the CRM physics first computes 
         # moist physics on 50 levels, and then computes radiation on 60 levels!
-        self.do_fluxrad=True  
+        self.do_fluxrad=False  
         if self.separate_radiation:
             # self.nlev = 50
             self.nlev_mem = 50
@@ -307,10 +319,8 @@ class LSTM_autoreg_torchscript(nn.Module):
             nx = nx - 3
             self.nx_sfc_rad = 6 # 'pbuf_COSZRS' 'cam_in_ALDIF' 'cam_in_ALDIR' 'cam_in_ASDIF' 'cam_in_ASDIR' 'cam_in_LWUP' 
             self.nx_sfc = self.nx_sfc  - self.nx_sfc_rad
-            if self.do_fluxrad: 
-                self.ny_rad = 64 
-            else:
-                self.ny_rad = 1
+            if not self.do_fluxrad: 
+              self.ny_rad = 1
             self.ny_sfc_rad = self.ny_sfc0 - 2
             self.ny_sfc0 = 2
         
@@ -345,7 +355,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         self.register_buffer("lbd_qi", lbd_qi)
         self.register_buffer("lbd_qn", lbd_qn)
 
-        # self.rnn1_mem = None 
+        # self.rnn_mem = None 
         print("Building RNN that feeds its hidden memory at t0,z0 to its inputs at t1,z0")
         print("Initial mlp: {}, intermediate mlp: {}".format(self.use_initial_mlp, self.use_intermediate_mlp))
  
@@ -387,20 +397,35 @@ class LSTM_autoreg_torchscript(nn.Module):
         nh_rnn = self.nh_rnn2
 
         if self.use_intermediate_mlp: 
-            self.mlp_latent = nn.Linear(nh_rnn, self.nh_mem0)
-            self.mlp_output = nn.Linear(self.nh_mem0, self.ny0)
+          self.mlp_latent = nn.Linear(nh_rnn, self.nh_mem0)
+          self.mlp_output = nn.Linear(self.nh_mem0, self.ny0)
         else:
-            self.mlp_output = nn.Linear(nh_rnn, self.ny0)
+          self.mlp_output = nn.Linear(nh_rnn, self.ny0)
             
         if self.store_precip:
-            self.mlp_precip_release = nn.Linear(nh_rnn, 1)
+          self.mlp_precip_release = nn.Linear(nh_rnn, 1)
 
         if self.predict_liq_frac:
-            self.mlp_predfrac = nn.Linear(nh_mem, 1)
+          self.mlp_predfrac = nn.Linear(nh_mem, 1)
 
         self.mlp_surface_output = nn.Linear(nneur[-1], self.ny_sfc0)
             
         if self.separate_radiation:
+          if self.do_fluxrad: 
+            self.ng_sw = 48
+            self.ng_lw = 48
+            self.mlp_rad_reftrans = nn.Linear(self.nx_rad_tot, self.ng_sw)
+            self.mlp_rad_surface_sw = nn.Linear(9, self.ng_sw)
+            self.rnn1_rad_sw = nn.GRU(self.ng_sw, self.ng_sw,    batch_first=True)  
+            self.rnn2_rad_sw = nn.GRU(self.ng_sw, 2*self.ng_sw,  batch_first=True)  
+            self.mlp_rad_sw =   nn.Linear(2*self.ng_sw, 2)
+            self.mlp_rad_reftrans = nn.Linear(self.nx_rad_tot, self.ng_lw)
+            self.mlp_rad_surface_lw = nn.Linear(10, self.ng_lw)
+            # self.mlp_rad_lw_flux_scale = nn.Linear(self.nx_rad_tot, 1)
+            self.mlp_rad_lw_flux_scale = nn.Linear(self.ng_lw, 1)
+            self.rnn1_rad_lw = nn.GRU(self.ng_lw, self.ng_lw,    batch_first=True)  
+            self.rnn2_rad_lw = nn.GRU(self.ng_lw, 2*self.ng_lw,  batch_first=True)  
+          else:
             self.nh_rnn1_rad = 96 
             self.nh_rnn2_rad = 96
             self.rnn1_rad      = nn.GRU(self.nx_rad_tot, self.nh_rnn1_rad,  batch_first=True)   # (input_size, hidden_size)
@@ -435,11 +460,11 @@ class LSTM_autoreg_torchscript(nn.Module):
             out = signs*torch.pow(out, 4)
         return out, out_sfc
         
-
+    @torch.compile
     def forward(self, inp_list : List[Tensor]):
         inputs_main   = inp_list[0]
         inputs_aux    = inp_list[1]
-        rnn1_mem      = inp_list[2]
+        rnn_mem      = inp_list[2]
         if self.physical_precip:
           inputs_denorm = inp_list[3]
 
@@ -466,15 +491,14 @@ class LSTM_autoreg_torchscript(nn.Module):
             inputs_main_crm = inputs_main
             
         if self.use_initial_mlp:
-            inputs_main_crm = self.mlp_initial(inputs_main_crm)
-            inputs_main_crm = self.nonlin(inputs_main_crm)  
+            inputs_main_crm = self.nonlin(self.mlp_initial(inputs_main_crm))
             
         # if self.use_memory:
         if self.physical_precip and self.store_precip: 
-          P_old = rnn1_mem[:,-1,-1] 
+          P_old = rnn_mem[:,-1,-1] 
         
-        inputs_main_crm = torch.cat((inputs_main_crm,rnn1_mem[:,:,0:self.nh_mem0]), dim=2)
-        del rnn1_mem
+        inputs_main_crm = torch.cat((inputs_main_crm,rnn_mem[:,:,0:self.nh_mem0]), dim=2)
+        del rnn_mem
             
         if self.add_stochastic_layer: 
             # LSTM downwards --> LSTM upwards --> stochastic RNN downwards
@@ -525,27 +549,26 @@ class LSTM_autoreg_torchscript(nn.Module):
               cx2 = self.mlp_toa2(inputs_toa)
         
         if self.add_stochastic_layer:
-            input_rnn2 = torch.transpose(rnn1out,0,1)
-            hidden2 = (hx2, cx2)
+            rnn1out = torch.transpose(rnn1out,0,1)
+            hidden = (hx2, cx2)
         else:
-            input_rnn2 = rnn1out
             if self.use_lstm:
-                hidden2 = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
+                hidden = (torch.unsqueeze(hx2,0), torch.unsqueeze(cx2,0))
             else:
-                hidden2 = torch.unsqueeze(hx2,0)
+                hidden = torch.unsqueeze(hx2,0)
 
         if self.add_stochastic_layer:
-          z, states = self.rnn2(input_rnn2, hidden2)
+          z, states = self.rnn2(rnn1out, hidden)
           # SPPT
         #   z = F.hardtanh(z, 0.0, 2.0)
-          rnn2outt = z*input_rnn2
+          rnn2outt = z*rnn1out
           # rnn2out = rnn1out + 0.01*z 
         #   rnn2out = z
           rnn2outt = torch.transpose(rnn2outt,0,1)
         else:
-          rnn2outt, states = self.rnn2(input_rnn2, hidden2)
+          rnn2outt, states = self.rnn2(rnn1out, hidden)
 
-        del input_rnn2, rnn1out
+        del rnn1out, hidden
 
         if self.use_lstm or self.add_stochastic_layer:
             (last_h, last_c) = states
@@ -558,12 +581,11 @@ class LSTM_autoreg_torchscript(nn.Module):
         #   rnn2outt = torch.cat((rnn1out, rnn2outt), dim=2)
         
         if self.use_intermediate_mlp: 
-          rnn2out = self.mlp_latent(rnn2outt)
-          
-        # if self.use_memory:
-        rnn1_mem = rnn2out
+          rnn_mem = self.mlp_latent(rnn2outt)
+        else:
+          rnn_mem = rnn2outt 
 
-        out = self.mlp_output(rnn2out)
+        out = self.mlp_output(rnn_mem)
 
         if self.output_prune and (not self.separate_radiation):
           # Only temperature tendency is computed for the top 10 levels, by the radiation scheme, after CRM runs on lowest 50 levels
@@ -590,57 +612,128 @@ class LSTM_autoreg_torchscript(nn.Module):
             # inputs_rad[:,10:,0:self.nh_mem] = torch.flip(rnn2out, [1])
             # inputs_rad[:,:,self.nh_mem:] = inputs_main_rad
             inputs_rad[:,:,0:3] = inputs_gas_rad
-            inputs_rad[:,10:,3:] = torch.flip(rnn1_mem, [1])
-            # inputs_rad = torch.flip(inputs_rad, [1])
-
-            inputs_sfc_rad = inputs_aux[:,6:12]
-            hx = self.mlp_surface_rad(inputs_sfc_rad)
-            hidden = (torch.unsqueeze(hx,0))
-            rnn_out, states = self.rnn1_rad(inputs_rad, hidden)
-            rnn_out = torch.flip(rnn_out, [1])
-
-            inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
-            hx2 = self.mlp_toa_rad(inputs_toa)
-
-            rnn_out, last_h_rad = self.rnn2_rad(rnn_out, hidden)
-            out_rad = self.mlp_output_rad(rnn_out)
+            inputs_rad[:,10:,3:] = rnn_mem
+            inputs_rad = torch.flip(inputs_rad, [1])
 
             if self.do_fluxrad:
-                out_rad = self.relu(out_rad)
-                flux_lw_dn,flux_lw_up,flux_sw_dn,flux_sw_up = out_rad.chunk(4,2)
+                inputs_sfc_rad_sw =  torch.cat((inputs_aux[:,9:11], inputs_aux[:,12:]),dim=1) 
+                inputs_sfc_rad_lw =  torch.cat((inputs_aux[:,7:9], inputs_aux[:,11:]),dim=1) 
 
-                # lw_flux_scale = self.mlp_flux_scale(inputs_sfc_rad)
-                # flux_lw_dn      = flux_lw_dn * torch.reshape(lw_flux_scale,(-1,1,1))
-                # flux_lw_up      = flux_lw_up * torch.reshape(lw_flux_scale,(-1,1,1))
+                # Separate shortwave (SW) and longwave (LW),  both follow the same recipe:
+                # 1) local MLP to compute reflectance-transmittance variables 
+                # 2.1) mlp to compute surface albedo variables 
+                # 2.2) upward RNN to compute albedo variables, initialized with surface vars
+                # 2.3) concatenate surface and layer albedos to get (nlev+1) levels/layers
+                # 3.1) downward RNN to compute upward and downward fluxes (nlev+1, nhidden)
+                # 4.1) (SW) get specific required surface components from the spectral flux at surface
+                # 4.2) sum over hidden dimension to get broadband fluxes (nlev+1)
+                # Then using both SW and LW:
+                # 5) compute net broadband flux as (flux_sw_dn - flux_sw_up) + (flux_lw_dn - flux_lw_up) 
+                # 
+                # ---------- SHORTWAVE -----------
+
+                # 1)
+                reftrans = self.mlp_rad_reftrans(inputs_rad)
+                # 2.1)
+                albedos_sfc = self.mlp_rad_surface_sw(inputs_sfc_rad_sw)
+                hidden = (torch.unsqueeze(albedos_sfc,0))
+                # 2.2)
+                albedos, states = self.rnn1_rad_sw(reftrans, hidden)
+                # 2.3)
+                albedos = torch.cat((torch.reshape(albedos_sfc,(batch_size,1,-1)), albedos),dim=1) 
+                # flip back so that TOA is first
+                albedos = torch.flip(albedos, [1])
+                # 3.1)
+                flux_sw, states = self.rnn2_rad_sw(albedos)
+                flux_sw_dn,flux_sw_up = flux_sw.chunk(2,2)
+                del flux_sw, states
+                # flux_sw = self.sigmoid(flux_sw)
+                flux_sw_tot = self.sigmoid(self.mlp_rad_sw(flux_sw))
+                flux_sw_dn_tot,flux_sw_up_tot = flux_sw_tot.chunk(2,2)
+                flux_sw_dn = self.softmax(flux_sw_dn)*flux_sw_dn_tot
+                flux_sw_up = self.softmax(flux_sw_up)*flux_sw_up_tot
+
+                incflux = torch.unsqueeze(inputs_aux[:,1:2],1)
+                incflux = torch.reshape(incflux*self.xdiv_sca[1] + self.xmean_sca[1], (-1,1,1))
+
+                # flux_sw = flux_sw * incflux
+                flux_sw_dn = flux_sw_dn * incflux
+                flux_sw_up = flux_sw_up * incflux
+
+                # print("flux sw max", torch.max(flux_sw).item())
+
+                # 4.1)
+                # flux_sw_dn,flux_sw_up = flux_sw.chunk(2,2)
+                SOLS      = flux_sw_dn[:,-1,0:1]  
+                SOLL      = flux_sw_dn[:,-1,1:2,] 
+                SOLSD       = flux_sw_dn[:,-1,2:3] 
+                SOLLD       = flux_sw_dn[:,-1,3:4]
+                # 4.2)
+                flux_sw_dn  = torch.sum(flux_sw_dn,dim=2)
+                flux_sw_up  = torch.sum(flux_sw_up,dim=2)
+                flux_sw_net = flux_sw_dn - flux_sw_up
+                flux_sw_net_sfc = flux_sw_net[:,-1].unsqueeze(1)
+
+                # 1)
+                reftrans = self.mlp_rad_reftrans(inputs_rad)
+                # 2.1)
+                albedos_sfc = self.mlp_rad_surface_lw(inputs_sfc_rad_lw)
+                hidden = (torch.unsqueeze(albedos_sfc,0))
+                # 2.2)
+                albedos, states = self.rnn1_rad_lw(reftrans, hidden)
+                # 2.3)
+                albedos = torch.cat((torch.reshape(albedos_sfc,(batch_size,1,-1)), albedos),dim=1) 
+                albedos = torch.flip(albedos, [1])
+                # 3.1)
+                flux_lw, states = self.rnn2_rad_lw(albedos)
+                flux_lw = self.relu(flux_lw)
+                del reftrans, albedos, states
+
+                # lw_flux_scale = self.mlp_rad_lw_flux_scale(torch.flip(inputs_rad, [1]))
+                lw_flux_scale = self.mlp_rad_lw_flux_scale(albedos)
+                lw_flux_scale = self.relu(lw_flux_scale)
+                flux_lw      = flux_lw * torch.reshape(lw_flux_scale,(batch_size,-1,1))
+
+                # 4)
+                flux_lw_dn,flux_lw_up = flux_lw.chunk(2,2)
                 flux_lw_dn      = torch.sum(flux_lw_dn,dim=2)
                 flux_lw_up      = torch.sum(flux_lw_up,dim=2)
-                flux_lw_dn_sfc  = flux_lw_dn[:,-1]
+                flux_lw_dn_sfc  = flux_lw_dn[:,-1].unsqueeze(1)
                 flux_lw_net     = flux_lw_dn - flux_lw_up
 
                 # print("inc toa  min max", torch.min(incflux).item(), torch.max(incflux).item())
-                flux_sw_dn = flux_sw_dn * torch.reshape(incflux,(-1,1,1))
-                flux_sw_up = flux_sw_up * torch.reshape(incflux,(-1,1,1))
-                SOLS = flux_sw_dn[:,-1,0:1]  
-                SOLL = flux_sw_dn[:,-1,1:2,] 
-                SOLSD = flux_sw_dn[:,-1,2:3] 
-                SOLLD = flux_sw_dn[:,-1,3:4]
-                flux_sw_dn    = torch.sum(flux_sw_dn,dim=2)
-                flux_sw_up    = torch.sum(flux_sw_up,dim=2)
-                flux_sw_net   = flux_sw_dn - flux_sw_up
-                flux_sw_net_sfc = flux_sw_net[:,-1]
 
+                # 4)
                 flux_net = flux_lw_net + flux_sw_net
                 flux_diff = flux_net[:,1:] - flux_net[:,0:-1]
 
-                pres_diff = plev[:,1:] - plev[:,0:-1]
+                pres_diff = pres_nonorm[:,1:] - pres_nonorm[:,0:-1]
                 dT_rad = -(flux_diff / pres_diff) * 0.009767579681 
-
-     
-                out_sfc_rad = torch.cat((flux_sw_net_sfc, flux_lw_dn_sfc, SOLS, SOLL, SOLSD, SOLLD))
+                dT_rad = self.yscale_lev[:,0]*dT_rad
+                out_new[:,:,0:1] = out_new[:,:,0:1] + dT_rad.unsqueeze(2)
+                # print("out new shape", out_new.shape)
+                out_sfc_rad = torch.cat((flux_sw_net_sfc, flux_lw_dn_sfc, SOLS, SOLL, SOLSD, SOLLD),dim=-1)
+                yscale_sca = torch.cat((self.yscale_sca[0:2], self.yscale_sca[4:]))
+                out_sfc_rad = yscale_sca*out_sfc_rad
             else:
+                inputs_sfc_rad = inputs_aux[:,6:12]
+                hx = self.mlp_surface_rad(inputs_sfc_rad)
+                hidden = (torch.unsqueeze(hx,0))
+                rnn_out, states = self.rnn1_rad(inputs_rad, hidden)
+                rnn_out = torch.flip(rnn_out, [1])
+                del inputs_rad, hidden, states
+
+                inputs_toa = torch.cat((inputs_aux[:,1:2], inputs_aux[:,6:7]),dim=1) 
+                hx2 = self.mlp_toa_rad(inputs_toa)
+                hidden = (torch.unsqueeze(hx2,0))
+
+                rnn_out, last_h_rad = self.rnn2_rad(rnn_out, hidden)
+                out_rad = self.mlp_output_rad(rnn_out)
+                del rnn_out
                 out_sfc_rad = self.mlp_surface_output_rad(last_h_rad)
                 # dT_tot = dT_crm + dT_rad
-                out_new[:,:,0:1] = out_new[:,:,0:1] + out_rad
+                # out_new[:,:,0:1] = out_new[:,:,0:1] + out_rad
+                out_new[:,:,0:1] =  out_rad
 
                 out_sfc_rad = torch.squeeze(out_sfc_rad)
                 # rad predicts everything except PRECSC, PRECC
@@ -650,11 +743,15 @@ class LSTM_autoreg_torchscript(nn.Module):
             out = out_new
 
         if self.physical_precip:
+          # ilev_crm = 12
           if self.separate_radiation:
             ilev_crm = 10
+            # rnn2outt = rnn2outt[:,2:]
           else:
-            ilev_crm = 0
-          ilev_crm = 12
+            # ilev_crm = 0
+            ilev_crm = 12
+            rnn2outt = rnn2outt[:,ilev_crm:]
+          # ilev_crm = 12
           
           out_neww = torch.zeros(batch_size, self.nlev, self.ny, device=inputs_main.device)
           g = torch.tensor(9.806650000)
@@ -685,6 +782,8 @@ class LSTM_autoreg_torchscript(nn.Module):
             flux_net_qtot = torch.cat((zeroes,flux_net_qtot),dim=1)
 
             sedimentation = flux_net_qtot[:,-1] 
+
+        
 
             flux_diff_qtot = flux_net_qtot[:,1:] - flux_net_qtot[:,0:-1]
             flux_qtot_dp = scaling_factor*(flux_diff_qtot / pres_diff) 
@@ -741,136 +840,205 @@ class LSTM_autoreg_torchscript(nn.Module):
             #  ['ptend_t', 'dqv', 'dqn', 'liq_frac', 'ptend_u', 'ptend_v']
             out_neww[:,:,0] = out[:,:,0]
             out_neww[:,:,3:self.ny] = out[:,:,3:self.ny]
-            dqv_evap_prec = out[:,ilev_crm:,1] # Evaporation of precipitation (precip to water vapor = sink of precip, source of qv)
-            dqn_aa        = out[:,ilev_crm:,2] # Accretion/autoconversion (cloud water to precip. = source of precip, sink of qn)
-            dqn_evap_cond_vapor = out[:,ilev_crm:,3] # evaporation - condensation  (cloud water to water vapor is positive) 
 
-            # mweights_crm_ar = self.mlp_microphysics(rnn2out[:,ilev_crm:])
-            # dqv_evap_prec, dqn_aa, dqn_evap_cond_vapor  = mweights_crm_ar.chunk(3,2)
+            # dqv_evap_prec = out[:,ilev_crm:,1] # Evaporation of precipitation (precip to water vapor = sink of precip, source of qv)
+            dqn_aa        = out[:,ilev_crm:,2] # Accretion/autoconversion (cloud water to precip. = source of precip, sink of qn)
+            # dqn_evap_cond_vapor = out[:,ilev_crm:,3] # evaporation - condensation  (cloud water to water vapor is positive) 
+
+            # rnn2outt = rnn2outt[:,ilev_crm:]
+            dqv_evap_prec       = self.mlp_evap_prec_crm(rnn2outt)
+            dqn_evap_cond_vapor = self.mlp_evap_cond_vapor_crm(rnn2outt)
+
+            # mp_crm_ar = self.mlp_microphysics(rnn2out[:,ilev_crm:])
+            # dqv_evap_prec, dqn_aa, dqn_evap_cond_vapor  = mp_crm_ar.chunk(3,2)
 
             flux_mult_coeff = 1.0e3
 
-            qn_old = inputs_denorm[:,ilev_crm:,2] + inputs_denorm[:,ilev_crm:,3]
-            qv_old = inputs_denorm[:,ilev_crm:,-1]
+            qn_old = (inputs_denorm[:,ilev_crm:,2] + inputs_denorm[:,ilev_crm:,3])
+            qv_old =  inputs_denorm[:,ilev_crm:,-1]
             # crm_flux = True 
             # if crm_flux: 
-            flux1 = self.mlp_flux_crm_qv_alpha(rnn2outt[:,ilev_crm:])
-            flux2 = self.mlp_flux_crm_qn_alpha(rnn2outt[:,ilev_crm:])
-
-            weights_crm_qv_old = self.softmax(self.mlp_qv_crm(rnn2outt[:,ilev_crm:]))
-            weights_crm_qn_old = self.softmax(self.mlp_qn_crm(rnn2outt[:,ilev_crm:]))
-
-            crm_qn_old = self.mp_ncol*qn_old.unsqueeze(2)*weights_crm_qn_old 
-            crm_qv_old = self.mp_ncol*qv_old.unsqueeze(2)*weights_crm_qv_old 
-
-            # flux_net_qv = flux_mult_coeff*flux1*self.mp_ncol*qv_old.unsqueeze(2)*weights_crm_qv_old*300#*torch.reshape(self.yscale_lev[ilev_crm:,1],(1,-1,1))
-            flux_net_qv = flux_mult_coeff*flux1*crm_qv_old*300#*torch.reshape(self.yscale_lev[ilev_crm:,1],(1,-1,1))
-            flux_net_qv = torch.mean( flux_net_qv , 2)
-            
-            # flux_net_qn = flux_mult_coeff*flux2*self.mp_ncol*qn_old.unsqueeze(2)*p_flux_crm_qn_old*300#*torch.reshape(self.yscale_lev[ilev_crm:,1],(1,-1,1))
-            flux_net_qn = flux_mult_coeff*flux2*crm_qn_old*300#*torch.reshape(self.yscale_lev[ilev_crm:,1],(1,-1,1))
-            flux_net_qn = torch.mean( flux_net_qn , 2)
-            # else:
-            #     flux_net_qv   = flux_mult_coeff*out[:,ilev_crm:,self.ny]*qv_old*300#*self.yscale_lev[ilev_crm:,1]
-            #     flux_net_qn   = flux_mult_coeff*out[:,ilev_crm:,self.ny+1]*qn_old*300#*self.yscale_lev[ilev_crm:,2]
+            flux1 = self.mlp_flux_crm_qv(rnn2outt)
+            flux2 = self.mlp_flux_crm_qn(rnn2outt)
 
             # FORCE FLUX TO SURFACE (sedimentation) TO BE POSITIVE 
             # if it's negative, we have negative precipitation and water is taken from nowhere and added to the atmosphere
             # OR should we not bother to include a sedimentation term, and set boundary fluxes to zero to avoid net transport 
-            flux_net_qv[:,-1] = self.relu(flux_net_qv[:,-1]) # net downward flux cannot be negative 
-            flux_net_qn[:,-1] = self.relu(flux_net_qn[:,-1])
-            flux_net_qv = torch.cat((zeroes,flux_net_qv),dim=1)
-            flux_net_qn = torch.cat((zeroes,flux_net_qn),dim=1)
-            sedimentation = ( flux_net_qv[:,-1] + flux_net_qn[:,-1] )
+            flux1[:,-1] = self.relu(flux1[:,-1]) # net downward flux cannot be negative 
+            flux2[:,-1] = self.relu(flux2[:,-1])
 
-            flux_qv_dp = scaling_factor*( (flux_net_qv[:,1:] - flux_net_qv[:,0:-1]) / pres_diff) 
-            flux_qn_dp = scaling_factor*( (flux_net_qn[:,1:] - flux_net_qn[:,0:-1]) / pres_diff) 
+            p_crm_qv_old = self.softmax(self.mlp_qv_crm(rnn2outt))
+            p_crm_qn_old = self.softmax(self.mlp_qn_crm(rnn2outt)) 
 
-            dqn_aa        = self.relu(dqn_aa) + 1.0e-6 # force positive
+            crm_qn_old = self.mp_ncol*qn_old.unsqueeze(2)*p_crm_qn_old 
+            crm_qv_old = self.mp_ncol*qv_old.unsqueeze(2)*p_crm_qv_old 
+            qn_old = crm_qn_old 
+            qv_old = crm_qv_old
+
+            flux_net_qv = flux_mult_coeff*flux1*crm_qv_old*300#*torch.reshape(self.yscale_lev[ilev_crm:,1],(1,-1,1))
+            # flux_net_qv = torch.mean( flux_net_qv , 2)
+            
+            flux_net_qn = flux_mult_coeff*flux2*crm_qn_old*300#*torch.reshape(self.yscale_lev[ilev_crm:,1],(1,-1,1))
+            # flux_net_qn = torch.mean( flux_net_qn , 2)
+            del flux1, flux2, p_crm_qn_old, p_crm_qv_old
+
+            # else:
+            #     flux_net_qv   = flux_mult_coeff*out[:,ilev_crm:,self.ny]*qv_old*300#*self.yscale_lev[ilev_crm:,1]
+            #     flux_net_qn   = flux_mult_coeff*out[:,ilev_crm:,self.ny+1]*qn_old*300#*self.yscale_lev[ilev_crm:,2]
+
+            # # FORCE FLUX TO SURFACE (sedimentation) TO BE POSITIVE 
+            # # if it's negative, we have negative precipitation and water is taken from nowhere and added to the atmosphere
+            # # OR should we not bother to include a sedimentation term, and set boundary fluxes to zero to avoid net transport 
+            # flux_net_qv[:,-1] = self.relu(flux_net_qv[:,-1]) # net downward flux cannot be negative 
+            # flux_net_qn[:,-1] = self.relu(flux_net_qn[:,-1])
+
+            # flux_net_qv = torch.cat((zeroes,flux_net_qv),dim=1)
+            # flux_net_qn = torch.cat((zeroes,flux_net_qn),dim=1)
+            zeroes_crm = torch.zeros(batch_size, 1, self.mp_ncol, device=inputs_main.device)
+            flux_net_qv = torch.cat((zeroes_crm,flux_net_qv),dim=1)
+            flux_net_qn = torch.cat((zeroes_crm,flux_net_qn),dim=1)
+
+            sedimentation = torch.mean( flux_net_qv[:,-1] + flux_net_qn[:,-1], 1)
+
+            # flux_qv_dp = scaling_factor*( (flux_net_qv[:,1:] - flux_net_qv[:,0:-1]) / pres_diff) 
+            # flux_qn_dp = scaling_factor*( (flux_net_qn[:,1:] - flux_net_qn[:,0:-1]) / pres_diff) 
+            flux_qv_dp = scaling_factor*( (flux_net_qv[:,1:] - flux_net_qv[:,0:-1]) / pres_diff.unsqueeze(2)) 
+            flux_qn_dp = scaling_factor*( (flux_net_qn[:,1:] - flux_net_qn[:,0:-1]) / pres_diff.unsqueeze(2)) 
+            del flux_net_qv, flux_net_qn
+
+            # dqn_aa        = self.relu(dqn_aa) + 1.0e-6 # force positive
             dqv_evap_prec = self.relu(dqv_evap_prec) + 1.0e-6 # force positive
             # Relate evaporated precipitation to stored precipitation here?
-            P_old_vertical = out[:,ilev_crm:,2] # self.mlp_prec_vertical(rnn2outt[:,ilev_crm:])
+            P_old_vertical = out[:,ilev_crm:,2] # self.mlp_prec_vertical(rnn2outt)
+            # P_old_vertical = rnn_mem[:,ilev_crm:,0] 
             P_old_vertical = self.softmax_dim1(P_old_vertical) * P_old.unsqueeze(1) # sums to P_old
-            dqv_evap_prec = dqv_evap_prec*P_old_vertical # P_old.unsqueeze(1)
+            dqv_evap_prec = dqv_evap_prec*P_old_vertical.unsqueeze(2) # P_old.unsqueeze(1)
 
-            if self.conserve_water: 
-            # kessler_aa = True 
-            # if kessler_aa:
+            if self.do_heat_advection: 
+              T_old = 1e-4*inputs_denorm[:,ilev_crm:,0]
+              flux3 = self.mlp_flux_crm_t(rnn2outt)
+              p_crm_t_old = self.softmax(self.mlp_t_crm(rnn2outt))
+              crm_t_old = self.mp_ncol*T_old.unsqueeze(2)*p_crm_t_old
+              flux_net_t = flux_mult_coeff*flux3*crm_t_old*300
+              flux_net_t = torch.cat((zeroes_crm,flux_net_t),dim=1)
+              flux_t_dp = scaling_factor*( (flux_net_t[:,1:] - flux_net_t[:,0:-1]) / pres_diff.unsqueeze(2)) 
+              del flux3, p_crm_t_old, crm_t_old, flux_net_t 
+
+            if self.include_evap:
+
+              if self.conserve_water: 
+                # kessler_aa = True 
+                # if kessler_aa:
             #   alpha = dqn_aa
             # #   qn = qn_old  - 5e-5
             #   qn = qn_old
             #   dqn_aa = alpha*qn*self.yscale_lev[ilev_crm:,2]
-              alpha = self.mlp_mp_aa_crm(rnn2outt[:,ilev_crm:])
-              alpha = self.relu(alpha) 
+                alpha = self.mlp_mp_aa_crm(rnn2outt)
+                alpha = self.relu(alpha)  + 1.0e-6 # force positive
 
-            #   p_qn_crm = self.mlp_mp_qn_crm(rnn2outt[:,ilev_crm:])
+            #   p_qn_crm = self.mlp_mp_qn_crm(rnn2outt)
             #   p_qn_crm = self.softmax(p_qn_crm)
             #   dqn_aa = alpha*self.mp_ncol*qn_old.unsqueeze(2)*p_qn_crm*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1))
-              dqn_aa = alpha*crm_qn_old*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1)) 
-              dqn_aa = torch.mean( dqn_aa , 2)
-              del rnn2outt
+                dqn_aa = alpha*torch.square(crm_qn_old)*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1)) 
 
-              # first ensure positive qn by clamping dqn_evap_cond_vapor
-              minval = -(self.yscale_lev[ilev_crm:,2]*qn_old/1200) - flux_qn_dp + dqn_aa
-              dqn_evap_cond_vapor = torch.clamp(dqn_evap_cond_vapor, min=minval)
-              # minval = -(self.yscale_lev[:,2]*qn_old/1200) - flux_qn_dp + dqn_aa - dqn_evap_cond_vapor 
-              # dqn_pos_fix = torch.relu(minval)
-          
-              # then ensure positive qv by clamping dqv_evap_prec
-              minval = -(self.yscale_lev[ilev_crm:,1]*qv_old/1200) - flux_qv_dp + dqn_evap_cond_vapor
-              dqv_evap_prec = torch.clamp(dqv_evap_prec, min=minval)
-              # minval = -(self.yscale_lev[:,1]*qv_old/1200) - flux_qv_dp + dqn_evap_cond_vapor - dqv_evap_prec
-              # dqv_pos_fix = torch.relu(minval)
+                # alpha2 = self.mlp_mp_aa2_crm(rnn2outt)
+                # alpha2 = self.relu(alpha2)  + 1.0e-6 # force positive
+                # dqn_accretion = alpha2*crm_qn_old*P_old_vertical.unsqueeze(2)*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1)) 
+                # dqn_aa = dqn_aa + dqn_accretion
 
-              if True:
-                # maximum cloud water limit, make sure qn_new doesn't exceed qn_max
-                # dqn_normed < yscale*(qnmax - qnold)/1200
-                # flux_qn_dp + dqn_evap_cond_vapor   - dqn_aa < yscale*(qnmax - qnold)/1200
-                # flux_qn_dp + dqn_evap_cond_vapor < yscale*(qnmax - qnold)/1200 + dqn_aa
-                #  dqn_aa > flux_qn_dp + dqn_evap_cond_vapor -yscale*(qnmax - qnold)/1200 
-                qn_max = 0.0006
-                minval = flux_qn_dp + dqn_evap_cond_vapor -(self.yscale_lev[ilev_crm:,2]*(qn_max - qn_old)/1200) 
-                dqn_aa = torch.clamp(dqn_aa, min=minval)
+                # add separate accretion term that also depends on P_old_vertical ?
 
-            # note: can't both conserve water and do the following!
-            elif self.constrain_precip and self.store_precip:
-              # We have two constraints for (d_precip_sourcesink = dqn_aa - dqv_evap_prec), which is vertically
-              # integrated to get precipitation:
-              # 1/g*vint(dqn_aa - dqv_evap_prec) => -P0,
-              # 1/g*vint(dqn_aa - dqv_evap_prec) <= Pmax; where P0 is the precip. stopage and Pmax is the maximum allowed stored precipitation
-              # Lets leave dqv_evap_prec unconstrained and constrain dqn_aa:
-              # Pmax + 1/g*vint(dqv_evap_prec) => 1/g*vint(dqn_aa) => -P0 + 1/g*vint(dqv_evap_prec) 
-              predicted_sum = torch.sum(one_over_g*pres_diff*dqn_aa,1) 
-              y =  torch.sum(one_over_g*pres_diff*dqv_evap_prec,1) 
-              # print("y", y[100].item(), y.min().item(), y.max().item(), y.mean().item())
-              # print("predicted_sum", predicted_sum[100].item(),predicted_sum.min().item(), predicted_sum.max().item(), predicted_sum.mean().item())
-              # print("P_old", P_old[100].item(), P_old.min().item(), P_old.max().item(), P_old.mean().item())
-              max_sum = Pmax - P_old + y
-              min_sum = -P_old + y
-              # print("max_sum", max_sum[100].item(), max_sum.min().item(), max_sum.max().item(), max_sum.mean().item())
-              # print("min_sum", min_sum[100].item(), min_sum.min().item(), min_sum.max().item(), min_sum.mean().item())
-              target_sum = torch.clamp(predicted_sum, min=min_sum, max=max_sum)
-              # print("target_sum", target_sum[100].item(), target_sum.min().item(), target_sum.max().item())
-              dqn_aa = dqn_aa * (target_sum.unsqueeze(1) / predicted_sum.unsqueeze(1))
-              # new_sum = torch.sum(one_over_g*pres_diff*dqn_aa,1) 
-              # print("adjusted",  new_sum[100].item(),new_sum.min().item(), new_sum.max().item(), new_sum.mean().item())
-              # fac = target_sum.unsqueeze(1) / predicted_sum.unsqueeze(1)
-              # print("scalefac", fac[100].item() ,  "min", torch.min(fac).item(), "max", torch.max(fac).item(), "mean", torch.mean(fac).item())
-    
-            #                                    (cond-evap)<0 from vapor,  evap. from prec. both add water vapor  
-            out_neww[:,ilev_crm:,1] = flux_qv_dp - dqn_evap_cond_vapor     + dqv_evap_prec 
-            #                                    (cond-evap)>0 adds,     acc-au removes cldwater  
-            out_neww[:,ilev_crm:,2] = flux_qn_dp + dqn_evap_cond_vapor     - dqn_aa        
+            #   dqn_aa = torch.mean( dqn_aa , 2)
+                del rnn2outt
 
-            net_condensation = dqn_evap_cond_vapor - dqv_evap_prec
-            Lv_over_cp =  2490.04 # 2.5e6/1004 = 2.5 × 10⁶ J/kg at 0°C  divided by 1004 J/kg/K
-            net_condensation = Lv_over_cp*(net_condensation/self.yscale_lev[ilev_crm:,1]) * self.yscale_lev[ilev_crm:,0]
-          #   print("max dt0", torch.max(out_neww[:,ilev_crm:,0]).item(), "cond", net_condensation.max().item())
-            out_neww[:,ilev_crm:,0] = out_neww[:,ilev_crm:,0] + net_condensation
+                # first ensure positive qn by clamping dqn_evap_cond_vapor
+                minval = -(self.yscale_lev[ilev_crm:,2:3]*qn_old/1200) - flux_qn_dp + dqn_aa
+                dqn_evap_cond_vapor = torch.clamp(dqn_evap_cond_vapor, min=minval)
+                # minval = -(self.yscale_lev[:,2]*qn_old/1200) - flux_qn_dp + dqn_aa - dqn_evap_cond_vapor 
+                # dqn_pos_fix = torch.relu(minval)
+            
+                # then ensure positive qv by clamping dqv_evap_prec
+                minval = -(self.yscale_lev[ilev_crm:,1:2]*qv_old/1200) - flux_qv_dp + dqn_evap_cond_vapor
+                dqv_evap_prec = torch.clamp(dqv_evap_prec, min=minval)
+                # minval = -(self.yscale_lev[:,1]*qv_old/1200) - flux_qv_dp + dqn_evap_cond_vapor - dqv_evap_prec
+                # dqv_pos_fix = torch.relu(minval)
 
-            #                      source,       sink   of precipitation  (note: signs already reversed w.r.t. above)
-            d_precip_sourcesink    = dqn_aa      - dqv_evap_prec          
+                if True:
+                  # maximum cloud water limit, make sure qn_new doesn't exceed qn_max
+                  # dqn_normed < yscale*(qnmax - qnold)/1200
+                  # flux_qn_dp + dqn_evap_cond_vapor   - dqn_aa < yscale*(qnmax - qnold)/1200
+                  # flux_qn_dp + dqn_evap_cond_vapor < yscale*(qnmax - qnold)/1200 + dqn_aa
+                  #  dqn_aa > flux_qn_dp + dqn_evap_cond_vapor -yscale*(qnmax - qnold)/1200 
+                  qn_max = 0.0005
+                  minval = flux_qn_dp + dqn_evap_cond_vapor -(self.yscale_lev[ilev_crm:,2:3]*(qn_max - qn_old)/1200) 
+                  dqn_aa = torch.clamp(dqn_aa, min=minval)
+
+              # note: can't both conserve water and do the following!
+              elif self.constrain_precip and self.store_precip:
+                # We have two constraints for (d_precip_sourcesink = dqn_aa - dqv_evap_prec), which is vertically
+                # integrated to get precipitation:
+                # 1/g*vint(dqn_aa - dqv_evap_prec) => -P0,
+                # 1/g*vint(dqn_aa - dqv_evap_prec) <= Pmax; where P0 is the precip. stopage and Pmax is the maximum allowed stored precipitation
+                # Lets leave dqv_evap_prec unconstrained and constrain dqn_aa:
+                # Pmax + 1/g*vint(dqv_evap_prec) => 1/g*vint(dqn_aa) => -P0 + 1/g*vint(dqv_evap_prec) 
+                predicted_sum = torch.sum(one_over_g*pres_diff*dqn_aa,1) 
+                y =  torch.sum(one_over_g*pres_diff*dqv_evap_prec,1) 
+                # print("y", y[100].item(), y.min().item(), y.max().item(), y.mean().item())
+                # print("predicted_sum", predicted_sum[100].item(),predicted_sum.min().item(), predicted_sum.max().item(), predicted_sum.mean().item())
+                # print("P_old", P_old[100].item(), P_old.min().item(), P_old.max().item(), P_old.mean().item())
+                max_sum = Pmax - P_old + y
+                min_sum = -P_old + y
+                # print("max_sum", max_sum[100].item(), max_sum.min().item(), max_sum.max().item(), max_sum.mean().item())
+                # print("min_sum", min_sum[100].item(), min_sum.min().item(), min_sum.max().item(), min_sum.mean().item())
+                target_sum = torch.clamp(predicted_sum, min=min_sum, max=max_sum)
+                # print("target_sum", target_sum[100].item(), target_sum.min().item(), target_sum.max().item())
+                dqn_aa = dqn_aa * (target_sum.unsqueeze(1) / predicted_sum.unsqueeze(1))
+                # new_sum = torch.sum(one_over_g*pres_diff*dqn_aa,1) 
+                # print("adjusted",  new_sum[100].item(),new_sum.min().item(), new_sum.max().item(), new_sum.mean().item())
+                # fac = target_sum.unsqueeze(1) / predicted_sum.unsqueeze(1)
+                # print("scalefac", fac[100].item() ,  "min", torch.min(fac).item(), "max", torch.max(fac).item(), "mean", torch.mean(fac).item())
+      
+            #   #                                    (cond-evap)<0 from vapor,  evap. from prec. both add water vapor  
+            #   out_neww[:,ilev_crm:,1] = flux_qv_dp - dqn_evap_cond_vapor     + dqv_evap_prec 
+            #   #                                    (cond-evap)>0 adds,     acc-au removes cldwater  
+            #   out_neww[:,ilev_crm:,2] = flux_qn_dp + dqn_evap_cond_vapor     - dqn_aa        
+
+              #                                                (cond-evap)<0 from vapor,  evap. from prec. both add water vapor  
+              out_neww[:,ilev_crm:,1] = torch.mean(flux_qv_dp - dqn_evap_cond_vapor     + dqv_evap_prec, 2)
+              #                                                 (cond-evap)>0 adds,     acc-au removes cldwater  
+              out_neww[:,ilev_crm:,2] = torch.mean(flux_qn_dp + dqn_evap_cond_vapor     - dqn_aa, 2)      
+
+              if self.do_heat_advection: 
+                out_neww[:,ilev_crm:,0] = out_neww[:,ilev_crm:,0] + torch.mean(flux_t_dp, 2)
+
+              net_condensation = torch.mean(dqn_evap_cond_vapor - dqv_evap_prec, 2)
+              Lv_over_cp =  2490.04 # 2.5e6/1004 = 2.5 × 10⁶ J/kg at 0°C  divided by 1004 J/kg/K
+              net_condensation = Lv_over_cp*(net_condensation/self.yscale_lev[ilev_crm:,1]) * self.yscale_lev[ilev_crm:,0]
+            #   print("max dt0", torch.max(out_neww[:,ilev_crm:,0]).item(), "cond", net_condensation.max().item())
+              out_neww[:,ilev_crm:,0] = out_neww[:,ilev_crm:,0] + net_condensation
+
+              #                      source,       sink   of precipitation  (note: signs already reversed w.r.t. above)
+              d_precip_sourcesink    = torch.mean(dqn_aa      - dqv_evap_prec,2)                    # - dqv_pos_fix  - dqn_pos_fix
+
+            else:
+              
+              dqn_aa        = self.relu(dqn_aa) # force positive
+
+              if self.conserve_water:
+                qv_old = inputs_denorm[:,:,-1]
+                minval = -(self.yscale_lev[:,1]*qv_old/1200) - flux_qv_dp
+                dqn_evap_cond_vapor = torch.clamp(dqn_evap_cond_vapor, min=minval)
+
+              out_neww[:,ilev_crm:,1] = flux_qv_dp + dqn_evap_cond_vapor 
+              out_neww[:,ilev_crm:,2] = flux_qn_dp - dqn_evap_cond_vapor      - dqn_aa  
+              d_precip_sourcesink    = dqn_aa           
+        
             # This should be positive to avoid negative precipitation!
+
+        #   print("model mean max min dqn_evap_cond_vapor", torch.mean(dqn_evap_cond_vapor).item(),  torch.max(dqn_evap_cond_vapor).item(), torch.min(dqn_evap_cond_vapor).item())
+        #   print("model mean max min dqv_evap_prec", torch.mean(dqv_evap_prec).item(),  torch.max(dqv_evap_prec).item(), torch.min(dqv_evap_prec).item())
+        #   print("model mean dqn_aa", torch.mean(dqn_aa).item())
+        #   print("model mean max min d_precip_sourcesink", torch.mean(d_precip_sourcesink).item(),  torch.max(d_precip_sourcesink).item(), torch.min(d_precip_sourcesink).item())
 
           out = out_neww   
 
@@ -908,7 +1076,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             #   raise Exception("Negative precipitation") 
             water_stored_lev  = torch.unsqueeze(water_stored,dim=1)
             water_stored_lev = torch.unsqueeze(torch.repeat_interleave(water_stored_lev,self.nlev_mem,dim=1),dim=2)
-            rnn1_mem = torch.cat((rnn1_mem[:,:,0:self.nh_mem], water_stored_lev),dim=2)
+            rnn_mem = torch.cat((rnn_mem[:,:,0:self.nh_mem], water_stored_lev),dim=2)
             if self.pour_excess:
                 precip=  sedimentation + water_released + water_excess # - prec_negative
             else:
@@ -969,14 +1137,15 @@ class LSTM_autoreg_torchscript(nn.Module):
           # liq_frac_pred[temp>275.0] = 1.0 
           # out[:,:,3] = self.relu(liq_frac_pred)
           temp = temp[:,ilev_crm:]
-          # mem = rnn1_mem[:,ilev_crm:]
+          # mem = rnn_mem[:,ilev_crm:]
 
           inds = (temp < 275.0) & (temp<250.0)
-        #   x_predfrac = rnn1_mem[inds]
+        #   x_predfrac = rnn_mem[inds]
           if self.separate_radiation:
-              mem = rnn1_mem 
+              mem = rnn_mem 
           else:
-              mem = rnn1_mem[:,ilev_crm:]
+              mem = rnn_mem[:,ilev_crm:]
+          
           x_predfrac = mem[inds]
           liq_frac_pred = self.mlp_predfrac(x_predfrac)
           liq_frac_pred = torch.reshape(liq_frac_pred,(-1,))
@@ -987,11 +1156,11 @@ class LSTM_autoreg_torchscript(nn.Module):
         # print("shape out pred", out.shape, "sfc", out_sfc.shape)
         # print("model PREC fin2",torch.mean(out_sfc[:,3:4]).item())
 
-        # return out, out_sfc, rnn1_mem
+        # return out, out_sfc, rnn_mem
         if self.physical_precip and self.return_neg_precip:
-          return out, out_sfc, rnn1_mem, prec_negative
+          return out, out_sfc, rnn_mem, prec_negative
         else:
-          return out, out_sfc, rnn1_mem
+          return out, out_sfc, rnn_mem
     
     @torch.jit.export
     def pp_mp(self, out, out_sfc, x_denorm):
@@ -1301,7 +1470,7 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
     def forward(self, inp_list : List[Tensor]):
         inputs_main   = inp_list[0]
         inputs_aux    = inp_list[1]
-        rnn1_mem      = inp_list[2]
+        rnn_mem      = inp_list[2]
         batch_size = inputs_main.shape[0]
         # print("shape inputs main", inputs_main.shape)
         if self.add_pres:
@@ -1322,8 +1491,8 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
             inputs_main_crm = self.nonlin(inputs_main_crm)  
             
         # if self.use_memory:
-        # rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
-        inputs_main_crm = torch.cat((inputs_main_crm,rnn1_mem), dim=2)
+        # rnn1_input = torch.cat((rnn1_input,self.rnn_mem), axis=2)
+        inputs_main_crm = torch.cat((inputs_main_crm,rnn_mem), dim=2)
         
         # TOA is first in memory, so to start at the surface we need to go backwards
         rnn1_input = torch.flip(inputs_main_crm, [1])
@@ -1365,8 +1534,8 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         
         # Final steps: 
         # if self.return_det:
-        #     rnn1_mem        = self.mlp_latent(h_final)
-        #     out_det         = self.mlp_output(rnn1_mem)
+        #     rnn_mem        = self.mlp_latent(h_final)
+        #     out_det         = self.mlp_output(rnn_mem)
         #     if self.output_prune:
         #         out_det[:,0:12,1:] = out_det[:,0:12,1:].clone().zero_()
         # out_sfc         = self.mlp_surface_output(h_sfc)
@@ -1376,8 +1545,8 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
         #  --------- STOCHASTIC RNN FOR PERTURBATION ----------
         if not self.deterministic_mode:
             if self.return_det:
-                rnn1_mem        = self.mlp_latent(h_final)
-                out_det         = self.mlp_output(rnn1_mem)
+                rnn_mem        = self.mlp_latent(h_final)
+                out_det         = self.mlp_output(rnn_mem)
                 if self.output_prune and (not self.separate_radiation):
                     out_det[:,0:12,1:] = out_det[:,0:12,1:].clone().zero_()
 
@@ -1410,8 +1579,8 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
           #  --------- STOCHASTIC RNN FOR PERTURBATION ----------
 
         # Final steps: 
-        rnn1_mem        = self.mlp_latent(h_final)
-        out             = self.mlp_output(rnn1_mem)
+        rnn_mem        = self.mlp_latent(h_final)
+        out             = self.mlp_output(rnn_mem)
         if self.output_prune and (not self.separate_radiation):
             # Only temperature tendency is computed for the top 10 levels
             # if self.separate_radiation:
@@ -1467,9 +1636,9 @@ class LSTM_autoreg_torchscript_perturb(nn.Module):
 
         out_sfc         = self.relu(out_sfc)
         if self.return_det:
-            return out, out_sfc, rnn1_mem, out_det
+            return out, out_sfc, rnn_mem, out_det
         else:
-            return out, out_sfc, rnn1_mem
+            return out, out_sfc, rnn_mem
         
 
 class stochastic_RNN_autoreg_torchscript(nn.Module):
@@ -1665,7 +1834,7 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
     def forward(self, inp_list : List[Tensor]):
         inputs_main   = inp_list[0]
         inputs_aux    = inp_list[1]
-        rnn1_mem      = inp_list[2]
+        rnn_mem      = inp_list[2]
         if self.use_ar_noise:
             eps_prev  = inp_list[3]
             if self.two_eps_variables:
@@ -1688,7 +1857,7 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
             inputs_main = self.nonlin(inputs_main)  
             
         if self.use_memory:
-            inputs_main = torch.cat((inputs_main,rnn1_mem), dim=2)
+            inputs_main = torch.cat((inputs_main,rnn_mem), dim=2)
             
         inputs_main = torch.transpose(inputs_main,0,1)
         rnn1_input =  torch.flip(inputs_main, [0])
@@ -1744,7 +1913,7 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         if self.use_intermediate_mlp: #and self.use_lstm: 
             rnn2out = self.mlp_latent(rnn2out)
           
-        rnn1_mem = rnn2out
+        rnn_mem = rnn2out
       
         out = self.mlp_output(rnn2out)
 
@@ -1760,11 +1929,11 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
         sigma = torch.exp(0.5*sfc_logvar_)
         out_sfc = sfc_mean_ + eps * sigma
         if self.use_surface_memory:
-            # print("rnn1 mem shape 0", rnn1_mem.shape)
+            # print("rnn1 mem shape 0", rnn_mem.shape)
             prec = torch.reshape(out_sfc,(-1,1,2))
             prec = torch.repeat_interleave(prec,self.nlev,dim=1)
-            rnn1_mem = torch.cat((rnn1_mem[:,:,0:self.nh_mem-2:],prec),dim=2)
-            # print("rnn1 mem shape 1", rnn1_mem.shape)
+            rnn_mem = torch.cat((rnn_mem[:,:,0:self.nh_mem-2:],prec),dim=2)
+            # print("rnn1 mem shape 1", rnn_mem.shape)
 
         out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
 
@@ -1775,9 +1944,9 @@ class stochastic_RNN_autoreg_torchscript(nn.Module):
             if self.two_eps_variables:
               eps_prev2 = self.tau_t * eps_prev2 + self.tau_e * torch.randn_like(eps_prev)
               eps_prev = torch.stack((eps_prev,eps_prev2))
-            return out, out_sfc, rnn1_mem, eps_prev
+            return out, out_sfc, rnn_mem, eps_prev
         else:
-            return out, out_sfc, rnn1_mem
+            return out, out_sfc, rnn_mem
     
 
 class halfstochastic_RNN_autoreg_torchscript(nn.Module):
@@ -1977,7 +2146,7 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
     def forward(self, inp_list : List[Tensor]):
         inputs_main   = inp_list[0]
         inputs_aux    = inp_list[1]
-        rnn1_mem      = inp_list[2]
+        rnn_mem      = inp_list[2]
         if self.use_ar_noise:
             eps_prev  = inp_list[3]
             if self.two_eps_variables:
@@ -1999,7 +2168,7 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
             inputs_main = self.mlp_initial(inputs_main)
             inputs_main = self.nonlin(inputs_main)  
             
-        inputs_main = torch.cat((inputs_main,rnn1_mem), dim=2)
+        inputs_main = torch.cat((inputs_main,rnn_mem), dim=2)
             
         inputs_main = torch.transpose(inputs_main,0,1)
         rnn1_input =  torch.flip(inputs_main, [0])
@@ -2044,7 +2213,7 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         if self.use_intermediate_mlp: 
             out = self.mlp_latent(out)
           
-        rnn1_mem = out
+        rnn_mem = out
       
         out = self.mlp_output(out)
 
@@ -2060,11 +2229,11 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
         sigma = torch.exp(0.5*sfc_logvar_)
         out_sfc = sfc_mean_ + eps * sigma
         if self.use_surface_memory:
-            # print("rnn1 mem shape 0", rnn1_mem.shape)
+            # print("rnn1 mem shape 0", rnn_mem.shape)
             prec = torch.reshape(out_sfc,(-1,1,2))
             prec = torch.repeat_interleave(prec,self.nlev,dim=1)
-            rnn1_mem = torch.cat((rnn1_mem[:,:,0:self.nh_mem-2:],prec),dim=2)
-            # print("rnn1 mem shape 1", rnn1_mem.shape)
+            rnn_mem = torch.cat((rnn_mem[:,:,0:self.nh_mem-2:],prec),dim=2)
+            # print("rnn1 mem shape 1", rnn_mem.shape)
 
         out_sfc =  torch.cat((out_sfc_rad[:,0:2], out_sfc, out_sfc_rad[:,2:]),dim=1)
 
@@ -2075,9 +2244,9 @@ class halfstochastic_RNN_autoreg_torchscript(nn.Module):
             if self.two_eps_variables:
               eps_prev2 = self.tau_t * eps_prev2 + self.tau_e * torch.randn_like(eps_prev)
               eps_prev = torch.stack((eps_prev,eps_prev2))
-            return out, out_sfc, rnn1_mem, eps_prev
+            return out, out_sfc, rnn_mem, eps_prev
         else:
-            return out, out_sfc, rnn1_mem
+            return out, out_sfc, rnn_mem
         
 class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
     use_initial_mlp: Final[bool]
@@ -2227,7 +2396,7 @@ class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
         
         return out_denorm, out_sfc_denorm
     
-    def forward(self, inputs_main, inputs_aux, rnn1_mem):
+    def forward(self, inputs_main, inputs_aux, rnn_mem):
 
         if self.add_pres:
             sp = torch.unsqueeze(inputs_aux[:,0:1],1)
@@ -2242,8 +2411,8 @@ class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
             inputs_main = self.nonlin(inputs_main)  
             
         if self.use_memory:
-            # rnn1_input = torch.cat((rnn1_input,self.rnn1_mem), axis=2)
-            inputs_main = torch.cat((inputs_main,rnn1_mem), dim=2)
+            # rnn1_input = torch.cat((rnn1_input,self.rnn_mem), axis=2)
+            inputs_main = torch.cat((inputs_main,rnn_mem), dim=2)
             
             
         inputs_main = torch.transpose(inputs_main,0,1)
@@ -2284,7 +2453,7 @@ class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
             rnn2out = self.mlp_latent(rnn2out)
           
         if self.use_memory:
-            rnn1_mem = torch.flip(rnn2out, [1])
+            rnn_mem = torch.flip(rnn2out, [1])
             
       
         out = self.mlp_output(rnn2out)
@@ -2301,7 +2470,7 @@ class detLSTM_stochastic_RNN_autoreg_torchscript(nn.Module):
 
         out_sfc = self.relu(out_sfc)
 
-        return out, out_sfc, rnn1_mem
+        return out, out_sfc, rnn_mem
 
 class LSTM_torchscript(nn.Module):
     use_initial_mlp: Final[bool]
