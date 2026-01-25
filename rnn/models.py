@@ -1009,6 +1009,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             
             flux_net_qn = flux_mult_coeff*flux2*crm_qn_old#*torch.reshape(self.yscale_lev[ilev_crm:,1],(1,-1,1))
             # flux_net_qn = torch.mean( flux_net_qn , 2)
+            
             del flux1, flux2, p_crm_qn_old, p_crm_qv_old
 
             # else:
@@ -1025,13 +1026,13 @@ class LSTM_autoreg_torchscript(nn.Module):
             # flux_net_qn = torch.cat((zeroes,flux_net_qn),dim=1)
             zeroes_crm = torch.zeros(batch_size, 1, self.mp_ncol, device=inputs_main.device)
             if self.include_sedimentation_term:
-              flux_net_qv = torch.cat((zeroes_crm,flux_net_qv[:,0:-1], zeroes_crm),dim=1)
-              flux_net_qn = torch.cat((zeroes_crm,flux_net_qn[:,0:-1], zeroes_crm),dim=1)
-              sedimentation = 0
-            else:
               flux_net_qv = torch.cat((zeroes_crm,flux_net_qv),dim=1)
               flux_net_qn = torch.cat((zeroes_crm,flux_net_qn),dim=1)
               sedimentation = torch.mean( flux_net_qv[:,-1] + flux_net_qn[:,-1], 1)
+            else:
+              flux_net_qv = torch.cat((zeroes_crm,flux_net_qv[:,0:-1], zeroes_crm),dim=1)
+              flux_net_qn = torch.cat((zeroes_crm,flux_net_qn[:,0:-1], zeroes_crm),dim=1)
+              sedimentation = 0
 
             # flux_qv_dp = scaling_factor*( (flux_net_qv[:,1:] - flux_net_qv[:,0:-1]) / pres_diff) 
             # flux_qn_dp = scaling_factor*( (flux_net_qn[:,1:] - flux_net_qn[:,0:-1]) / pres_diff) 
