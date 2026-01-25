@@ -90,13 +90,16 @@ def main(cfg: DictConfig):
     # torch.cuda.memory._record_memory_history(enabled='all')
     
     # SELECT OUTPUTS / MICROPHYSICS CONSTRAINT
+    #          ['ptend_t', 'ptend_q0001', 'ptend_q0002', 'ptend_q0003', 'ptend_u', 'ptend_v']
+    # Temperature tendency, q-wv tendency, cloud liquid tendency, cloud ice tendency, wind tendencies
     # mp_mode = 0   # regular 6 outputs
-    # mp_mode = 1   # 5 outputs, predict qn, liq_frac DIAGNOSED from temperature (Hu et al.)
-    # mp_mode = -1  # 6 outputs, predict qn + liq_frac 
-    # mp_mode = -2  # 6 outputs, predict qn + liq_frac (fraction of cloud that is liquid) + cld_water_frac (fraction of total water that is cloud)
+    # mp_mode = 1   # 5 outputs, predict qv + qn, liq_frac DIAGNOSED from temperature (Hu et al.)
+    # mp_mode = -1  # 6 outputs, predict qv + qn + liq_frac 
+    # mp_mode = -2  # 6 outputs, predict qv + qn + liq_frac (fraction of cloud that is liquid) + cld_water_frac (fraction of total water that is cloud)
     # physical_precip: attempt to incorporate mass conservation via predicting fluxes and microphysical tendencies, diagnose precipitation  (see models.py)
-    if cfg.physical_precip and cfg.mp_mode==0:
-      raise NotImplementedError("Physical_precip=true as it not compatible with mp_mode=0 as it requires qn")
+    if cfg.model_type != "LSTM_autoreg_torchscript_physprec2":
+      if cfg.physical_precip and cfg.mp_mode==0:
+        raise NotImplementedError("Physical_precip=true as it not compatible with mp_mode=0 as it requires qn")
 
     if cfg.memory=="None":
         cfg.autoregressive=False
@@ -297,16 +300,20 @@ def main(cfg: DictConfig):
 
             if cfg.mp_mode==-1:
                 yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval, scaleval, 1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
-            elif cfg.mp_mode==-2:
+            elif cfg.mp_mode==-2: #                                         cld_water_frac
                 yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval,  5.914,   1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            elif cfg.mp_mode==0:
+                if cfg.model_type != "LSTM_autoreg_torchscript_physprec2":
+                    raise NotImplementedError()
+                yscale_lev_new = yscale_lev
+                # yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval, scaleval, 1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
             else:
                 raise NotImplementedError()
             loss_weights =  yscale_lev / yscale_lev_new
             yscale_lev = yscale_lev_new
             yscale_sca[2:4] = scaleval
             # print("scale lev 3", yscale_lev[:,3])
-            if cfg.mp_mode == 0:
-                raise NotImplementedError()
+        
             # print("yscale lev 3", yscale_lev[:,3])
 
 
@@ -524,6 +531,29 @@ def main(cfg: DictConfig):
                         output_prune = cfg.output_prune,
                         concat = cfg.concat,
                         nh_mem = cfg.nh_mem)#,
+    elif cfg.model_type == "LSTM_autoreg_torchscript_physprec2":
+          model = LSTM_autoreg_torchscript_physprec2(hyam,hybm,hyai,hybi,
+              out_scale = yscale_lev,
+              out_sfc_scale = yscale_sca, 
+              xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+              xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+              lbd_qc = lbd_qc, lbd_qi=lbd_qi,  lbd_qn=lbd_qn, 
+              device=device,
+              nx = nx, nx_sfc=nx_sfc, 
+              ny = ny, ny_sfc=ny_sfc, 
+              nneur=cfg.nneur, 
+              use_lstm = False, 
+              use_initial_mlp = cfg.use_initial_mlp,
+              use_intermediate_mlp = cfg.use_intermediate_mlp,
+              add_pres = cfg.add_pres,
+              add_stochastic_layer = cfg.add_stochastic_layer, 
+              output_prune = cfg.output_prune,
+              mp_mode = cfg.mp_mode,
+              separate_radiation = cfg.separate_radiation,
+              predict_liq_frac=predict_liq_frac,
+              randomly_initialize_cellstate=cfg.randomly_initialize_cellstate,
+              output_sqrt_norm=cfg.new_nolev_scaling,
+              nh_mem = cfg.nh_mem)
     elif cfg.model_type in ["SLSTM", "SGRU"]: #cfg.model_type=="SRNN":
         if cfg.model_type=="SLSTM":
             use_lstm=True 

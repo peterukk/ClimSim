@@ -324,7 +324,7 @@ def get_dprec_ddlwp(hyai, hybi):
         return diff 
     return metric
 
-def specific_to_relative_humidity_torch_cc(sh, temp, pressure):
+def specific_to_relative_humidity_torch_cc(sh, temp, pressure, return_q_excess=False):
     """
     Convert specific humidity to relative humidity using PyTorch tensors.
     
@@ -372,12 +372,20 @@ def specific_to_relative_humidity_torch_cc(sh, temp, pressure):
     # Calculate relative humidity
     rh = e_actual / e_sat
 
-    # print("max rh", rh.max().item())
-    
-    # Clamp to [0, 1] to handle numerical issues
-    # rh = torch.clamp(rh, 0.0, 1.0)
-    
-    return rh
+    if return_q_excess:
+      rh_excess = F.relu(rh - 1.0)
+      # Calculate actual vapor pressure
+      e_actual_excess = rh_excess * e_sat
+      # Calculate specific humidity
+      # q = (epsilon * e) / (p - e * (1 - epsilon))
+      specific_humidity_excess = (epsilon * e_actual_excess) / (pressure - e_actual_excess * (1 - epsilon))
+      return rh, specific_humidity_excess 
+    else:
+      # print("max rh", rh.max().item())
+      
+      # Clamp to [0, 1] to handle numerical issues
+      # rh = torch.clamp(rh, 0.0, 1.0)
+      return rh
 
 # --- PyTorch implementations ---
 def torch_polyval(coeffs, x):

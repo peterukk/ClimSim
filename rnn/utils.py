@@ -515,7 +515,7 @@ class train_or_eval_one_epoch:
 
                         # Positive cloud water metric 
 
-                        if self.cfg.physical_precip:
+                        if True: #self.cfg.physical_precip:
                           # Metrics for the predicted vapor and cloud water being positive after tendency update
                           # Note: if mp_mode=-2, we are predicting only total water, qv_new is actually qtot_new
                           # and no point measuring positivity of both
@@ -523,9 +523,10 @@ class train_or_eval_one_epoch:
                             qn_new = ((x_lay_raw[:,:,2] +  x_lay_raw[:,:,3]) + 1200*(preds_lay[:,:,2])/self.model.yscale_lev[:,2] + 
                                     1200*(preds_lay[:,:,3])/self.model.yscale_lev[:,3])
                             qn_pos_loss = torch.mean(torch.square(F.relu(-qn_new)))
+                            del qn_new
                           # qv_old = x_lay_raw[:,:,-1] 
-                          # hang on. if mp_mode=-2, whats below is actually incorrect? qv_old is just qv but preds_lay_1 is the total water
-                          qv_new = x_lay_raw[:,:,-1] + 1200*preds_lay[:,:,1]/self.model.yscale_lev[:,1]
+                          qv_new = x_lay_raw[:,:,-1] + 1200*ypo_lay[:,:,1]
+
                           # print("min qv_old",qv_old.min().item(), "max", qv_old.max().item())
                           # print("min qv new",qv_new.min().item(), "max", qv_new.max().item())
                           qv_pos_loss = torch.mean(torch.square(F.relu(-qv_new)))
@@ -533,7 +534,7 @@ class train_or_eval_one_epoch:
                             precip_neg_mse = precip_neg_mse / timesteps
                         # print("ut min max mean qn new-pred", torch.min(qn_new).item(),  torch.max(qn_new).item(), torch.mean(qn_new).item())
                         # print("qn pos loss: ", q_pos_loss.item())
-                          del qn_new, qv_new
+                          del qv_new
 
                         # precipitation accumulation
                         precip_sum_mse  = metrics.precip_sum_mse(yto_sfc, ypo_sfc, timesteps)
@@ -608,7 +609,7 @@ class train_or_eval_one_epoch:
                         rh_mse = rh_mse.detach()
                     cloudpath_err = cloudpath_err.detach()
                     # if self.cfg.use_water_positivity_loss and self.cfg.mp_mode!=-2:
-                    if self.cfg.physical_precip: 
+                    if True: # self.cfg.physical_precip: 
                         qv_pos_loss = qv_pos_loss.detach()
                         if self.cfg.mp_mode != -2: 
                             qn_pos_loss = qn_pos_loss.detach()
@@ -637,7 +638,7 @@ class train_or_eval_one_epoch:
                     running_cldpath += cloudpath_err.item()
                     running_bias    += bias_tot.item() 
                     running_precip  += precip_sum_mse.item()
-                    if self.cfg.physical_precip:
+                    if True: #self.cfg.physical_precip:
                         running_qv_pos  += qv_pos_loss.item()
                         if self.cfg.mp_mode != -2: 
                             running_qn_pos  += qn_pos_loss.item()
@@ -667,7 +668,7 @@ class train_or_eval_one_epoch:
                             if self.cfg.include_q_input:
                                 epoch_rh_mse  += rh_mse.item()
                             epoch_accumprec += precip_sum_mse.item()
-                            if self.cfg.physical_precip:
+                            if True: #self.cfg.physical_precip:
                                 epoch_qv_pos += qv_pos_loss.item()
                                 if self.cfg.mp_mode != -2:
                                     epoch_qn_pos += qn_pos_loss.item()
@@ -770,7 +771,7 @@ class train_or_eval_one_epoch:
                     running_energy = running_energy / fac
                     running_water = running_water / fac
                     running_cldpath = running_cldpath / fac
-                    if self.cfg.physical_precip:
+                    if True: # self.cfg.physical_precip:
                         running_qv_pos = running_qv_pos / fac
                         running_qn_pos = running_qn_pos / fac
                     running_bias = running_bias / fac
