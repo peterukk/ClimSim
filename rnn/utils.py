@@ -361,14 +361,21 @@ class train_or_eval_one_epoch:
                 with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
                     if j>timesteps:
                       if self.replay=="full":
-                        x_lay0 = torch.cat((x_lay0[:,:,0:-5], prev_outputs),dim=2)
+                        # x_lay0 = torch.cat((x_lay0[:,:,0:-5], prev_outputs),dim=2)
+                        if x_lay0.shape[-1] > 20:
+                          x_lay0 = torch.cat((x_lay0[:,:,0:15], prev_outputs, x_lay0[:,:,20:]),dim=2)
+                        else:
+                          x_lay0 = torch.cat((x_lay0[:,:,0:-5], prev_outputs),dim=2)
+                        # x_lay0[:,:,15:20] = prev_outputs 
+
                       elif self.replay=="mixed":
                         # x_lay0[:,:,-5:] = preds_lay0[:,:,0:5]
                         # x_lay0 = torch.cat((x_lay0[:,:,0:-5], prev_outputs),dim=2)
                         # use random_inds here
                         x_lay0_new = torch.clone(x_lay0)
                         # print("shape x0", x_lay0.shape, "[rnd], ", x_lay0_new[inds_rnd].shape)
-                        x_lay0_new[inds_rnd,:,-5:] = prev_outputs[inds_rnd,:,0:5]
+                        # x_lay0_new[inds_rnd,:,-5:] = prev_outputs[inds_rnd,:,0:5]
+                        x_lay0_new[inds_rnd,:,15:20] = prev_outputs[inds_rnd]
                         x_lay0 = x_lay0_new
                         
                     inp_list = [x_lay0, x_sfc0]
