@@ -186,13 +186,13 @@ def precip_sum_mse(yto_sfc, ypo_sfc, timesteps):
     return mse 
 
 
-
 def get_energy_metric(hyai, hybi):
-    def em(yto, ypo, sp, timesteps):
+    def em(yto, yto_sfc, ypo,  ypo_sfc, sp, timesteps):
         #  y: (batch*timesteps, lev, ny)
         cp = torch.tensor(1004.0)
         Lv = torch.tensor(2.5104e6)
-        Lf = torch.tensor(3.34e5)
+        Ls = torch.tensor(2.8440e6)
+        # Lf = torch.tensor(3.34e5)
         one_over_grav = torch.tensor(0.1020408163) # 1/9.8
         
         thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
@@ -201,18 +201,25 @@ def get_energy_metric(hyai, hybi):
         dT_pred = ypo[:,:,0]
         dT_true = yto[:,:,0]
 
-        dq_pred = ypo[:,:,1] 
-        dq_true = yto[:,:,1]
+        # dq_pred = ypo[:,:,1] 
+        # dq_true = yto[:,:,1]
         
         dql_pred = ypo[:,:,2] 
         dql_true = yto[:,:,2] 
-            
-        energy_pred = torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),1)
-        energy_true = torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),1)
-        # energy_pred = torch.sum(thick*(dq_pred*Lv + dT_pred*cp),1)
-        # energy_true = torch.sum(thick*(dq_true*Lv + dT_true*cp),1)
-        # (batch)
+      
+        dqi_pred = ypo[:,:,3] 
+        dqi_true = yto[:,:,3] 
         
+        snow_true = 1000*yto_sfc[:,2]; prec_true = 1000*yto_sfc[:,3]; rain_true = prec_true - snow_true
+        snow_pred = 1000*ypo_sfc[:,2]; prec_pred = 1000*ypo_sfc[:,3]; rain_pred = prec_pred - snow_pred
+
+        # term1 = torch.sum(thick*(dT_true*cp -dql_true*Lv  -dqi_true*Ls),1) 
+        # term2 = - rain_true*Lv - snow_true*Ls
+        # diff = term1 - term2
+        # print("mean term1", term1.mean().item(), "2", term2.mean().item(), "diff", diff.mean().item())
+        energy_true = torch.sum(thick*(dT_true*cp -dql_true*Lv  -dqi_true*Ls),1) - rain_true*Lv - snow_true*Ls
+        energy_pred = torch.sum(thick*(dT_pred*cp -dql_pred*Lv  -dqi_pred*Ls),1) - rain_pred*Lv - snow_pred*Ls
+
         energy_pred = torch.reshape(energy_pred,(timesteps, -1))
         energy_pred = torch.mean(energy_pred,dim=0)
         
@@ -223,6 +230,43 @@ def get_energy_metric(hyai, hybi):
         return energy_mse 
     
     return em
+
+# def get_energy_metric(hyai, hybi):
+#     def em(yto, ypo, sp, timesteps):
+#         #  y: (batch*timesteps, lev, ny)
+#         cp = torch.tensor(1004.0)
+#         Lv = torch.tensor(2.5104e6)
+#         Lf = torch.tensor(3.34e5)
+#         one_over_grav = torch.tensor(0.1020408163) # 1/9.8
+        
+#         thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
+#                              + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
+    
+#         dT_pred = ypo[:,:,0]
+#         dT_true = yto[:,:,0]
+
+#         dq_pred = ypo[:,:,1] 
+#         dq_true = yto[:,:,1]
+        
+#         dql_pred = ypo[:,:,2] 
+#         dql_true = yto[:,:,2] 
+            
+#         energy_pred = torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),1)
+#         energy_true = torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),1)
+#         # energy_pred = torch.sum(thick*(dq_pred*Lv + dT_pred*cp),1)
+#         # energy_true = torch.sum(thick*(dq_true*Lv + dT_true*cp),1)
+#         # (batch)
+        
+#         energy_pred = torch.reshape(energy_pred,(timesteps, -1))
+#         energy_pred = torch.mean(energy_pred,dim=0)
+        
+#         energy_true = torch.reshape(energy_true,(timesteps, -1))
+#         energy_true = torch.mean(energy_true,dim=0)
+
+#         energy_mse=torch.mean(torch.square(energy_pred - energy_true))
+#         return energy_mse 
+    
+#     return em
     
 def get_water_conservation(hyai, hybi):
     def wc(pred_lev, pred_sfc, sp, LHF, xlay, timesteps, printdebug=False, return_cloudpath=False): #, xlay, printdebug=False):
@@ -324,7 +368,7 @@ def get_dprec_ddlwp(hyai, hybi):
         return diff 
     return metric
 
-def specific_to_relative_humidity_torch_cc(sh, temp, pressure, return_q_excess=False):
+def specific_to_relative_humidity_torch_cc(sh, temp, pressure):#, return_q_excess=False):
     """
     Convert specific humidity to relative humidity using PyTorch tensors.
     
@@ -372,20 +416,20 @@ def specific_to_relative_humidity_torch_cc(sh, temp, pressure, return_q_excess=F
     # Calculate relative humidity
     rh = e_actual / e_sat
 
-    if return_q_excess:
-      rh_excess = F.relu(rh - 1.0)
-      # Calculate actual vapor pressure
-      e_actual_excess = rh_excess * e_sat
-      # Calculate specific humidity
-      # q = (epsilon * e) / (p - e * (1 - epsilon))
-      specific_humidity_excess = (epsilon * e_actual_excess) / (pressure - e_actual_excess * (1 - epsilon))
-      return rh, specific_humidity_excess 
-    else:
+    # if return_q_excess:
+    #   rh_excess = F.relu(rh - 1.0)
+    #   # Calculate actual vapor pressure
+    #   e_actual_excess = rh_excess * e_sat
+    #   # Calculate specific humidity
+    #   # q = (epsilon * e) / (p - e * (1 - epsilon))
+    #   specific_humidity_excess = (epsilon * e_actual_excess) / (pressure - e_actual_excess * (1 - epsilon))
+    #   return rh, specific_humidity_excess 
+    # else:
       # print("max rh", rh.max().item())
       
       # Clamp to [0, 1] to handle numerical issues
       # rh = torch.clamp(rh, 0.0, 1.0)
-      return rh
+    return rh
 
 # --- PyTorch implementations ---
 def torch_polyval(coeffs, x):
@@ -440,12 +484,12 @@ def specific_to_relative_humidity_torch(q, temp, pressure):
     return rh
 
 def get_rh_loss(hyam, hybm):
-    def metric(pred_lev, true_lev, x_denorm, sp):
+    def metric(pred_lev, true_lev, x_denorm, qv_before, sp):
 
         pres = torch.unsqueeze(hyam*100000.0 + sp*hybm,2)
 
         T_before        = x_denorm[:,:,0:1]
-        qv_before       = x_denorm[:,:,-1:]
+        # qv_before       = x_denorm[:,:,-1:]
 
         qv_new          = qv_before +  true_lev[:,:,1:2]*1200
         qv_new_pred     = qv_before +  pred_lev[:,:,1:2]*1200

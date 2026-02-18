@@ -40,9 +40,9 @@ new_nolev_scaling: false
 cld_inp_transformation: "exp"
 rh_input_to_q: false
 include_q_input: true
-output_prune: true
-qinput_prune: true
-rh_prune: true
+output_prune: false
+qinput_prune: false
+rh_prune: false
 remove_past_sfc_inputs: true
 v4_to_v5_inputs: false
 include_prev_inputs: false
@@ -98,6 +98,8 @@ model_type: LSTM
 randomly_initialize_cellstate: false
 concat: false
 separate_radiation: false
+existing_gasopt_file_lw: None
+existing_gasopt_file_sw: None 
 ensemble_size: 1 
 crps_start_epoch: 0 
 
@@ -130,3 +132,4 @@ rollout_schedule:
 - 5
 - 6
 - 6
+save_loaded_model_and_quit: false

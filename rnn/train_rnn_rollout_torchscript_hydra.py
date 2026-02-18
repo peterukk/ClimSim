@@ -56,9 +56,7 @@ print(device)
 
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from models import  *
-from models_experimental import *
-from utils import train_or_eval_one_epoch, generator_xy, BatchSampler, plot_bias_diff
+from utils import train_or_eval_one_epoch, generator_xy, BatchSampler, plot_bias_diff,  load_gas_optics_model
 import metrics as metrics
 from torchmetrics.regression import R2Score
 import wandb
@@ -82,7 +80,11 @@ def main(cfg: DictConfig):
     print('RAM memory % used:', psutil.virtual_memory()[2], flush=True)
     # Getting usage of virtual_memory in GB ( 4th field)
     print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
-    
+
+    if cfg.save_loaded_model_and_quit:
+      import settings 
+      settings.change_compile_setting(True)
+
     # torch.autograd.set_detect_anomaly(True)
     # print("backends:", torch._dynamo.list_backends())
     # cfg = OmegaConf.load("conf/autoreg_LSTM.yaml")
@@ -99,7 +101,7 @@ def main(cfg: DictConfig):
     # physical_precip: attempt to incorporate mass conservation via predicting fluxes and microphysical tendencies, diagnose precipitation  (see models.py)
     if cfg.model_type != "LSTM_autoreg_torchscript_physprec2":
       if cfg.physical_precip and cfg.mp_mode==0:
-        raise NotImplementedError("Physical_precip=true as it not compatible with mp_mode=0 as it requires qn")
+        raise NotImplementedError("Physical_precip=true not compatible with mp_mode=0 as it requires qn")
 
     if cfg.memory=="None":
         cfg.autoregressive=False
@@ -252,9 +254,8 @@ def main(cfg: DictConfig):
         predict_liq_frac=False
 
     if cfg.use_rh_loss:
-        if not cfg.include_q_input:
-            print("use_rh_loss was on, need q input, setting include_q_input to true")
-            cfg.include_q_input = True 
+        if not (cfg.include_q_input or cfg.rh_input_to_q):
+            raise NotImplementedError("use_rh_loss was on, need q input, setting include_q_input or rh_input_to_q to true")
 
     print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
 
@@ -469,6 +470,7 @@ def main(cfg: DictConfig):
     print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
 
     if cfg.model_type in ["LSTM","GRU"]:
+        from models import LSTM_autoreg_torchscript, LSTM_torchscript
         if cfg.model_type=="LSTM":
             use_lstm=True 
         else:
@@ -514,6 +516,7 @@ def main(cfg: DictConfig):
                         add_pres = cfg.add_pres, output_prune = cfg.output_prune)
     elif cfg.model_type=="CFC":
         if cfg.autoregressive:
+            from models_experimental import LiquidNN_autoreg_torchscript
             model = LiquidNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
                         out_scale = yscale_lev,
                         out_sfc_scale = yscale_sca, 
@@ -532,6 +535,7 @@ def main(cfg: DictConfig):
                         concat = cfg.concat,
                         nh_mem = cfg.nh_mem)#,
     elif cfg.model_type == "LSTM_autoreg_torchscript_physprec2":
+          from models import LSTM_autoreg_torchscript_physprec2
           model = LSTM_autoreg_torchscript_physprec2(hyam,hybm,hyai,hybi,
               out_scale = yscale_lev,
               out_sfc_scale = yscale_sca, 
@@ -555,6 +559,7 @@ def main(cfg: DictConfig):
               output_sqrt_norm=cfg.new_nolev_scaling,
               nh_mem = cfg.nh_mem)
     elif cfg.model_type in ["SLSTM", "SGRU"]: #cfg.model_type=="SRNN":
+        from models import stochastic_RNN_autoreg_torchscript
         if cfg.model_type=="SLSTM":
             use_lstm=True 
         else:
@@ -579,6 +584,7 @@ def main(cfg: DictConfig):
                     ar_tau = cfg.ar_tau,
                     use_surface_memory=cfg.use_surface_memory)#,
     elif cfg.model_type=="LSTM_autoreg_torchscript_perturb":
+        from models import LSTM_autoreg_torchscript_perturb
         # if cfg.autoregressive:
         model =  LSTM_autoreg_torchscript_perturb(hyam,hybm,hyai,hybi,
                                     out_scale = yscale_lev,
@@ -598,6 +604,7 @@ def main(cfg: DictConfig):
                                     output_prune = cfg.output_prune,
                                     nh_mem=cfg.nh_mem)
     elif cfg.model_type=="halfstochasticRNN":
+        from models import halfstochastic_RNN_autoreg_torchscript
         model = halfstochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
                     out_sfc_scale = yscale_sca, 
@@ -617,7 +624,30 @@ def main(cfg: DictConfig):
                     use_surface_memory=cfg.use_surface_memory)#,
     elif cfg.model_type=="physrad":
         torch._functorch.config.donated_buffer=False
-        
+
+        ng_lw = 128
+        ng_sw = 112 
+        # Uncomment below to change the last layer of the pre-trained gas optics models so we can directly have a smaller spectral resolution
+        # without a decoder. Doesn't seem to really work
+        # ng_lw = 16  
+        # ng_sw = 16
+        mlp_gasopt_model_lw, mlp_gasopt_model_sw, mlp_gasopt_model_sw2  = None,None,None
+        if cfg.existing_gasopt_file_lw != "None":
+          print("Loading pre-existing longwave gas optics model from {}".format(cfg.existing_gasopt_file_lw))
+          # from norm_coefficients import gasopt_lw_inp_max, gasopt_lw_inp_min, gasopt_lw_outp_mean, gasopt_lw_outp_std
+          # ng = 16
+          mlp_gasopt_model_lw = load_gas_optics_model(cfg.existing_gasopt_file_lw, device, num_outputs_desired=ng_lw)#, lock_weights=True)
+          # infostr = summary(mlp_gasopt_model_lw)
+          # print(infostr)
+
+        if cfg.existing_gasopt_file_sw != "None":
+          print("Loading pre-existing shortwave !ABSORPTION! gas optics model from {}".format(cfg.existing_gasopt_file_sw))
+          mlp_gasopt_model_sw = load_gas_optics_model(cfg.existing_gasopt_file_sw, device, num_outputs_desired=ng_sw)
+          existing_gasopt_file_sw2 = cfg.existing_gasopt_file_sw.replace('absorption', 'rayleigh')
+        # if cfg.existing_gasopt_file_sw2 != "None":
+          print("Loading pre-existing shortwave !RAYLEIGH! gas optics model from {}".format(existing_gasopt_file_sw2))
+          mlp_gasopt_model_sw2 = load_gas_optics_model(existing_gasopt_file_sw2, device, num_outputs_desired=ng_sw)
+
         from models_rad import LSTM_autoreg_torchscript_physrad
         model = LSTM_autoreg_torchscript_physrad(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
@@ -625,18 +655,26 @@ def main(cfg: DictConfig):
                     xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
                     xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
                     device=device,
+                    # gasopt_lw_inp_min=gasopt_lw_inp_min, gasopt_lw_inp_max=gasopt_lw_inp_max,
+                    # gasopt_lw_outp_std=gasopt_lw_outp_std, gasopt_lw_outp_mean=gasopt_lw_outp_mean,
                     nx = nx, nx_sfc=nx_sfc, 
                     ny = ny, ny_sfc=ny_sfc, 
                     nneur=cfg.nneur, 
+                    gas_optics_model_lw = mlp_gasopt_model_lw,
+                    gas_optics_model_sw1 = mlp_gasopt_model_sw,
+                    gas_optics_model_sw2 = mlp_gasopt_model_sw2,
                     use_initial_mlp = cfg.use_initial_mlp,
                     use_intermediate_mlp = cfg.use_intermediate_mlp,
                     add_pres = cfg.add_pres,
                     add_stochastic_layer = cfg.add_stochastic_layer, 
+                    physical_precip = cfg.physical_precip,
+                    predict_liq_frac=predict_liq_frac,
                     output_prune = cfg.output_prune,
                     concat = cfg.concat,
                     nh_mem = cfg.nh_mem,
                     mp_mode = cfg.mp_mode)
     elif cfg.model_type=="radflux":
+        from models_experimental import LSTM_autoreg_torchscript_radflux
         model = LSTM_autoreg_torchscript_radflux(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
                     out_sfc_scale = yscale_sca, 
@@ -655,6 +693,7 @@ def main(cfg: DictConfig):
                     mp_mode = cfg.mp_mode)
     else:
       print("using SSM")
+      from models_experimental import SpaceStateModel_autoreg
       model = SpaceStateModel_autoreg(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
                     out_sfc_scale = yscale_sca, 
@@ -877,8 +916,8 @@ def main(cfg: DictConfig):
     new_lr = cfg.lr
     
     start_epoch=0
-    # load from checkpoint of it exists
 
+    # load from checkpoint of it exists
     if len(cfg.model_file_checkpoint)>0:
         print("loading existing model from {}".format(cfg.model_file_checkpoint))
         checkpoint = torch.load("saved_models/"+cfg.model_file_checkpoint,weights_only=True)
@@ -888,7 +927,53 @@ def main(cfg: DictConfig):
             lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch']
         print("LOADED FROM MODEL CHECKPOINT SUCCESSFULLY")
+        # model.update_qv_for_rad=True
+        # print("update qv", model.update_qv_for_rad)
 
+        if cfg.save_loaded_model_and_quit:
+          MODEL_STR=cfg.model_file_checkpoint.split(".pt")[0]
+          save_file_torch1 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
+          save_file_torch1_gpu = "saved_models/" + MODEL_STR + "_script_gpu.pt"
+          save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu2.pt"
+          if is_stochastic:
+              model.use_ensemble=False
+          if cfg.physical_precip:
+              return_neg_precip=False
+              if model.return_neg_precip:
+                  return_neg_precip=True 
+              model.return_neg_precip = False
+          model.train(False)
+        #   model = model.eval()
+
+          # model.compile(mode="max-autotune")
+          scripted_model = torch . jit . script ( model )
+          scripted_model = scripted_model.eval()
+          scripted_model.save(save_file_torch1_gpu)
+          # model.compile(mode="max-autotune")
+          print("model train:", model.training)
+          model = model.to("cpu")
+          scripted_model = torch . jit . script ( model )
+          scripted_model = scripted_model.eval()
+          scripted_model.save(save_file_torch1)
+
+          dummy_input_lay = torch.zeros(384, 60, model.nx0)
+          dummy_input_sfc = torch.zeros(384, model.nx_sfc0)
+          dummy_mem  = torch.zeros(384,model.nlev_mem, model.nh_mem)
+          inp_list = [dummy_input_lay, dummy_input_sfc, dummy_mem, dummy_input_lay]
+          scripted_model = torch.jit.trace(model, example_inputs=(inp_list,))
+      
+          scripted_model = scripted_model.eval()
+          # scripted_model = torch.jit.optimize_for_inference(scripted_model)
+          scripted_model.save(save_file_torch2)
+          print("saved model to: ", save_file_torch2)
+
+          # scripted_model = torch.export.export(model, args=(inp_list,))
+          # torch.export.save(scripted_model,save_file_torch2)
+          # print(scripted_model)
+ 
+          model = model.to(device)
+          quit()
+    
     prev_nan = False
     # --------------------------------------------------------------------------------------------------------
     # ----------------------------------------- START TRAINING -----------------------------------------------
@@ -934,6 +1019,7 @@ def main(cfg: DictConfig):
             logged_metrics = {"train_"+k:v for k, v in logged_metrics.items()}
             logged_metrics['epoch'] = epoch
             wandb.log(logged_metrics)
+            train_runner.metrics = {}
 
             if (np.isnan(logged_metrics['train_loss']) or (logged_metrics['train_R2'] < 0.0)):
                 if prev_nan:
@@ -943,6 +1029,7 @@ def main(cfg: DictConfig):
                 prev_nan = True 
             else:
                 prev_nan = False 
+            del logged_metrics
 
         # if (bool(epoch%2) and (epoch>=cfg.val_epoch_start)):
         if (epoch>=cfg.val_epoch_start):
@@ -966,7 +1053,8 @@ def main(cfg: DictConfig):
                 logged_metrics = {"val_"+k:v for k, v in logged_metrics.items()}
                 logged_metrics['epoch'] = epoch
                 wandb.log(logged_metrics)
-    
+                del logged_metrics
+
             val_loss = val_runner.metrics["loss"]
             # val_loss = val_runner.metrics["R2"]
 
@@ -994,22 +1082,27 @@ def main(cfg: DictConfig):
                             'scheduler_state_dict': lr_scheduler.state_dict(),
                             'val_loss': val_loss,
                             }, SAVE_PATH)  
-                scripted_model = torch . jit . script ( model )
-                scripted_model = scripted_model.eval()
-                scripted_model.save(save_file_torch1)
-                model = model.to("cpu")
-                scripted_model = torch . jit . script ( model )
-                scripted_model = scripted_model.eval()
-                scripted_model.save(save_file_torch2)
-                best_val_loss = val_loss 
+                
+                # model.train(False)
+                # # model.compile(mode="max-autotune")
+                # scripted_model = torch . jit . script ( model )
+                # scripted_model = scripted_model.eval()
+                # scripted_model.save(save_file_torch1)
+                # model = model.to("cpu")
+                # scripted_model = torch . jit . script ( model )
+                # scripted_model = scripted_model.eval()
+                # scripted_model.save(save_file_torch2)
+                # best_val_loss = val_loss 
+                # model = model.to(device)
+                # model.train(True)
+                # model.compile(mode="default")
+                # print("model saved!")
+
                 if is_stochastic:
                     model.use_ensemble=True
                 if cfg.physical_precip:
                   if return_neg_precip: 
                     model.return_neg_precip = True    
-                model = model.to(device)
-                print("model saved!")
-
                 R2 = val_runner.metrics["R2_lev"]
                 ncols, nrows = 3,2
                 fig, axs = plt.subplots(ncols=ncols, nrows=nrows, figsize=(9.5, 4.5),
@@ -1052,6 +1145,8 @@ def main(cfg: DictConfig):
                 grid_area =  grid_info.area
                 fig = plot_bias_diff(vars_stacked, grid_area, lat, level)
                 fig.savefig('val_eval/' + MODEL_STR + 'val_zonalmeanbias.png')
+            val_runner.metrics = {}
+            plt.close()
 
 
         print('Epoch {}/{} complete, took {:.2f} seconds, autoreg window was {}'.format(epoch+1,cfg.num_epochs,time.time() - t0,timesteps))

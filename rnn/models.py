@@ -9,12 +9,13 @@ import sys
 import torch
 import torch.nn as nn
 import torch.nn.parameter as Parameter
-from layers import LayerPressure, LevelPressure
+from layers import * #LayerPressure, LevelPressure
 import torch.nn.functional as F
 from typing import List, Tuple, Final, Optional
 from torch import Tensor
 from models_torch_kernels import GLU
 from models_torch_kernels import *
+from metrics import specific_to_relative_humidity_torch_cc, specific_to_relative_humidity_torch
 import numpy as np 
 from typing import Final 
 import time
@@ -159,12 +160,13 @@ class LSTM_autoreg_torchscript(nn.Module):
     output_sqrt_norm: Final[bool]
     concat: Final[bool]
     store_precip: Final[bool]
+    cond_evap_rh_scale: Final[bool]
     do_heat_advection: Final[bool]
     ice_sedimentation: Final[bool]
     include_diffusivity: Final[bool]
     pour_excess: Final[bool]
     pred_total_water: Final[bool]
-    conserve_water: Final[bool]
+    # conserve_water: Final[bool]
     constrain_precip: Final[bool]
     return_neg_precip: Final[bool]
     def __init__(self, hyam, hybm,  hyai, hybi,
@@ -261,8 +263,9 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.nh_mem = self.nneur[1]
 
         # lots of options for physical_precip (ignored if physical_precip=false!)
-        self.conserve_water = True
+        # self.conserve_water = True
         self.store_precip = True
+        self.cond_evap_rh_scale = True
         self.constrain_precip = False
         self.ice_sedimentation = True
         self.pour_excess = True
@@ -281,7 +284,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             self.nh_mem0 = self.nh_mem
         
         if self.physical_precip:
-            print("conserve_water:",self.conserve_water, "storeprec:", self.store_precip, "constrainprec:", self.constrain_precip, 
+            print("storeprec:", self.store_precip, "constrainprec:", self.constrain_precip, 
                 "pour:", self.pour_excess, "do heat:", self.do_heat_advection, "diffusivity:", self.include_diffusivity)
 
             self.mp_ncol = 16
@@ -296,8 +299,11 @@ class LSTM_autoreg_torchscript(nn.Module):
               self.mlp_evap_cond_vapor_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
               if self.ice_sedimentation:
                 self.mlp_sed_qn_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
+              self.mlp_qtot_crm      = nn.Linear(self.nh_rnn2, self.mp_ncol)
 
             self.mlp_evap_prec_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
+            # self.mlp_evap_prec2_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
+
             self.mlp_qn_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
             self.mlp_qi_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
 
@@ -780,8 +786,8 @@ class LSTM_autoreg_torchscript(nn.Module):
 
         # with torch.autocast(device_type="cuda", enabled=False):
         if self.physical_precip:
-          rnn2outt = rnn2outt.float()
-          last_h = last_h.float()
+          # rnn2outt = rnn2outt.float()
+          # last_h = last_h.float()
           # ilev_crm = 12
           if self.separate_radiation:
             ilev_crm = 10
@@ -866,13 +872,18 @@ class LSTM_autoreg_torchscript(nn.Module):
               diff_qtot = (diff_qtot[:,1:] - diff_qtot[:,0:-1]) / preslay_diff
 
             if self.do_heat_advection: 
-              T_old = 5e-2*inputs_denorm[:,ilev_crm:,0]
+              # T_old = 5e-2*inputs_denorm[:,ilev_crm:,0]
+              tlev  = interpolate_tlev_batchfirst(inputs_denorm[:,:,0], preslay_nonorm.squeeze(), preslev_nonorm.squeeze()) # (nb, nlev+1)
+              T_old = tlev[:,ilev_crm+1:]
+              preslay_diff0 = preslay_nonorm[:,ilev_crm:] - preslay_nonorm[:,ilev_crm-1:-1]
               flux3 = self.mlp_flux_crm_t(rnn2outt)
               p_crm_t_old = self.softmax(self.mlp_t_crm(rnn2outt))
               crm_t_old = self.mp_ncol*T_old.unsqueeze(2)*p_crm_t_old
-              flux_net_t = flux3*crm_t_old
+              # flux_net_t = flux3*crm_t_old
+              flux_net_t = flux3*102.34*crm_t_old*preslay_diff0 #  cp/g · T · Δp 
               flux_net_t = torch.cat((zeroes_crm,flux_net_t),dim=1)
-              flux_t_dp = scaling_factor*( (flux_net_t[:,1:] - flux_net_t[:,0:-1]) / pres_diff.unsqueeze(2)) 
+              # flux_t_dp = scaling_factor*( (flux_net_t[:,1:] - flux_net_t[:,0:-1]) / pres_diff.unsqueeze(2)) 
+              flux_t_dp = (scaling_factor/1004.0)*( (flux_net_t[:,1:] - flux_net_t[:,0:-1]) / pres_diff.unsqueeze(2)) 
               del flux3, p_crm_t_old, crm_t_old, flux_net_t 
 
             if subcolumns:
@@ -893,29 +904,29 @@ class LSTM_autoreg_torchscript(nn.Module):
               del rnn2outt
               dqtot_mp = dqn_aa - dqv_evap_prec
 
-            if self.conserve_water:
-                # When we predict total water and diagnose precipitation from the vertical integral of the microphysical tendency,
-                # we would otherwise always conserve water, BUT if the predicted total tendency would make the amount of water
-                # negative at some level, we lose the water conservation because this will be clipped to zero online 
+            # if self.conserve_water:
+            # When we predict total water and diagnose precipitation from the vertical integral of the microphysical tendency,
+            # we would otherwise always conserve water, BUT if the predicted total tendency would make the amount of water
+            # negative at some level, we lose the water conservation because this will be clipped to zero online 
 
-                # qtot_old + dqtot_denorm*1200 > 0 
-                # dqtot_denorm*1200 > -qtot_old
-                # dqtot_denorm > -qtot_old/1200
-                # dqtot/self.yscale_lev[:,1] > -qtot_old/1200 
-                # dqtot > -(self.yscale_lev[:,1]*qtot_old/(1200) 
-                # flux_qtot_dp - dqtot_mp  > -(self.yscale_lev[:,1]*qtot_old/(1200) 
-                #   - dqtot_mp  > -(self.yscale_lev[:,1]*qtot_old/(1200)  - flux_qtot_dp
-                # dqtot_mp  < (self.yscale_lev[:,1]*qtot_old/(1200)  + flux_qtot_dp
+            # qtot_old + dqtot_denorm*1200 > 0 
+            # dqtot_denorm*1200 > -qtot_old
+            # dqtot_denorm > -qtot_old/1200
+            # dqtot/self.yscale_lev[:,1] > -qtot_old/1200 
+            # dqtot > -(self.yscale_lev[:,1]*qtot_old/(1200) 
+            # flux_qtot_dp - dqtot_mp  > -(self.yscale_lev[:,1]*qtot_old/(1200) 
+            #   - dqtot_mp  > -(self.yscale_lev[:,1]*qtot_old/(1200)  - flux_qtot_dp
+            # dqtot_mp  < (self.yscale_lev[:,1]*qtot_old/(1200)  + flux_qtot_dp
 
-                # print("min max dqtot_mp0", torch.min(dqtot_mp), torch.max(dqtot_mp))
-                # print("min max flux_qtot_dp", torch.min(flux_qtot_dp), torch.max(flux_qtot_dp))
-                # print("min max qtot scale", torch.min((self.yscale_lev[:,1]*qtot_old/1200)), torch.max((self.yscale_lev[:,1]*qtot_old/1200)))
-                if subcolumns:
-                  max_dqtot_mp = (self.yscale_lev[ilev_crm:,1:2]*qtot_old/1200) + flux_qtot_dp
-                else:
-                  max_dqtot_mp = (self.yscale_lev[ilev_crm:,1]*qtot_old/1200) + flux_qtot_dp
-                dqtot_mp = torch.clamp(dqtot_mp, max=max_dqtot_mp)
-                
+            # print("min max dqtot_mp0", torch.min(dqtot_mp), torch.max(dqtot_mp))
+            # print("min max flux_qtot_dp", torch.min(flux_qtot_dp), torch.max(flux_qtot_dp))
+            # print("min max qtot scale", torch.min((self.yscale_lev[:,1]*qtot_old/1200)), torch.max((self.yscale_lev[:,1]*qtot_old/1200)))
+            if subcolumns:
+                max_dqtot_mp = (self.yscale_lev[ilev_crm:,1:2]*qtot_old/1200) + flux_qtot_dp
+            else:
+                max_dqtot_mp = (self.yscale_lev[ilev_crm:,1]*qtot_old/1200) + flux_qtot_dp
+            dqtot_mp = torch.clamp(dqtot_mp, max=max_dqtot_mp)
+            
 
             # if the diagnosed precip is negative this reflects a net SOURCE of column water 
             # if we are storing precipitation, then we can allow this to be negative with a minimum value set by the 
@@ -956,15 +967,17 @@ class LSTM_autoreg_torchscript(nn.Module):
             out_neww[:,:,3:self.ny] = out[:,:,3:self.ny]
 
             # dqv_evap_prec = out[:,ilev_crm:,1] # Evaporation of precipitation (precip to water vapor = sink of precip, source of qv)
-            dqn_aa        = out[:,ilev_crm:,2] # Accretion/autoconversion (cloud water to precip. = source of precip, sink of qn)
-            # dqn_evap_cond_vapor = out[:,ilev_crm:,3] # evaporation - condensation  (cloud water to water vapor is positive) 
+            # dqn_aa        = out[:,ilev_crm:,2] # Accretion/autoconversion (cloud water to precip. = source of precip, sink of qn)
+            # dq_cond_evap_vapor = out[:,ilev_crm:,3] # evaporation - condensation  (cloud water to water vapor is positive) 
 
             # rnn2outt = rnn2outt[:,ilev_crm:]
             dqv_evap_prec       = self.mlp_evap_prec_crm(rnn2outt)
-            dqn_evap_cond_vapor = self.mlp_evap_cond_vapor_crm(rnn2outt)
+            # dqv_evap_prec2       = self.mlp_evap_prec2_crm(rnn2outt)
+
+            dq_cond_evap_vapor = self.mlp_evap_cond_vapor_crm(rnn2outt)
 
             # mp_crm_ar = self.mlp_microphysics(rnn2out[:,ilev_crm:])
-            # dqv_evap_prec, dqn_aa, dqn_evap_cond_vapor  = mp_crm_ar.chunk(3,2)
+            # dqv_evap_prec, dqn_aa, dq_cond_evap_vapor  = mp_crm_ar.chunk(3,2)
 
             flux_mult_coeff = 3.0e5
 
@@ -1006,16 +1019,21 @@ class LSTM_autoreg_torchscript(nn.Module):
 
             zeroes_crm = torch.zeros(batch_size, 1, self.mp_ncol, device=inputs_main.device)
 
-            T_old = inputs_denorm[:,ilev_crm:,0] #5e-2*inputs_denorm[:,ilev_crm:,0]
-            flux3 = self.mlp_flux_crm_t(rnn2outt)
-            p_crm_t_old = self.softmax(self.mlp_t_crm(rnn2outt))
-            crm_t_old = self.mp_ncol*T_old.unsqueeze(2)*p_crm_t_old
             if self.do_heat_advection: 
-              flux_net_t = flux3*crm_t_old
+              # T_old = inputs_denorm[:,ilev_crm:,0]
+              tlev  = interpolate_tlev_batchfirst(inputs_denorm[:,:,0], preslay_nonorm.squeeze(), preslev_nonorm.squeeze()) # (nb, nlev+1)
+              T_old = tlev[:,ilev_crm+1:]
+              preslay_diff0 = preslay_nonorm[:,ilev_crm:] - preslay_nonorm[:,ilev_crm-1:-1]
+              flux3 = self.mlp_flux_crm_t(rnn2outt)
+              p_crm_t_old = self.softmax(self.mlp_t_crm(rnn2outt))
+              crm_t_old = self.mp_ncol*T_old.unsqueeze(2)*p_crm_t_old
+              # flux_net_t = flux3*crm_t_old
+            #   print("shape 1", flux3.shape, "2", crm_t_old.shape, "3", preslay_diff0.shape)
+              flux_net_t = flux3*102.34*crm_t_old*preslay_diff0.unsqueeze(2) #  cp/g · T · Δp 
               flux_net_t = torch.cat((zeroes_crm,flux_net_t),dim=1)
-              flux_t_dp = scaling_factor*( (flux_net_t[:,1:] - flux_net_t[:,0:-1]) / pres_diff.unsqueeze(2)) 
-              del flux3, p_crm_t_old, flux_net_t 
-
+              # flux_t_dp = scaling_factor*( (flux_net_t[:,1:] - flux_net_t[:,0:-1]) / pres_diff.unsqueeze(2)) 
+              flux_t_dp = (scaling_factor/1004.0)*( (flux_net_t[:,1:] - flux_net_t[:,0:-1]) / pres_diff.unsqueeze(2)) 
+              del flux3, p_crm_t_old, crm_t_old, flux_net_t 
 
             flux_net_qv = flux_mult_coeff*flux1*crm_qv_old#*torch.reshape(self.yscale_lev[ilev_crm:,1],(1,-1,1))              
             flux_net_qn = flux_mult_coeff*flux2*crm_qn_old#*torch.reshape(self.yscale_lev[ilev_crm:,1],(1,-1,1))
@@ -1033,7 +1051,8 @@ class LSTM_autoreg_torchscript(nn.Module):
           #   sed = g*rho*crm_qi_old*0.4*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1))#*self.relu(self.w1)
           #   sed = sed*g*rho*crm_qi_old*0.4*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1))#*self.relu(self.w1)
           #   sed = sed*g*rho*torch.pow(crm_qi_old,1.5)*0.4*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1))#*self.relu(self.w1)
-              sed = sed*g*torch.pow(crm_qi_old,1.5)*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1))#*self.relu(self.w1)
+              # sed = sed*g*torch.pow(crm_qi_old,1.5)*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1))#*self.relu(self.w1)
+              sed = sed*g*crm_qi_old*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1))#*self.relu(self.w1)
 
             # flux_net_qv = torch.cat((zeroes,flux_net_qv),dim=1)
             # flux_net_qn = torch.cat((zeroes,flux_net_qn),dim=1)
@@ -1042,6 +1061,33 @@ class LSTM_autoreg_torchscript(nn.Module):
               sed_qn_dp = scaling_factor*( (sed[:,1:] - sed[:,0:-1]) / pres_diff.unsqueeze(2)) 
             else:
               sedimentation = 0
+
+            # ------------------------ EXPERIMENTAL -------------------------------------
+            # p_qtot_crm_old = self.softmax(self.mlp_qtot_crm(rnn2outt))
+            # # p_qtot_crm_old = p_crm_qv_old
+            # qtot_old = qn_old0 + qv_old0
+            # qtot_crm_old = self.mp_ncol*qtot_old.unsqueeze(2)*p_qtot_crm_old 
+            # pressure = preslay_nonorm[:,ilev_crm:].unsqueeze(2)
+
+            # # print("qtot_crm_old max", qtot_crm_old.max().item(), "shape", qtot_crm_old.shape, "T_crm_old max", crm_t_old.max().item(), "shape", crm_t_old.shape)
+            # # print("max q_old",  qtot_old.max().item(), "temp", T_old.max().item(), "shape", T_old.shape, "P max", pressure.max().item(), "shape", pressure.shape)
+        
+            # # print("T_old min max", T_old.min().item(), T_old.max().item(), "mean", T_old.mean())    
+            # # print("qtot_old min max", qtot_old.min().item(), qtot_old.max().item(), "mean", qtot_old.mean())    
+            # crm_t_old = T_old.unsqueeze(2)
+            # rh_crm, q_excess_crm = specific_to_relative_humidity_torch_cc(qtot_crm_old, crm_t_old, pressure, return_q_excess=True)
+            # rh = specific_to_relative_humidity_torch_cc(qtot_old, T_old, pressure.squeeze()).unsqueeze(2)
+            # # print("rh min max", rh.min().item(), rh.max().item(), "mean", rh.mean())    
+            # # print("T_old_crm min max", crm_t_old.min().item(), crm_t_old.max().item(), "mean", crm_t_old.mean())    
+            # # print("qtot_old_crm min max", qtot_crm_old.min().item(), qtot_crm_old.max().item(), "mean", qtot_crm_old.mean())  
+            # # print("rh crm min max", rh_crm.min().item(), rh_crm.max().item(), "mean", rh_crm.mean()) 
+
+            # dq_cond_evap_vapor = dq_cond_evap_vapor*(rh_crm-1)
+            if self.cond_evap_rh_scale:
+                rh = inputs_denorm[:,ilev_crm:,1:2]
+                dq_cond_evap_vapor = dq_cond_evap_vapor*rh
+            # ------------------------ EXPERIMENTAL -------------------------------------
+
 
             flux_net_qv = torch.cat((zeroes_crm,flux_net_qv[:,0:-1], zeroes_crm),dim=1)
             flux_net_qn = torch.cat((zeroes_crm,flux_net_qn[:,0:-1], zeroes_crm),dim=1)
@@ -1054,7 +1100,6 @@ class LSTM_autoreg_torchscript(nn.Module):
             flux_qn_dp = scaling_factor*( (flux_net_qn[:,1:] - flux_net_qn[:,0:-1]) / pres_diff.unsqueeze(2)) 
             del flux_net_qv, flux_net_qn
 
-            # dqn_aa        = self.relu(dqn_aa) + 1.0e-6 # force positive
             dqv_evap_prec = self.relu(dqv_evap_prec) + 1.0e-6 # force positive
             # Relate evaporated precipitation to stored precipitation here?
             P_old_vertical = out[:,ilev_crm:,2] # self.mlp_prec_vertical(rnn2outt)
@@ -1062,99 +1107,104 @@ class LSTM_autoreg_torchscript(nn.Module):
             P_old_vertical = self.softmax_dim1(P_old_vertical) * P_old.unsqueeze(1) # sums to P_old
             dqv_evap_prec = dqv_evap_prec*P_old_vertical.unsqueeze(2) # P_old.unsqueeze(1)
 
-            if self.conserve_water: 
+            # P_old_vertical = out[:,ilev_crm:,2] # self.mlp_prec_vertical(rnn2outt)
+            # # P_old_vertical = rnn_mem[:,ilev_crm:,0] 
+            # P_old_vertical = self.softmax_dim1(P_old_vertical) * P_old.unsqueeze(1) # sums to P_old
+            # S = self.relu(dqv_evap_prec2*crm_qv_old)
+            # dqv_evap_prec = -dqv_evap_prec*P_old_vertical.unsqueeze(2)   * (S-1)
+
+
+            # if self.conserve_water: 
             #   dqn_aa = out[:,ilev_crm:,1:2]
-              alpha = self.relu(self.mlp_mp_aa_crm(rnn2outt)) #+ 1.0e-6 # force positive
+            alpha = self.relu(self.mlp_mp_aa_crm(rnn2outt)) #+ 1.0e-6 # force positive
+        
+            q_old_sum = torch.sum(qn_old0,dim=1)
+            qn_old_redist = out[:,ilev_crm:,1]
+            qn_old2 = torch.reshape(self.softmax_dim1(qn_old_redist) * q_old_sum.unsqueeze(1), (batch_size, -1, 1))
+            crm_qn_old = qn_old2
+            # dqn_aa = alpha*crm_qn_old*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1)) 
+            dqn_aa = alpha*torch.square(crm_qn_old)*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1)) 
+            # dqn_aa = alpha*torch.pow(crm_qn_old, 1.5)*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1)) 
 
-              q_old_sum = torch.sum(qn_old0,dim=1)
-              qn_old_redist = out[:,ilev_crm:,1]
-              qn_old2 = torch.reshape(self.softmax_dim1(qn_old_redist) * q_old_sum.unsqueeze(1), (batch_size, -1, 1))
-              crm_qn_old = qn_old2
-              dqn_aa = alpha*crm_qn_old*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1)) 
-              # dqn_aa = alpha*torch.square(crm_qn_old)*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1)) 
-              # dqn_aa = alpha*torch.pow(crm_qn_old, 1.5)*torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1)) 
+            # thresh = self.sigmoid(self.w1)*0.001 # 1e-4 # 5e-4
+        #   thresh = 4.0e-4
+        #   qscale = torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1))
+        #   dqn_aa = self.relu(alpha*(crm_qn_old-thresh))
+        #   # dqn_aa = alpha*crm_qn_old
+        #   alpha2 = self.mlp_mp_aa2_crm(rnn2outt)
+        #   alpha2 = self.relu(alpha2) #  + 1.0e-6 # force positive
+        #   dqn_accretion = alpha2*crm_qn_old*P_old_vertical.unsqueeze(2)
+        #   print("min max Pvert", P_old_vertical.min().item(), P_old_vertical.max().item())
+        #   dqn_accretion = alpha2*crm_qn_old*torch.pow(P_old_vertical.unsqueeze(2)+1e-4,0.875)
+        #   dqn_aa = qscale*dqn_aa + qscale*dqn_accretion
+            del rnn2outt
 
-              # thresh = self.sigmoid(self.w1)*0.001 # 1e-4 # 5e-4
-            #   thresh = 4.0e-4
-            #   qscale = torch.reshape(self.yscale_lev[ilev_crm:,2],(1,-1,1))
-            #   dqn_aa = self.relu(alpha*(crm_qn_old-thresh))
-            #   # dqn_aa = alpha*crm_qn_old
-            #   alpha2 = self.mlp_mp_aa2_crm(rnn2outt)
-            #   alpha2 = self.relu(alpha2) #  + 1.0e-6 # force positive
-            #   dqn_accretion = alpha2*crm_qn_old*P_old_vertical.unsqueeze(2)
-            #   print("min max Pvert", P_old_vertical.min().item(), P_old_vertical.max().item())
-            #   dqn_accretion = alpha2*crm_qn_old*torch.pow(P_old_vertical.unsqueeze(2)+1e-4,0.875)
-            #   dqn_aa = qscale*dqn_aa + qscale*dqn_accretion
-              del rnn2outt
-
-              if True:
-                # first ensure positive qn by clamping dqn_evap_cond_vapor
+            if True:
+                # first ensure positive qn by clamping dq_cond_evap_vapor
                 if self.ice_sedimentation:
-                  minval = -(self.yscale_lev[ilev_crm:,2:3]*qn_old/1200) - flux_qn_dp + dqn_aa - sed_qn_dp
+                    minval = -(self.yscale_lev[ilev_crm:,2:3]*qn_old/1200) - flux_qn_dp + dqn_aa - sed_qn_dp
                 else:
-                  minval = -(self.yscale_lev[ilev_crm:,2:3]*qn_old/1200) - flux_qn_dp + dqn_aa
-                dqn_evap_cond_vapor = torch.clamp(dqn_evap_cond_vapor, min=minval)
-                # minval = -(self.yscale_lev[:,2]*qn_old/1200) - flux_qn_dp + dqn_aa - dqn_evap_cond_vapor 
+                    minval = -(self.yscale_lev[ilev_crm:,2:3]*qn_old/1200) - flux_qn_dp + dqn_aa
+                dq_cond_evap_vapor = torch.clamp(dq_cond_evap_vapor, min=minval)
+                # minval = -(self.yscale_lev[:,2]*qn_old/1200) - flux_qn_dp + dqn_aa - dq_cond_evap_vapor 
                 # dqn_pos_fix = torch.relu(minval)
-            
-              if True:
+        
                 # then ensure positive qv by clamping dqv_evap_prec
-                minval = -(self.yscale_lev[ilev_crm:,1:2]*qv_old/1200) - flux_qv_dp + dqn_evap_cond_vapor
+                minval = -(self.yscale_lev[ilev_crm:,1:2]*qv_old/1200) - flux_qv_dp + dq_cond_evap_vapor
                 dqv_evap_prec = torch.clamp(dqv_evap_prec, min=minval)
-                # minval = -(self.yscale_lev[:,1]*qv_old/1200) - flux_qv_dp + dqn_evap_cond_vapor - dqv_evap_prec
+                # minval = -(self.yscale_lev[:,1]*qv_old/1200) - flux_qv_dp + dq_cond_evap_vapor - dqv_evap_prec
                 # dqv_pos_fix = torch.relu(minval)
 
-              if True:
                 # maximum cloud water limit, make sure qn_new doesn't exceed qn_max
                 # dqn_normed < yscale*(qnmax - qnold)/1200
-                # flux_qn_dp + dqn_evap_cond_vapor   - dqn_aa < yscale*(qnmax - qnold)/1200
-                # flux_qn_dp + dqn_evap_cond_vapor < yscale*(qnmax - qnold)/1200 + dqn_aa
-                #  dqn_aa > flux_qn_dp + dqn_evap_cond_vapor -yscale*(qnmax - qnold)/1200 
+                # flux_qn_dp + dq_cond_evap_vapor   - dqn_aa < yscale*(qnmax - qnold)/1200
+                # flux_qn_dp + dq_cond_evap_vapor < yscale*(qnmax - qnold)/1200 + dqn_aa
+                #  dqn_aa > flux_qn_dp + dq_cond_evap_vapor -yscale*(qnmax - qnold)/1200 
                 qn_max = 0.0006
                 if self.ice_sedimentation:
-                  minval = flux_qn_dp + dqn_evap_cond_vapor + sed_qn_dp -(self.yscale_lev[ilev_crm:,2:3]*(qn_max - qn_old)/1200) 
+                    minval = flux_qn_dp + dq_cond_evap_vapor + sed_qn_dp -(self.yscale_lev[ilev_crm:,2:3]*(qn_max - qn_old)/1200) 
                 else:
-                  minval = flux_qn_dp + dqn_evap_cond_vapor -(self.yscale_lev[ilev_crm:,2:3]*(qn_max - qn_old)/1200) 
+                    minval = flux_qn_dp + dq_cond_evap_vapor -(self.yscale_lev[ilev_crm:,2:3]*(qn_max - qn_old)/1200) 
                 dqn_aa = torch.clamp(dqn_aa, min=minval)
 
-            # note: can't both conserve water and do the following!
-            elif self.constrain_precip and self.store_precip:
-              # We have two constraints for (d_precip_sourcesink = dqn_aa - dqv_evap_prec), which is vertically
-              # integrated to get precipitation:
-              # 1/g*vint(dqn_aa - dqv_evap_prec) => -P0,
-              # 1/g*vint(dqn_aa - dqv_evap_prec) <= Pmax; where P0 is the precip. stopage and Pmax is the maximum allowed stored precipitation
-              # Lets leave dqv_evap_prec unconstrained and constrain dqn_aa:
-              # Pmax + 1/g*vint(dqv_evap_prec) => 1/g*vint(dqn_aa) => -P0 + 1/g*vint(dqv_evap_prec) 
-              predicted_sum = torch.sum(one_over_g*pres_diff*dqn_aa,1) 
-              y =  torch.sum(one_over_g*pres_diff*dqv_evap_prec,1) 
-              # print("y", y[100].item(), y.min().item(), y.max().item(), y.mean().item())
-              # print("predicted_sum", predicted_sum[100].item(),predicted_sum.min().item(), predicted_sum.max().item(), predicted_sum.mean().item())
-              # print("P_old", P_old[100].item(), P_old.min().item(), P_old.max().item(), P_old.mean().item())
-              max_sum = Pmax - P_old + y
-              min_sum = -P_old + y
-              # print("max_sum", max_sum[100].item(), max_sum.min().item(), max_sum.max().item(), max_sum.mean().item())
-              # print("min_sum", min_sum[100].item(), min_sum.min().item(), min_sum.max().item(), min_sum.mean().item())
-              target_sum = torch.clamp(predicted_sum, min=min_sum, max=max_sum)
-              # print("target_sum", target_sum[100].item(), target_sum.min().item(), target_sum.max().item())
-              dqn_aa = dqn_aa * (target_sum.unsqueeze(1) / predicted_sum.unsqueeze(1))
-              # new_sum = torch.sum(one_over_g*pres_diff*dqn_aa,1) 
-              # print("adjusted",  new_sum[100].item(),new_sum.min().item(), new_sum.max().item(), new_sum.mean().item())
-              # fac = target_sum.unsqueeze(1) / predicted_sum.unsqueeze(1)
-              # print("scalefac", fac[100].item() ,  "min", torch.min(fac).item(), "max", torch.max(fac).item(), "mean", torch.mean(fac).item())
+        #     # note: can't both conserve water and do the following!
+        #     elif self.constrain_precip and self.store_precip:
+        #       # We have two constraints for (d_precip_sourcesink = dqn_aa - dqv_evap_prec), which is vertically
+        #       # integrated to get precipitation:
+        #       # 1/g*vint(dqn_aa - dqv_evap_prec) => -P0,
+        #       # 1/g*vint(dqn_aa - dqv_evap_prec) <= Pmax; where P0 is the precip. stopage and Pmax is the maximum allowed stored precipitation
+        #       # Lets leave dqv_evap_prec unconstrained and constrain dqn_aa:
+        #       # Pmax + 1/g*vint(dqv_evap_prec) => 1/g*vint(dqn_aa) => -P0 + 1/g*vint(dqv_evap_prec) 
+        #       predicted_sum = torch.sum(one_over_g*pres_diff*dqn_aa,1) 
+        #       y =  torch.sum(one_over_g*pres_diff*dqv_evap_prec,1) 
+        #       # print("y", y[100].item(), y.min().item(), y.max().item(), y.mean().item())
+        #       # print("predicted_sum", predicted_sum[100].item(),predicted_sum.min().item(), predicted_sum.max().item(), predicted_sum.mean().item())
+        #       # print("P_old", P_old[100].item(), P_old.min().item(), P_old.max().item(), P_old.mean().item())
+        #       max_sum = Pmax - P_old + y
+        #       min_sum = -P_old + y
+        #       # print("max_sum", max_sum[100].item(), max_sum.min().item(), max_sum.max().item(), max_sum.mean().item())
+        #       # print("min_sum", min_sum[100].item(), min_sum.min().item(), min_sum.max().item(), min_sum.mean().item())
+        #       target_sum = torch.clamp(predicted_sum, min=min_sum, max=max_sum)
+        #       # print("target_sum", target_sum[100].item(), target_sum.min().item(), target_sum.max().item())
+        #       dqn_aa = dqn_aa * (target_sum.unsqueeze(1) / predicted_sum.unsqueeze(1))
+        #       # new_sum = torch.sum(one_over_g*pres_diff*dqn_aa,1) 
+        #       # print("adjusted",  new_sum[100].item(),new_sum.min().item(), new_sum.max().item(), new_sum.mean().item())
+        #       # fac = target_sum.unsqueeze(1) / predicted_sum.unsqueeze(1)
+        #       # print("scalefac", fac[100].item() ,  "min", torch.min(fac).item(), "max", torch.max(fac).item(), "mean", torch.mean(fac).item())
     
-          #   #                                    (cond-evap)<0 from vapor,  evap. from prec. both add water vapor  
-          #   out_neww[:,ilev_crm:,1] = flux_qv_dp - dqn_evap_cond_vapor     + dqv_evap_prec 
+        #   #   #                                    (cond-evap)<0 from vapor,  evap. from prec. both add water vapor  
+          #   out_neww[:,ilev_crm:,1] = flux_qv_dp - dq_cond_evap_vapor     + dqv_evap_prec 
           #   #                                    (cond-evap)>0 adds,     acc-au removes cldwater  
-          #   out_neww[:,ilev_crm:,2] = flux_qn_dp + dqn_evap_cond_vapor     - dqn_aa        
+          #   out_neww[:,ilev_crm:,2] = flux_qn_dp + dq_cond_evap_vapor     - dqn_aa        
 
             #                                                 (cond-evap)<0 from vapor,  evap. from prec. both add water vapor  
-            out_neww[:,ilev_crm:,1]   = torch.mean(flux_qv_dp - dqn_evap_cond_vapor     + dqv_evap_prec, 2)  
+            out_neww[:,ilev_crm:,1]   = torch.mean(flux_qv_dp - dq_cond_evap_vapor     + dqv_evap_prec, 2)  
             if self.ice_sedimentation:   #                    (cond-evap)>0 adds,     acc-au removes cldwater  
-              out_neww[:,ilev_crm:,2] = torch.mean(flux_qn_dp + dqn_evap_cond_vapor     - dqn_aa          + sed_qn_dp, 2)   
+              out_neww[:,ilev_crm:,2] = torch.mean(flux_qn_dp + dq_cond_evap_vapor     - dqn_aa          + sed_qn_dp, 2)   
               # print("max dqn_aa", dqn_aa.max().item(), "flux", flux_qn_dp.max().item(), "sed", sed_qn_dp.max().item())
               # print("min dqn_aa", dqn_aa.min().item(), "flux", flux_qn_dp.min().item(), "sed", sed_qn_dp.min().item())
             else:
-              out_neww[:,ilev_crm:,2] = torch.mean(flux_qn_dp + dqn_evap_cond_vapor     - dqn_aa, 2)   
+              out_neww[:,ilev_crm:,2] = torch.mean(flux_qn_dp + dq_cond_evap_vapor     - dqn_aa, 2)   
                    
             if self.include_diffusivity:
               out_neww[:,ilev_crm:-1,0] = out_neww[:,ilev_crm:-1,0] + diff_t
@@ -1164,7 +1214,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             if self.do_heat_advection: 
               out_neww[:,ilev_crm:,0] = out_neww[:,ilev_crm:,0] + torch.mean(flux_t_dp, 2)
 
-            net_condensation = torch.mean(dqn_evap_cond_vapor - dqv_evap_prec, 2)
+            net_condensation = torch.mean(dq_cond_evap_vapor - dqv_evap_prec, 2)
             Lv_over_cp =  2490.04 # 2.5e6/1004 = 2.5 × 10⁶ J/kg at 0°C  divided by 1004 J/kg/K
             net_condensation = Lv_over_cp*(net_condensation/self.yscale_lev[ilev_crm:,1]) * self.yscale_lev[ilev_crm:,0]
           #   print("max dt0", torch.max(out_neww[:,ilev_crm:,0]).item(), "cond", net_condensation.max().item())
@@ -1174,7 +1224,7 @@ class LSTM_autoreg_torchscript(nn.Module):
             d_precip_sourcesink    = torch.mean(dqn_aa      - dqv_evap_prec,2)                    # - dqv_pos_fix  - dqn_pos_fix
             # This should be positive to avoid negative precipitation!
 
-        #   print("model mean max min dqn_evap_cond_vapor", torch.mean(dqn_evap_cond_vapor).item(),  torch.max(dqn_evap_cond_vapor).item(), torch.min(dqn_evap_cond_vapor).item())
+        #   print("model mean max min dq_cond_evap_vapor", torch.mean(dq_cond_evap_vapor).item(),  torch.max(dq_cond_evap_vapor).item(), torch.min(dq_cond_evap_vapor).item())
         #   print("model mean max min dqv_evap_prec", torch.mean(dqv_evap_prec).item(),  torch.max(dqv_evap_prec).item(), torch.min(dqv_evap_prec).item())
         #   print("model mean dqn_aa", torch.mean(dqn_aa).item())
         #   print("model mean max min d_precip_sourcesink", torch.mean(d_precip_sourcesink).item(),  torch.max(d_precip_sourcesink).item(), torch.min(d_precip_sourcesink).item())
@@ -1247,7 +1297,7 @@ class LSTM_autoreg_torchscript(nn.Module):
           # print("P old", P_old[100].item(), "water_stored", water_stored1[100].item())
           # print("dqv evap", torch.sum(dqv_evap_prec[ind,:]).item())
           # print( "dqn_aa", torch.sum(dqn_aa[ind,:]).item(), "DPRECSS", torch.sum(d_precip_sourcesink[ind,:]).item() )
-          # print("dqn_evap_cond_vapor", torch.sum(dqn_evap_cond_vapor[ind,:]).item() )
+          # print("dq_cond_evap_vapor", torch.sum(dq_cond_evap_vapor[ind,:]).item() )
           # print("flux_qv_dp", torch.sum(flux_qv_dp[ind,:]).item(), "flux_qn_dp", torch.sum(flux_qn_dp[ind,:]).item()  )
           # print("sedimentation", sedimentation[ind].item(), "dpwater",  water_released[ind].item(), "prec", precip[ind].item())
           # precc = self.yscale_sca[3] * (precip_nonorm/1000) 
@@ -1360,6 +1410,7 @@ class LSTM_autoreg_torchscript(nn.Module):
         # qn_new[qn_new<0.0] = 0.0
         qliq_new    = liq_frac_constrained*qn_new
         qice_new    = (1-liq_frac_constrained)*qn_new
+        # print("qliq new min", qliq_new.min(), "max", qliq_new.max())
         dqliq       = (qliq_new - qliq_old) * 0.0008333333333333334  #/1200  
         dqice       = (qice_new - qice_old) * 0.0008333333333333334  #/1200  
         sum = dqliq+dqice 
