@@ -26,6 +26,23 @@ import matplotlib.pyplot as plt
 import random
 from torchinfo import summary
 
+def ccc(y_true, y_pred):
+    """Calculates Lin's Concordance Correlation Coefficient."""
+    # 1. Means
+    mean_true = np.mean(y_true)
+    mean_pred = np.mean(y_pred)
+    
+    # 2. Variances
+    var_true = np.var(y_true)
+    var_pred = np.var(y_pred)
+    
+    # 3. Covariance
+    cov = np.mean((y_true - mean_true) * (y_pred - mean_pred))
+    
+    # 4. CCC Formula: 2 * cov / (var_true + var_pred + (mean_true - mean_pred)^2)
+    ccc = 2 * cov / (var_true + var_pred + (mean_true - mean_pred)**2)
+    return ccc
+
 # from pickle import dump
 
 def load_gas_optics_model(gasopt_file, device, num_outputs_desired):#, lock_weights):
@@ -208,7 +225,8 @@ class train_or_eval_one_epoch:
         running_var=0.0; running_det=0.0; running_bias = 0.0; running_precip=0.0; running_rh_mse= 0.0; running_cldpath=0.0
         running_qv_pos = 0.0; running_qn_pos = 0.0; running_precip_neg = 0.0
         epoch_loss = 0.0; epoch_mse = 0.0; epoch_huber = 0.0; epoch_mae = 0.0
-        epoch_R2precc = 0.0; epoch_R2netsw = 0.0; epoch_R2flwds = 0.0; epoch_r2_lev = 0.0
+        epoch_R2precc = 0.0; epoch_R2netsw = 0.0; epoch_R2netsw_clearsky=0.0; epoch_R2flwds = 0.0; 
+        epoch_R2flwds_clearsky = 0.0; epoch_bias_heating_top = 0.0; epoch_r2_lev = 0.0
         epoch_hcon = 0.0; epoch_wcon = 0.0; epoch_wcon_long = 0.0; epoch_rh_mse = 0.0
         epoch_ens_var = 0.0; epoch_det_skill = 0.0; epoch_spreadskill = 0.0
         epoch_bias_lev = 0.0; epoch_bias_sfc = 0.0; epoch_bias_heating = 0.0
@@ -388,11 +406,9 @@ class train_or_eval_one_epoch:
                 # x_lay_raw0 = x_lay_raw0[:,:,0:8]
                         
                 if self.use_ensemble:
-                  x_lay0 = x_lay0.unsqueeze(0)
-                  x_lay0 = torch.repeat_interleave(x_lay0,repeats=self.cfg.ensemble_size,dim=0)
+                  x_lay0 = torch.repeat_interleave(x_lay0.unsqueeze(0),repeats=self.cfg.ensemble_size,dim=0)
                   x_lay0 = x_lay0.flatten(0,1)
-                  x_sfc0 = x_sfc0.unsqueeze(0)
-                  x_sfc0 = torch.repeat_interleave(x_sfc0,repeats=self.cfg.ensemble_size,dim=0)
+                  x_sfc0 = torch.repeat_interleave(x_sfc0.unsqueeze(0),repeats=self.cfg.ensemble_size,dim=0)
                   x_sfc0 = x_sfc0.flatten(0,1)
                   if self.cfg.model_type in ["physrad", "radflux"] or self.cfg.physical_precip: #or self.cfg.mp_mode==-2:
                     x_lay_raw1 = x_lay_raw0.unsqueeze(0)
@@ -430,6 +446,8 @@ class train_or_eval_one_epoch:
                         inp_list.append(eps_prev)
                     if self.cfg.model_type in ["physrad", "radflux"] or self.cfg.physical_precip: #or self.cfg.mp_mode==-2:
                         inp_list.append(x_lay_raw1)
+                        if self.cfg.model_type=="physrad" and self.cfg.physical_precip:
+                          inp_list.append(target_lay0)
                     # print("1 xlayraw shape", x_lay_raw0.shape)
                     outs = self.model(inp_list)
 
@@ -770,7 +788,10 @@ class train_or_eval_one_epoch:
                             # print("dT pred 0:2 mean", ypo_lay[:,0:2,0].mean().item())
 
                             self.metric_R2.update(ypo_lay.reshape((-1,self.ny_pp)), yto_lay.reshape((-1,self.ny_pp)))
-                                   
+                   
+                            ypo_lay = ypo_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
+                            yto_lay = yto_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
+                                            
                             sfc_pred = ypo_sfc.reshape(-1,self.model.ny_sfc).cpu().numpy().transpose()
                             sfc_true = yto_sfc.reshape(-1,self.model.ny_sfc).cpu().numpy().transpose()
 
@@ -779,11 +800,42 @@ class train_or_eval_one_epoch:
 
                             epoch_R2netsw += np.corrcoef((sfc_pred[0,:],sfc_true[0,:]))[0,1]**2
                             epoch_R2flwds += np.corrcoef((sfc_pred[1,:],sfc_true[1,:]))[0,1]**2
-
+                            
                             r2sw = np.corrcoef((sfc_pred[0,:],sfc_true[0,:]))[0,1]**2
                             r2swsfcgpt = np.corrcoef((sfc_pred[4:,:].flatten(),sfc_true[4:,:].flatten()))[0,1]**2
                             r2lw = np.corrcoef((sfc_pred[1,:],sfc_true[1,:]))[0,1]**2
 
+                            qv_before       = x_lay_raw[:,:,-1].cpu().numpy().reshape((-1,60))  
+                            qliq_before     = x_lay_raw[:,:,2].cpu().numpy().reshape((-1,60))
+                            qice_before     = x_lay_raw[:,:,3].cpu().numpy().reshape((-1,60))
+                            qn_before       = qliq_before + qice_before 
+                            qt_before       = qv_before + qn_before
+                            dqn             = yto_lay[:,:,2] + yto_lay[:,:,3]
+                            dqn_pred        = ypo_lay[:,:,2] + ypo_lay[:,:,3]
+                            qn_new          = qn_before + dqn*1200; qn_new_vint = qn_new.sum(axis=1)
+                            qn_new_pred     = qn_before + dqn_pred*1200; qn_new_pred_vint = qn_new_pred.sum(axis=1) 
+                            inds = ((qn_new_vint < 1e-6) & (qn_new_pred_vint < 5e-6))
+                            # inds = (qn_new_vint < 1e-6) 
+                            tcw = np.mean(qt_before.sum(axis=1))
+                            x_sfc_raw = (x_sfc*self.model.xdiv_sca) + self.model.xmean_sca
+                            x_sfc_raw = x_sfc_raw.cpu().numpy()
+                            incflux = np.mean(x_sfc_raw[:,1])
+                            swalb = np.mean(x_sfc_raw[:,9:11])
+                            # print(100* qn_new_vint[inds].size/qn_new_vint.size)
+                            # print("max mean", qn_new_vint.max(), qn_new_vint.mean())
+                            # r2swclearsky = np.corrcoef((sfc_pred[0,inds],sfc_true[0,inds]))[0,1]**2
+                            r2swclearsky = ccc(sfc_pred[0,inds],sfc_true[0,inds])**2
+                            if np.isnan(r2swclearsky): r2swclearsky = 0.0
+                            epoch_R2netsw_clearsky +=r2swclearsky
+                            # r2lwclearsky = np.corrcoef((sfc_pred[1,inds],sfc_true[1,inds]))[0,1]**2
+                            r2lwclearsky = ccc(sfc_pred[1,inds],sfc_true[1,inds])**2
+                            if np.isnan(r2lwclearsky): r2lwclearsky = 0.0
+                            epoch_R2flwds_clearsky +=r2lwclearsky
+                            r2_heating_top = np.corrcoef((yto_lay[:,1:10,0].flatten(),ypo_lay[:,1:10,0].flatten()))[0,1]**2
+                            # r2_heating_top_clearsky = np.corrcoef((yto_lay[inds,1:10,0].flatten(),ypo_lay[inds,1:10,0].flatten()))[0,1]**2
+                            r2_heating_top_clearsky = ccc(yto_lay[inds,1:10,0].flatten(),ypo_lay[inds,1:10,0].flatten())**2
+                            bias_heating_top = np.mean(yto_lay[inds,1:10,0]) - np.mean(ypo_lay[inds,1:10,0])
+                            epoch_bias_heating_top +=bias_heating_top
                             prec_pred = sfc_pred[3,:]
                             prec_true = sfc_true[3,:]
                             epoch_R2precc += np.corrcoef((prec_pred,prec_true))[0,1]**2
@@ -794,9 +846,6 @@ class train_or_eval_one_epoch:
                             prec_pred_daily.append(prec_pred); prec_true_daily.append(prec_true) 
                             prec_pred_hourly.append(prec_pred); prec_true_hourly.append(prec_true) 
 
-                            ypo_lay = ypo_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
-                            yto_lay = yto_lay.reshape(-1,self.model.nlev,self.ny_pp).cpu().numpy()
-                            
                             percentile_ratios = np.zeros(self.ny_pp)
                             std_ratios = np.zeros(self.ny_pp)
                             for ip in range(self.ny_pp):
@@ -859,7 +908,8 @@ class train_or_eval_one_epoch:
 
                     r2raw = self.metric_R2.compute()
 
-                    print("R2SW: {:.2f} R2SWsfcgpt: {:.2f}  R2LW: {:.2f}".format(r2sw, r2swsfcgpt, r2lw))
+                    print("R2SW: {:.2f} R2SWsfcgpt: {:.2f} R2LW: {:.2f} R2dTtop: {:.2f} | Clear-sky R2SW: {:.2f}  R2LW: {:.2f} R2dTtop: {:.2f} biasdTtop: {:.2e} | TCW: {:.2e} SWalb: {:.2e} SWin: {:.2e}".format(r2sw, 
+                        r2swsfcgpt, r2lw, r2_heating_top, r2swclearsky, r2lwclearsky, r2_heating_top_clearsky, bias_heating_top, tcw, swalb, incflux))
 
                     if self.model_is_stochastic:
                         running_var = running_var / fac
@@ -888,6 +938,7 @@ class train_or_eval_one_epoch:
                         if self.model.store_precip:
                             prec = rnn1_mem[:,-1,-1].detach()
                             print("Stored precipitation mean {:.2f}  max {:.2f} min {:.2f}".format(torch.mean(prec).item(), torch.max(prec).item(), torch.min(prec).item()))
+                        # print("Weight w1 value:", self.model.w1)
                     running_loss = 0.0; running_energy = 0.0; running_water=0.0; running_cldpath=0.0; running_precip=0.0; running_precip_neg=0.0
                     running_bias = 0.0; running_wcon = 0.0; running_wcon_true = 0.0; running_rh_mse=0.0; running_qv_pos=0.0; running_qn_pos=0.0
                     t0_it = time.time()
@@ -959,6 +1010,7 @@ class train_or_eval_one_epoch:
             self.epoch_bias_collev = self.epoch_bias_collev / k
 
         self.metrics["bias_perlev"] = epoch_bias_perlev / k 
+        self.metrics["bias_heating_top"] = epoch_bias_heating_top / k 
         self.metrics["rmse_perlev"] = epoch_rmse_perlev / k 
 
         self.metrics['mean_absolute_error'] = epoch_mae / k
@@ -979,7 +1031,9 @@ class train_or_eval_one_epoch:
         #self.metrics['R2_precc'] = self.metric_R2_precc.compute()
         self.metrics['R2_precc'] = epoch_R2precc / k
         self.metrics['R2_FLWDS'] = epoch_R2flwds / k
+        self.metrics['R2_FLWDS_clearsky'] = epoch_R2flwds_clearsky / k
         self.metrics['R2_NETSW'] = epoch_R2netsw / k
+        self.metrics['R2_NETSW_clearsky'] = epoch_R2netsw_clearsky/ k
         self.metrics['prec_std_frac'] = epoch_prec_std_frac / k 
         self.metrics['99p_ratio_prec'] = epoch_prec_99p_ratio / k 
         self.metrics['99p_ratio_precday'] = epoch_prec_99p_day / k2

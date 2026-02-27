@@ -84,6 +84,7 @@ def main(cfg: DictConfig):
     if cfg.save_loaded_model_and_quit:
       import settings 
       settings.change_compile_setting(True)
+      cfg.use_wandb=False
 
     # torch.autograd.set_detect_anomaly(True)
     # print("backends:", torch._dynamo.list_backends())
@@ -262,7 +263,7 @@ def main(cfg: DictConfig):
     yscale_sca = output_scale[vars_1D_outp].to_dataarray(dim='features', name='outputs_sca').transpose().values
     print("yscale sca", yscale_sca)
     
-    loss_weights=None 
+    loss_weights, loss_weights_sfc = None, None 
 
     if cfg.output_norm_per_level:
         yscale_lev = output_scale[vars_2D_outp].to_dataarray(dim='features', name='outputs_lev').transpose().values
@@ -311,6 +312,14 @@ def main(cfg: DictConfig):
             else:
                 raise NotImplementedError()
             loss_weights =  yscale_lev / yscale_lev_new
+            if cfg.strat_temp_weight_factor != 1.0:
+                loss_weights[0:10,0] = loss_weights[0:10,0]*cfg.strat_temp_weight_factor
+                print("HEY! Weighting heating tendencies in top 10 levels by a factor of {} in the loss".format(cfg.strat_temp_weight_factor))
+            if cfg.scalar_weight_factor != 1.0:
+                loss_weights_sfc = np.zeros_like(yscale_sca)
+                loss_weights_sfc[:] = cfg.scalar_weight_factor
+                loss_weights_sfc = torch.from_numpy(loss_weights_sfc).to(device, torch.float32)
+                print("HEY! Weighting scalars by a factor of {} in the loss".format(cfg.scalar_weight_factor))
             yscale_lev = yscale_lev_new
             yscale_sca[2:4] = scaleval
             # print("scale lev 3", yscale_lev[:,3])
@@ -426,6 +435,7 @@ def main(cfg: DictConfig):
     xmax_sca = input_max[vars_1D_inp].to_dataarray(dim='features', name='inputs_sca').transpose().values
     xmin_sca = input_min[vars_1D_inp].to_dataarray(dim='features', name='inputs_sca').transpose().values
     xdiv_sca = xmax_sca - xmin_sca
+    # print("xmean_sca", xmean_sca, "xdiv_sca", xdiv_sca)
 
     if cfg.remove_past_sfc_inputs:
         nx_sfc = nx_sfc - 5
@@ -800,7 +810,7 @@ def main(cfg: DictConfig):
     metric_rh = metrics.get_rh_loss(hyam,hybm)
     
     # mse = metrics.get_mse_flatten(weights)
-    metrics_det = metrics.get_metrics_flatten(loss_weights)
+    metrics_det = metrics.get_metrics_flatten(loss_weights, loss_weights_sfc)
     
     if cfg.loss_fn_type == "mse":
         loss_fn = metrics_det
@@ -907,8 +917,8 @@ def main(cfg: DictConfig):
                                                                      inpstr, cfg.mp_mode,
                                                                      conf["model_num"] )
 
-    SAVE_PATH       = "saved_models/" + MODEL_STR + ".pt"
-    save_file_torch = "saved_models/" + MODEL_STR + "_script.pt"
+    # SAVE_PATH       = "saved_models/" + MODEL_STR + ".pt"
+    # save_file_torch = "saved_models/" + MODEL_STR + "_script.pt"
     
     best_val_loss = np.inf
     # best_val_loss = 0.0
@@ -942,19 +952,20 @@ def main(cfg: DictConfig):
               if model.return_neg_precip:
                   return_neg_precip=True 
               model.return_neg_precip = False
+          print("model allow xtra heating: {} ".format(model.allow_extra_heating))
           model.train(False)
         #   model = model.eval()
 
-          # model.compile(mode="max-autotune")
-          scripted_model = torch . jit . script ( model )
-          scripted_model = scripted_model.eval()
-          scripted_model.save(save_file_torch1_gpu)
-          # model.compile(mode="max-autotune")
-          print("model train:", model.training)
+        #   # model.compile(mode="max-autotune")
+        #   scripted_model = torch . jit . script ( model )
+        #   scripted_model = scripted_model.eval()
+        #   scripted_model.save(save_file_torch1_gpu)
+        #   # model.compile(mode="max-autotune")
+        #   print("model train:", model.training)
           model = model.to("cpu")
-          scripted_model = torch . jit . script ( model )
-          scripted_model = scripted_model.eval()
-          scripted_model.save(save_file_torch1)
+        #   scripted_model = torch . jit . script ( model )
+        #   scripted_model = scripted_model.eval()
+        #   scripted_model.save(save_file_torch1)
 
           dummy_input_lay = torch.zeros(384, 60, model.nx0)
           dummy_input_sfc = torch.zeros(384, model.nx_sfc0)
@@ -1062,6 +1073,11 @@ def main(cfg: DictConfig):
             labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
             # if True:
             if cfg.save_model and val_loss < best_val_loss:
+                if epoch==6:
+                    SAVE_PATH       = "saved_models/" + MODEL_STR + "_ep6_" + ".pt"
+                else:
+                    SAVE_PATH       = "saved_models/" + MODEL_STR + ".pt"
+
             # if cfg.save_model and val_loss > best_val_loss:
                 save_file_torch1 = "saved_models/" + MODEL_STR + "_script_gpu.pt"
                 save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
@@ -1128,10 +1144,20 @@ def main(cfg: DictConfig):
                 axs[i].set_title(labels[i])
                 axs[i].set_xlim(0,60)
                 axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
-
             fig.subplots_adjust(hspace=0.6)                                                     
             plt.savefig('val_eval/' + MODEL_STR + 'val_rmse.pdf')
-            
+
+            plt.clf()
+            bias = val_runner.metrics["bias_perlev"]
+            fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
+            for i in range(6):
+                axs[i].plot(np.arange(60), bias[:,i]); 
+                axs[i].set_title(labels[i])
+                axs[i].set_xlim(0,60)
+                axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
+            fig.subplots_adjust(hspace=0.6)                                                     
+            plt.savefig('val_eval/' + MODEL_STR + 'val_bias.pdf')
+
             if batch_size_val==384:
                 dt_diff = val_runner.epoch_bias_collev[:,:,0]
                 q_diff = val_runner.epoch_bias_collev[:,:,1]

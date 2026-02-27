@@ -81,6 +81,8 @@ w_precgel: 0.001
 gel_lambda_prec: 20.0
 use_det_loss: false 
 w_det: 2e1 
+strat_temp_weight_factor: 1.0
+scalar_weight_factor: 1.0 
 
 nh_mem: 16
 nneur:

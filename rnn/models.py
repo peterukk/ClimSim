@@ -302,7 +302,6 @@ class LSTM_autoreg_torchscript(nn.Module):
               self.mlp_qtot_crm      = nn.Linear(self.nh_rnn2, self.mp_ncol)
 
             self.mlp_evap_prec_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
-            # self.mlp_evap_prec2_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
 
             self.mlp_qn_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
             self.mlp_qi_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
@@ -972,7 +971,6 @@ class LSTM_autoreg_torchscript(nn.Module):
 
             # rnn2outt = rnn2outt[:,ilev_crm:]
             dqv_evap_prec       = self.mlp_evap_prec_crm(rnn2outt)
-            # dqv_evap_prec2       = self.mlp_evap_prec2_crm(rnn2outt)
 
             dq_cond_evap_vapor = self.mlp_evap_cond_vapor_crm(rnn2outt)
 

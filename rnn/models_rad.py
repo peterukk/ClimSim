@@ -59,7 +59,9 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
     use_existing_gas_optics_sw: Final[bool]
     reduce_lw_gas_optics: Final[bool]
     reduce_sw_gas_optics: Final[bool]
-    update_qv_for_rad: Final[bool]
+    update_q_for_rad: Final[bool]
+    rad_cloud_masking: Final[bool]
+    use_cloud_overlap_rnn: Final[bool]
     def __init__(self, hyam, hybm,  hyai, hybi,
                 out_scale, out_sfc_scale, 
                 xmean_lev, xmean_sca, xdiv_lev, xdiv_sca,
@@ -146,7 +148,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
           raise NotImplementedError("model requires mp_mode>=0")
         self.nlev = 60
         self.nlev_crm = 50
-        self.ilev_crm = 10
+        self.ilev_crm = self.nlev-self.nlev_crm
         self.nlev_mem = self.nlev_crm
         self.nx_rad = 8
         nx = nx - 3
@@ -165,12 +167,13 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         # self.ensemble_size = ensemble_size
         self.add_stochastic_layer = add_stochastic_layer
         self.coeff_stochastic = coeff_stochastic
-        self.nonlin = nn.Tanh()
+        self.tanh = nn.Tanh()
         self.relu = nn.ReLU()
         self.softplus = nn.Softplus()
         self.softmax = nn.Softmax(dim=2)
         self.softmax_dim1 = nn.Softmax(dim=1)
         self.sigmoid = nn.Sigmoid()
+        self.softsign =  nn.Softsign()
 
         yscale_lev = torch.from_numpy(out_scale).to(device)
         yscale_sca = torch.from_numpy(out_sfc_scale).to(device)
@@ -179,19 +182,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         xmean_sca  = torch.from_numpy(xmean_sca).to(device)
         xdiv_lev   = torch.from_numpy(xdiv_lev).to(device)
         xdiv_sca   = torch.from_numpy(xdiv_sca).to(device)
-        # if gasopt_lw_inp_min is not None:
-        #   gasopt_lw_inp_min  = torch.from_numpy(gasopt_lw_inp_min).to(device)
-        #   gasopt_lw_inp_max  = torch.from_numpy(gasopt_lw_inp_max).to(device) 
-        #   gasopt_lw_outp_mean  = torch.from_numpy(gasopt_lw_outp_mean).to(device)
-        #   gasopt_lw_outp_std  = torch.from_numpy(gasopt_lw_outp_std).to(device) 
-        #   self.register_buffer('gasopt_lw_inp_min', gasopt_lw_inp_min)
-        #   self.register_buffer('gasopt_lw_inp_max', gasopt_lw_inp_max)
-        #   self.register_buffer('gasopt_lw_outp_mean', gasopt_lw_outp_mean)
-        #   self.register_buffer('gasopt_lw_outp_std', gasopt_lw_outp_std)
-        #   print("Initialized gas optics normalization coefficients")
-        #   self.use_existing_gas_optics_lw = True 
-        # else: 
-        #   self.use_existing_gas_optics_lw = False 
+ 
         if gas_optics_model_sw1 is not None:
           self.gas_optics_model_sw1 = gas_optics_model_sw1
           self.gas_optics_model_sw2 = gas_optics_model_sw2
@@ -207,7 +198,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
           print("Existing longwave gas optics model LOADED! Number of g-points: {}".format(self.gas_optics_model_lw.ng))
         else:
           self.use_existing_gas_optics_lw = False 
-        self.update_qv_for_rad = True
+        self.update_q_for_rad = True
 
         self.register_buffer('yscale_lev', yscale_lev)
         self.register_buffer('yscale_sca', yscale_sca)
@@ -218,7 +209,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         self.register_buffer('xdiv_sca', xdiv_sca)
         self.register_buffer('hyai', hyai)
         self.register_buffer('hybi', hybi)
-        
+
         lbd_qc     = torch.tensor(lbd_qc_lev.reshape(60,1), device=device)
         lbd_qi     = torch.tensor(lbd_qi_lev.reshape(60,1), device=device)
         lbd_qn     = torch.tensor(lbd_qn_lev.reshape(60,1), device=device)
@@ -241,8 +232,6 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
 
         self.mlp_surface1  = nn.Linear(self.nx_sfc, self.nh_rnn1)
 
-        # self.mlp_toa1  = nn.Linear(2, self.nh_rnn2)
-        # self.mlp_toa2  = nn.Linear(2, self.nh_rnn2)
         self.use_lstm = False
         if self.use_lstm:
             rnn_layer = nn.LSTM 
@@ -259,14 +248,10 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
             else:
               self.rnn3 = MyStochasticGRULayer5(self.nh_rnn2, self.nh_rnn2, use_bias=use_bias)   
 
-        # self.rnn1.flatten_parameters()
-        # self.rnn2.flatten_parameters()
-
-        # if self.concat: 
-        #     nh_rnn = self.nh_rnn1 + self.nh_rnn2
-        # else:
         nh_rnn = self.nh_rnn2
 
+        self.rad_cloud_masking = True 
+        self.use_cloud_overlap_rnn = False
         self.experimental_rad = False   
         self.allow_extra_heating=False
         self.ice_sedimentation = True
@@ -286,7 +271,6 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
             self.mlp_qtot_crm      = nn.Linear(self.nh_rnn2, self.mp_ncol)
 
             self.mlp_evap_prec_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
-            self.mlp_evap_prec2_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
 
             self.mlp_qn_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
             self.mlp_qi_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
@@ -315,33 +299,62 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
             self.mlp_output = nn.Linear(nh_rnn, self.ny)
         self.g = 9.806650000
         self.one_over_g = 0.1019716213
-        self.ng_sw              = 16
+        self.cp =  1004.64
+        # ORIGINAL RRTMGP-NN WITHOUT REDUCTION/DECODER (if equations are correct, should guarantee accurate radiation and associated heating at least in top 10 levels where there's no clouds)
+        # self.ng_lw = 128
         self.ng_lw              = 16
+        # self.ng_sw              = 112 
+        self.ng_sw              = 16
         self.ng_tot             = self.ng_sw + self.ng_lw
         
         self.ny_sw_optprops     = 3 # tau_abs, tau_sca, g
         self.ny_lw_optprops     = 2  # tau_abs, planck_frac
         if self.physical_precip:
-          self.nx_sw_optprops     = 3*self.mp_ncol + 8# expanded ("CRM") qtot+qv+temp + gases + l.s. forcing?..
+          self.nx_sw_optprops     = 4 + 6 + self.nh_mem #3*self.mp_ncol + 8# expanded ("CRM") qtot+qv+temp + gases + l.s. forcing?..
           self.nx_lw_optprops     = self.nx_sw_optprops
           self.reduce_sw_gas_optics = False
           self.reduce_lw_gas_optics = False
-          if self.use_existing_gas_optics_lw:
-            # We already have a pre-trained NN for gas optics (RRTMGP-NN)
-            # But we need MLPs to reduce the spectral dimension..
-            if self.gas_optics_model_lw.ng != self.ng_lw:
-              self.reduce_lw_gas_optics = True 
-              self.gas_optics_lw_reduce1 = nn.Linear(self.gas_optics_model_lw.ng, self.ng_lw)
-              self.gas_optics_lw_reduce2 = nn.Linear(self.gas_optics_model_lw.ng, self.ng_lw)
-            # and we still need MLPs for cloud optical properties (only abs. optical depth)
-            self.cloud_optics_lw = nn.Linear(2*self.mp_ncol + self.nh_mem, self.ng_lw)
+          if self.use_existing_gas_optics_lw or self.use_existing_gas_optics_sw:
+            if self.use_existing_gas_optics_lw:
+              # We already have a pre-trained NN for gas optics (RRTMGP-NN)
+              # But we need MLPs to reduce the spectral dimension..
+              if self.gas_optics_model_lw.ng != self.ng_lw:
+                print("Number of spectral points in existing LW gas optics model ({}) doesn't match desired ({})," \
+                          "using another MLP to map to desired".format(self.gas_optics_model_lw.ng, self.ng_lw))
+                self.reduce_lw_gas_optics = True 
+                self.gas_optics_lw_reduce1 = nn.Linear(self.gas_optics_model_lw.ng, self.ng_lw)
+                self.gas_optics_lw_reduce2 = nn.Linear(self.gas_optics_model_lw.ng, self.ng_lw)
+              # and we still need MLPs for cloud optical properties (only abs. optical depth)
+              self.cloud_optics_lw = nn.Linear(2*self.mp_ncol+self.nh_mem, self.ng_lw)
+              # self.cloud_optics_lw = nn.Conv1d(2*self.mp_ncol, self.ng_lw, 3, stride=1, padding=1)
+              if self.use_cloud_overlap_rnn:
+                self.cloud_mcica_scaling = nn.GRU(2*self.mp_ncol, 16,  batch_first=False) 
+                self.cloud_mcica_scaling2 = nn.Linear(16, self.ng_lw)
+
             if self.use_existing_gas_optics_sw:
               if self.gas_optics_model_sw1.ng !=  self.ng_sw:
+                print("Number of spectral points in existing SW gas optics model ({}) doesn't match desired ({})," \
+                        "using another MLP to map to desired".format(self.gas_optics_model_sw1.ng, self.ng_sw))
                 self.gas_optics_sw_reduce1 = nn.Linear(self.gas_optics_model_sw1.ng, self.ng_sw)
                 self.gas_optics_sw_reduce2 = nn.Linear(self.gas_optics_model_sw2.ng, self.ng_sw)
                 self.reduce_sw_gas_optics = True 
+              else:
+                from norm_coefficients import rrtmgp_sw_solar_source
+                rrtmgp_sw_solar_source = rrtmgp_sw_solar_source/np.sum(rrtmgp_sw_solar_source)
+                sw_solar_weights = torch.tensor(rrtmgp_sw_solar_source, device=device).unsqueeze(0)
+                self.register_buffer('sw_solar_weights', sw_solar_weights)
               # and we still need MLPs for cloud optical properties (optical depth, ssa, g)
-              self.cloud_optics_sw = nn.Linear(2*self.mp_ncol+self.nh_mem, 3*self.ng_sw)
+              self.cloud_optics_sw = nn.Linear(3*self.mp_ncol, 3*self.ng_sw)
+              # self.cloud_optics_sw = nn.Conv1d(2*self.mp_ncol, 3*self.ng_sw, 3, stride=1, padding=1)
+              # self.cloud_optics_sw = nn.GRU(2*self.mp_ncol, 3*self.ng_lw,  batch_first=False) 
+              if self.use_cloud_overlap_rnn:
+                self.cloud_mcica_scaling_sw = nn.GRU(2*self.mp_ncol, 16,  batch_first=False) 
+                self.cloud_mcica_scaling_sw2 = nn.Linear(16, self.ng_sw)
+
+
+              # self.cloud_optics_sw1 = nn.Linear(2*self.mp_ncol, 2*self.ng_sw)
+              # self.cloud_optics_sw2 = nn.Linear(2*self.ng_sw, 3*self.ng_sw)
+
             print("Reduce LW: {} SW: {}".format(self.reduce_lw_gas_optics, self.reduce_sw_gas_optics))
         else:
           self.nx_sw_optprops     = 8 + self.nh_mem0 + 3 #1 #self.nh_mem 
@@ -356,31 +369,23 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         # not g or lw because aerosols were transparent and LW cloud scattering is ignored in original runs
         if not self.use_existing_gas_optics_sw:
           self.mlp_sw_optprops    = nn.Linear(self.nx_sw_optprops, self.ny_sw_optprops*self.ng_sw)
+          # self.mlp_sw_optprops1    = nn.Linear(self.nx_sw_optprops, 2*self.ng_sw)
+          # self.mlp_sw_optprops2    = nn.Linear(2*self.ng_sw, self.ny_sw_optprops*self.ng_sw)
+
         if not self.use_existing_gas_optics_lw:
           self.mlp_lw_optprops    = nn.Linear(self.nx_lw_optprops, self.ny_lw_optprops*self.ng_lw)
          
 
         if self.experimental_rad:
-          self.conv_vmat = nn.Conv1d(self.nh_rnn2, self.ng_sw, 2, stride=1)
-        # if not self.physical_precip:
-        #   self.mlp_t_crm = nn.Linear(self.nh_rnn2, self.ng_lw)
-
-        # self.ny_gasopt_sw       = self.ng_sw*2 # tau_abs, tau_ray
-        # self.ny_gasopt_lw_inp       = self.ng_lw*2 # tau_abs, planck_frac
-        # self.nx_gasopt_sw       = 6 # T, p, H2O, O3, CH4, N2O
-        # self.nx_gasopt_lw_inp       = 6
-        # self.mlp_gasopt_sw      = nn.Linear(self.nx_gasopt_sw, self.ny_gasopt_sw)
-        # self.mlp_gasopt_lw_inp      = nn.Linear(self.nx_gasopt_lw_inp, self.ny_gasopt_lw_inp)
-
-        # self.ny_cloudopt_sw     = self.ng_sw*3 # tau_tot, ssa, g
-        # self.ny_cloudopt_lw     = self.ng_sw*1 # assuming no scattering: only tau
-        # self.mlp_cloudopt_sw      = nn.Linear(2, self.ny_cloudopt_sw) # inputs: T, clw (scale tau by cloud water path?)
-        # self.mlp_cloudopt_lw      = nn.Linear(2, self.ny_cloudopt_lw) # inputs: T, cli (scale tau by cloud ice path?)
-        self.mlp_sfc_albedo_sw1  = nn.Linear(2, self.ng_sw)
-        self.mlp_sfc_albedo_sw2  = nn.Linear(2, self.ng_sw)
+          # self.conv_vmat = nn.Conv1d(self.nh_rnn2, self.ng_sw, 2, stride=1)
+          self.conv_vmat = nn.Conv1d(self.nh_mem, self.ng_sw, 2, stride=1)
+        
+        self.mlp_sfc_albedo_sw1  = nn.Linear(4, self.ng_sw)
+        self.mlp_sfc_albedo_sw2  = nn.Linear(4, self.ng_sw)
 
         self.mlp_sfc_albedo_lw  = nn.Linear(2, self.ng_lw)
-        self.sw_solar_weights   = nn.Parameter(torch.randn(1, self.ng_sw))
+        if not (self.use_existing_gas_optics_sw and (not self.reduce_sw_gas_optics)): 
+          self.sw_solar_weights   = nn.Parameter(torch.randn(1, self.ng_sw))
 
     def temperature_scaling(self, T_raw):
         liquid_ratio = (T_raw - 253.16) * 0.05 
@@ -397,13 +402,13 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         out_sfc         = out_sfc / self.yscale_sca
         return out, out_sfc
         
-    # @torch.compile(disable=disable_compile)
+    # @torch.compile(dynamic=False, disable=disable_compile)
     def outgoing_lw(self, temp):
         # Stefan-Boltzmann constant (W/m²/K⁴)
-        sigma = 5.670374419e-8
+        # sigma = 5.670374419e-8
         
         # Assuming emissivity = 1 (blackbody approximation)
-        olr_exact = sigma * torch.pow(temp,4)
+        olr_exact = 5.670374419e-8 * torch.pow(temp,4)
         return olr_exact
   
     def interpolate_tlev_batchfirst(self, tlay, play, plev):
@@ -545,8 +550,8 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         k_gamma4 = k_exponent * gamma4
         
         # Calculate optical depth over mu0
-        od_over_mu0 = torch.clamp(od / mu0, min=0.0)
-        od_over_mu0 = torch.clamp(-od_over_mu0, min=-50.0)
+        od_over_mu0 = od/mu0 # torch.clamp(od / mu0, min=0.0)
+        od_over_mu0 = torch.clamp(-od_over_mu0, min=-100.0)
     
         # Calculate exponential terms
         trans_dir_dir = torch.exp(od_over_mu0)
@@ -606,6 +611,113 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         
         return ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir
     
+    @torch.compile(dynamic=False, disable=disable_compile)
+    def calc_ref_trans_sw(self,mu0,od,ssa,asymmetry):
+        """
+        Two-stream shortwave reflectance and transmittance calculation.
+        Implements Meador & Weaver (1980) equations.
+
+        Args:
+            mu0:       Cosine of solar zenith angle (ncol*ng) (expanded in outer code)
+            od:        Optical depth, shape (ncol*ng)
+            ssa:       Single scattering albedo, shape (ncol*ng)
+            asymmetry: Asymmetry factor, shape (ncol*ng)
+
+        Returns:
+            ref_diff:       Diffuse reflectance.
+            trans_diff:     Diffuse transmittance.
+            ref_dir:        Direct reflectance.
+            trans_dir_diff: Direct-to-diffuse transmittance.
+            trans_dir_dir:  Direct unscattered transmittance.
+        """
+        eps = torch.finfo(od.dtype).eps
+        
+        # ------------------------------------------------------------------ #
+        # Unscattered direct transmittance
+        # ------------------------------------------------------------------ #
+        trans_dir_dir = torch.exp(-od / mu0)
+
+        # ------------------------------------------------------------------ #
+        # Two-stream gamma coefficients
+        # ------------------------------------------------------------------ #
+        factor  = 0.75 * asymmetry
+        gamma1  = 2.0  - ssa * (1.25 + factor)
+        gamma2  = ssa  * (0.75 - factor)
+        gamma3  = 0.5  - mu0 * factor
+        gamma4  = 1.0  - gamma3
+
+        # alpha1 / alpha2  (Eqs. 16-17)
+        alpha1 = gamma1 * gamma4 + gamma2 * gamma3
+        alpha2 = gamma1 * gamma3 + gamma2 * gamma4
+
+        # ------------------------------------------------------------------ #
+        # Diffuse reflectance / transmittance  (Eqs. 25-26)
+        # ------------------------------------------------------------------ #
+        # k_exponent  (Eq. 18) — clamped for numerical safety
+        k = torch.sqrt(torch.clamp((gamma1 - gamma2) * (gamma1 + gamma2), min=1.0e-4))
+
+        exponential   = torch.exp(-k * od)
+        exponential2  = exponential ** 2
+        k_2_exp       = 2.0 * k * exponential
+
+        reftrans_factor = 1.0 / (k + gamma1 + (k - gamma1) * exponential2)
+
+        ref_diff   = gamma2 * (1.0 - exponential2) * reftrans_factor
+
+        zeros=torch.zeros_like(ref_diff)
+        trans_diff = torch.clamp(
+            k_2_exp * reftrans_factor,
+            min=zeros,
+            max=1.0 - ref_diff,          # never exceeds 1 − ref_diff
+        )
+        trans_diff = torch.clamp(trans_diff, min=0.0)
+
+        # ------------------------------------------------------------------ #
+        # Direct reflectance / transmittance  (Eqs. 14-15)
+        # ------------------------------------------------------------------ #
+        k_mu0              = k * mu0
+        one_minus_kmu0_sqr = 1.0 - k_mu0 ** 2
+        k_gamma3           = k * gamma3
+        k_gamma4           = k * gamma4
+
+        # Guard against one_minus_kmu0_sqr ≈ 0 (mirrors Fortran's merge/epsilon)
+        safe_denom = torch.where(
+            one_minus_kmu0_sqr.abs() > eps,
+            one_minus_kmu0_sqr,
+            torch.full_like(one_minus_kmu0_sqr, eps),
+        )
+        # safe_denom = one_minus_kmu0_sqr.abs().clamp(min=eps) * one_minus_kmu0_sqr.sign()
+
+        # reftrans_factor = mu0 * ssa * reftrans_factor / safe_denom
+        reftrans_factor = ssa * reftrans_factor / safe_denom
+
+        # Eq. 14
+        ref_dir = reftrans_factor * (
+              (1.0 - k_mu0) * (alpha2 + k_gamma3)
+            - (1.0 + k_mu0) * (alpha2 - k_gamma3) * exponential2
+            - k_2_exp * (gamma3 - alpha2 * mu0) * trans_dir_dir
+        )
+
+        # Eq. 15 (minus the direct unscattered term)
+        trans_dir_diff = reftrans_factor * (
+              k_2_exp * (gamma4 + alpha1 * mu0)
+            - trans_dir_dir * (
+                  (1.0 + k_mu0) * (alpha1 + k_gamma4)
+                - (1.0 - k_mu0) * (alpha1 - k_gamma4) * exponential2
+              )
+        )
+
+        # ------------------------------------------------------------------ #
+        # Final clipping so that ref_dir + trans_dir_diff ≤ mu0*(1−T_dir_dir)
+        # ------------------------------------------------------------------ #
+        # max_direct = mu0 * (1.0 - trans_dir_dir)
+        max_direct = (1.0 - trans_dir_dir)
+
+        ref_dir        = torch.clamp(ref_dir,        min=zeros, max=max_direct)
+        trans_dir_diff = torch.clamp(trans_dir_diff, min=zeros, max=max_direct - ref_dir)
+
+        return ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir
+    
     def calc_noscat_trans_lw_pade(self, od, planck_top, planck_bot, LwDiffusivity=1.66):
         """
         Calculate longwave transmittance and source terms using Padé approximant method.
@@ -647,7 +759,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         return transmittance, source_up, source_dn
     
     @torch.compile(dynamic=False, disable=disable_compile)
-    def adding_ica_sw_batchlast(self, incoming_toa, albedo_surf_diffuse, albedo_surf_direct,
+    def adding_ica_sw_batchlast(self, incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
                     reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir):
             """
             Adding method for shortwave radiation with Independent Column Approximation (ICA).
@@ -670,19 +782,16 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
             source = torch.zeros(nlev + 1, ncol, dtype=dtype, device=device)
             inv_denominator = torch.zeros(nlev, ncol,  dtype=dtype, device=device)
             
-            # Compute profile of direct (unscattered) solar fluxes at each half-level
-            # by working down through the atmosphere
-            # print("shape fl", flux_dn_direct.shape, "inc", incoming_toa.shape)
+            # Compute profile of direct (unscattered) solar fluxes at each half-level  by working down through the atmosphere
             flux_dn_direct[0, :] = incoming_toa
             for jlev in range(nlev):
-                # print("shape 1", flux_dn_direct[jlev + 1,:].shape, "2",flux_dn_direct[jlev,:].clone().shape, "3",  trans_dir_dir[jlev,:].shape )
                 flux_dn_direct[jlev + 1,:] = flux_dn_direct[jlev,:].clone() * trans_dir_dir[jlev,:]
             
             # Set surface albedo
-            albedo[nlev] = albedo_surf_diffuse
+            albedo[nlev] = emissivity_surf_diffuse
             
             # At the surface, the direct solar beam is reflected back into the diffuse stream
-            source[nlev] = albedo_surf_direct * flux_dn_direct[nlev] #* cos_sza
+            source[nlev] = emissivity_surf_direct * flux_dn_direct[nlev] #* cos_sza
             
             # Work back up through the atmosphere and compute the albedo of the entire
             # earth/atmosphere system below that half-level, and also the "source"
@@ -741,10 +850,10 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
             return flux_up, flux_dn_diffuse, flux_dn_direct
        
     @torch.compile(dynamic=False, disable=disable_compile)
-    def adding_ica_sw_batchlast_opt(self, incoming_toa, albedo_surf_diffuse, albedo_surf_direct,
+    def adding_ica_sw_batchlast_opt(self, incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
                     reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir):
             """
-            Adding method for shortwave radiation with Independent Column Approximation (ICA).
+            Adding method for shortwave radiation
 
             Returns:
                 tuple: (flux_up, flux_dn_diffuse, flux_dn_direct) each of shape [ncol, nlev+1]
@@ -755,33 +864,28 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
             
             # Set surface albedo
             albedo = torch.jit.annotate(List[Tensor], [])
-            albedo0 = albedo_surf_diffuse
+            albedo0 = emissivity_surf_diffuse
             albedo += [albedo0]
 
             albedodir = torch.jit.annotate(List[Tensor], [])
-            albedodir0 = albedo_surf_direct
+            albedodir0 = emissivity_surf_direct
             albedodir += [albedodir0]
 
-            # Work back up through the atmosphere and compute the albedo of the entire
-            # earth/atmosphere system below that half-level
-            for jlev in range(nlev - 1, -1, -1):  # nlev down to 1 in Fortran indexing
+            # Work up through the atmosphere and compute the albedo of the entire earth/atmosphere system below that half-level
+            for jlev in range(nlev-1, -1, -1):  # nlev down to 1 in Fortran indexing
 
               # comparing ecRad Tripleclouds code to the McICA code, "source" variable  is like fluxdndir*albedodir
-              # like in TripleClouds, if we use albedodir instead, we dont need to precompute fluxdndir in a separate loop
-              # This reduces the number of vertical loops from three to two: one upward loop for albedos,  one downward for fluxes
+              # If we use albedodir instead (like in TripleClouds), we dont need to precompute fluxdndir in a separate loop, so just two vertical loops
               # Adapted from https://github.com/ecmwf-ifs/ecrad/blob/master/radiation/radiation_tripleclouds_sw.F90
               albedodir0 = (ref_dir[jlev] +
                                       (trans_dir_dir[jlev]*albedodir0 + trans_dir_diff[jlev]*albedo0) *
                                       transmittance[jlev] / (1.0 - albedo0 * reflectance[jlev])) #* inv_denom)  
               albedodir  += [albedodir0]  
               
-              albedo0 = (reflectance[jlev] + 
-                                torch.square(transmittance[jlev]) * 
-                                albedo0  / (1.0 - albedo0 * reflectance[jlev])) #* inv_denom)
+              albedo0 = (reflectance[jlev] + torch.square(transmittance[jlev]) * albedo0  / (1.0 - albedo0 * reflectance[jlev])) 
               albedo  += [albedo0]
 
-            albedo.reverse()
-            albedodir.reverse()
+            albedo.reverse(); albedodir.reverse()
             
             # At top-of-atmosphere, all upwelling radiation is due to scattering by the direct beam below that level
             fluxup = incoming_toa*albedodir[0]
@@ -825,15 +929,15 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
             return flux_up, flux_dn_diffuse, flux_dn_direct
   
     @torch.compile(dynamic=False, disable=disable_compile)
-    def adding_tc_sw_batchlast(self, incoming_toa, albedo_surf_diffuse, albedo_surf_direct,
+    def adding_tc_sw_batchlast(self, incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
                     reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir, V):
             """
             Adding method for shortwave radiation with TripleClouds
             
             Args:
                 incoming_toa: Incoming downwelling solar radiation at TOA (tensor of shape [ncol])
-                albedo_surf_diffuse: Surface albedo to diffuse radiation (tensor of shape [ncol])
-                albedo_surf_direct: Surface albedo to direct radiation (tensor of shape [ncol])
+                emissivity_surf_diffuse: Surface albedo to diffuse radiation (tensor of shape [ncol])
+                emissivity_surf_direct: Surface albedo to direct radiation (tensor of shape [ncol])
                 cos_sza: Cosine of solar zenith angle (tensor of shape [ncol])
                 reflectance: Diffuse reflectance of each layer (tensor of shape [ncol, nlev])
                 transmittance: Diffuse transmittance of each layer (tensor of shape [ncol, nlev])
@@ -868,11 +972,11 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
                 flux_dn_direct[jlev + 1] = flux_dn_direct[jlev].clone() * trans_dir_dir[jlev]
             
             # Set surface albedo
-            A[nlev] = albedo_surf_diffuse
-            Adir[nlev] = albedo_surf_direct
+            A[nlev] = emissivity_surf_diffuse
+            Adir[nlev] = emissivity_surf_direct
 
             # At the surface, the direct solar beam is reflected back into the diffuse stream
-            source[nlev] = albedo_surf_direct * flux_dn_direct[nlev] #* cos_sza
+            source[nlev] = emissivity_surf_direct * flux_dn_direct[nlev] #* cos_sza
             
             # Work back up through the atmosphere and compute the albedo of the entire
             # earth/atmosphere system below that half-level, and also the "source"
@@ -941,12 +1045,12 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
             return flux_up, flux_dn_diffuse, flux_dn_direct
 
     @torch.compile(dynamic=False, disable=disable_compile)
-    def lw_solver_noscat_batchlast(self, trans_lw, source_dn, source_up, source_sfc, albedo_surf):
+    def lw_solver_noscat_batchlast(self, trans_lw, source_dn, source_up, source_sfc, emissivity_surf):
         
         nlev = trans_lw.shape[0]
         
         # At top-of-atmosphere there is no diffuse downwelling radiation
-        flux_lw_dn0 = torch.zeros_like(albedo_surf)
+        flux_lw_dn0 = torch.zeros_like(emissivity_surf)
         flux_lw_dn = torch.jit.annotate(List[Tensor], [])
         flux_lw_dn += [flux_lw_dn0]
 
@@ -959,7 +1063,8 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
             flux_lw_dn += [flux_lw_dn0]
 
         # flux_lw_up[nlev] = source_sfc + albedo_surf * flux_lw_dn[nlev]
-        flux_lw_up0   = source_sfc + albedo_surf * flux_lw_dn[nlev]
+        #                                              albedo
+        flux_lw_up0   = emissivity_surf*source_sfc +  (1-emissivity_surf) * flux_lw_dn[nlev]
         flux_lw_up    = torch.jit.annotate(List[Tensor], [])
         flux_lw_up    += [flux_lw_up0]
 
@@ -995,11 +1100,10 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         
         #  ['ptend_t', 'dqv', 'dqn', 'liq_frac', 'ptend_u', 'ptend_v']
         if self.allow_extra_heating:
-          out_new[:,self.ilev_crm:,0] = out[:,:,0]
-        out_new[:,self.ilev_crm:,3:self.ny] = out[:,:,3:self.ny]
+          out_new[:,self.ilev_crm+2:,0] = out[:,2:,0]
+        out_new[:,self.ilev_crm+2:,3:self.ny] = out[:,2:,3:self.ny]
 
         dqv_evap_prec       = self.mlp_evap_prec_crm(rnn2out)
-        dqv_evap_prec2       = self.mlp_evap_prec2_crm(rnn2out)
 
         dq_cond_evap_vapor = self.mlp_evap_cond_vapor_crm(rnn2out)
 
@@ -1030,14 +1134,14 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         flux1 = self.mlp_flux_qv_crm(rnn2out)
         flux2 = self.mlp_flux_qn_crm(rnn2out)
 
-        p_crm_qv_old = self.softmax(self.mlp_qv_crm(rnn2out))
-        p_crm_qn_old = self.softmax(self.mlp_qn_crm(rnn2out)) 
+        p_qv_crm = self.softmax(self.mlp_qv_crm(rnn2out)) # here p is the fraction of the grid-scale total q that is in each pseudo-CRM column
+        p_qn_crm = self.softmax(self.mlp_qn_crm(rnn2out)) 
 
-        crm_qn_old = self.mp_ncol*qn_old0.unsqueeze(2)*p_crm_qn_old 
-        crm_qv_old = self.mp_ncol*qv_old0.unsqueeze(2)*p_crm_qv_old 
+        qn_crm = self.mp_ncol*qn_old0.unsqueeze(2)*p_qn_crm 
+        qv_crm = self.mp_ncol*qv_old0.unsqueeze(2)*p_qv_crm 
 
-        qn_old = crm_qn_old 
-        qv_old = crm_qv_old
+        qn_old = qn_crm 
+        qv_old = qv_crm
 
         zeroes_crm = torch.zeros(batch_size, 1, self.mp_ncol, device=inputs_main.device)
 
@@ -1054,11 +1158,11 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         flux_net_t[:,-1] = -self.relu(flux_net_t[:,-1]) # net downward flux at sfc must be upwards or zero
         # flux_net_t = torch.cat((zeroes_crm,flux_net_t[:,0:-1], zeroes_crm),dim=1)
         flux_net_t = torch.cat((zeroes_crm,flux_net_t),dim=1)
-        flux_t_dp = (scaling_factor/1004.0)*( (flux_net_t[:,1:] - flux_net_t[:,0:-1]) / pres_diff) 
+        flux_t_dp = (scaling_factor/self.cp)*( (flux_net_t[:,1:] - flux_net_t[:,0:-1]) / pres_diff) 
         del flux3, flux_net_t 
 
-        flux_net_qv = flux_mult_coeff*flux1*crm_qv_old#*torch.reshape(self.yscale_lev[self.ilev_crm:,1],(1,-1,1))              
-        flux_net_qn = flux_mult_coeff*flux2*crm_qn_old#*torch.reshape(self.yscale_lev[self.ilev_crm:,1],(1,-1,1))  
+        flux_net_qv = flux_mult_coeff*flux1*qv_crm#*torch.reshape(self.yscale_lev[self.ilev_crm:,1],(1,-1,1))              
+        flux_net_qn = flux_mult_coeff*flux2*qn_crm#*torch.reshape(self.yscale_lev[self.ilev_crm:,1],(1,-1,1))  
         if self.ice_sedimentation:
           p_crm_qi_old = self.softmax(self.mlp_qi_crm(rnn2out))  
           crm_qi_old = self.mp_ncol*qi_old0.unsqueeze(2)*p_crm_qi_old 
@@ -1078,7 +1182,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         flux_net_qv = torch.cat((zeroes_crm,flux_net_qv[:,0:-1], zeroes_crm),dim=1)
         flux_net_qn = torch.cat((zeroes_crm,flux_net_qn[:,0:-1], zeroes_crm),dim=1)
 
-        del flux1, flux2, p_crm_qn_old, p_crm_qv_old, p_crm_qi_old 
+        del flux1, flux2, p_qn_crm, p_qv_crm, p_crm_qi_old 
 
         flux_qv_dp = scaling_factor*( (flux_net_qv[:,1:] - flux_net_qv[:,0:-1]) / pres_diff) 
         flux_qn_dp = scaling_factor*( (flux_net_qn[:,1:] - flux_net_qn[:,0:-1]) / pres_diff) 
@@ -1097,10 +1201,12 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
           q_old_sum = torch.sum(qn_old0,dim=1)
           qn_old_redist = out[:,:,1]
           qn_old2 = torch.reshape(self.softmax_dim1(qn_old_redist) * q_old_sum.unsqueeze(1), (batch_size, -1, 1))
-          crm_qn_old = qn_old2
-        dqn_aa = alpha*crm_qn_old*torch.reshape(self.yscale_lev[self.ilev_crm:,2],(1,-1,1)) 
-        # dqn_aa = alpha*torch.square(crm_qn_old)*torch.reshape(self.yscale_lev[self.ilev_crm:,2],(1,-1,1)) 
-        # dqn_aa = alpha*torch.pow(crm_qn_old, 1.5)*torch.reshape(self.yscale_lev[self.ilev_crm:,2],(1,-1,1)) 
+          # qn_crm = qn_old2
+          dqn_aa = alpha*qn_old2*torch.reshape(self.yscale_lev[self.ilev_crm:,2],(1,-1,1)) 
+        else:
+          dqn_aa = alpha*qn_crm*torch.reshape(self.yscale_lev[self.ilev_crm:,2],(1,-1,1)) 
+          # dqn_aa = alpha*torch.square(qn_crm)*torch.reshape(self.yscale_lev[self.ilev_crm:,2],(1,-1,1)) 
+          # dqn_aa = alpha*torch.pow(qn_crm, 1.5)*torch.reshape(self.yscale_lev[self.ilev_crm:,2],(1,-1,1)) 
 
         if True:
           # first ensure positive qn by clamping dq_cond_evap_vapor
@@ -1144,14 +1250,19 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         # if self.do_heat_advection: 
         out_new[:,self.ilev_crm:,0] = out_new[:,self.ilev_crm:,0] + torch.mean(flux_t_dp, 2)
 
+        # temp_dyn = forcing_factor*inputs_denorm[:,self.ilev_crm:,6]*self.yscale_lev[self.ilev_crm:,0]
+        # out_new[:,self.ilev_crm:,0] = out_new[:,self.ilev_crm:,0] + temp_dyn
+        # # print("temp dyn mean", temp_dyn[:,self.ilev_crm].abs().mean().item(), "tot", out_new[:,self.ilev_crm:,0].abs().mean().item())
+        # print("temp dyn max", temp_dyn[:,self.ilev_crm].abs().max().item(), "tot", out_new[:,self.ilev_crm:,0].abs().max().item())
+
         # net_condensation = torch.mean(dq_cond_evap_vapor - dqv_evap_prec, 2)
-        # Lv_over_cp =  2490.04 # 2.5e6/1004 = 2.5 × 10⁶ J/kg at 0°C  divided by 1004 J/kg/K
+        # Lv_over_cp =  2490.04 # 2.5e6/self.cp = 2.5 × 10⁶ J/kg at 0°C  divided by self.cp J/kg/K
         # net_condensation = Lv_over_cp*(net_condensation/self.yscale_lev[self.ilev_crm:,1]) * self.yscale_lev[self.ilev_crm:,0]
         temp = inputs_denorm[:,self.ilev_crm:,0:1].squeeze() + (out_new[:,self.ilev_crm:,0]/self.yscale_lev[self.ilev_crm:,0]) * 1200
         liq_frac    = torch.unsqueeze(self.temperature_scaling(temp),2)
         ice_frac = 1 - liq_frac
-        dq_cond_evap_vapor = (liq_frac*(2.5104e6/1004) + ice_frac*(2.8440e6/1004))*dq_cond_evap_vapor
-        net_condensation = torch.mean(dq_cond_evap_vapor- (2.5104e6/1004)*dqv_evap_prec, 2)
+        dq_cond_evap_vapor = (liq_frac*(2.5104e6/self.cp) + ice_frac*(2.8440e6/self.cp))*dq_cond_evap_vapor
+        net_condensation = torch.mean(dq_cond_evap_vapor- (2.5104e6/self.cp)*dqv_evap_prec, 2)
         net_condensation = (net_condensation/self.yscale_lev[self.ilev_crm:,1]) * self.yscale_lev[self.ilev_crm:,0]
         out_new[:,self.ilev_crm:,0] = out_new[:,self.ilev_crm:,0] + net_condensation
 
@@ -1203,9 +1314,12 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         snowfrac = self.temperature_scaling_precip(temp_sfc)
         precsc = snowfrac*precc
 
-        return out_new, precc, precsc, rnn_mem, dqn_crm, dqv_crm, p_crm_t_new, prec_negative
+        qv_crm = self.relu(qv_crm + dqv_crm/self.yscale_lev[self.ilev_crm:,1:2])
+        qn_crm = self.relu(qn_crm + dqn_crm/self.yscale_lev[self.ilev_crm:,2:3])
+
+        return out_new, precc, precsc, rnn_mem, qn_crm, qv_crm, p_crm_t_new, prec_negative
     
-    def radiative_transfer(self, inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, rnn_mem, rnn2out, dqn_crm, dqv_crm, p_crm_t_new, out_new):
+    def radiative_transfer(self, inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, rnn_mem, rnn2out, qn_crm, qv_crm, p_crm_t_new, out_new):
 
       
       batch_size, nlev, ny = out_new.shape 
@@ -1218,13 +1332,26 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
       out_denorm    = out_new / self.yscale_lev
       qv_before     = inputs_denorm[:,:,-1:]
       # print("qbef [0:10] min max mean",qv_before[:,0:10].min().item(), qv_before[:,0:10].max().item(), qv_before[:,0:10].mean().item())
-      
-      if self.update_qv_for_rad:
-        qv_new           = qv_before + out_denorm[:,:,1:2].clone().detach()*1200
+
+      qn_before     = inputs_denorm[:,:,2:3] + inputs_denorm[:,:,3:4]   
+      if self.update_q_for_rad:
+        qn_new        = self.relu(qn_before + out_denorm[:,:,2:3].detach().clone()*1200)
+      else:
+        qn_new        = self.relu(qn_before)
+      cldpath       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qn_new[:,self.ilev_crm:],0,1).contiguous()
+      # print("cldpath min max mean", cldpath.min().item(), cldpath.max().item(), cldpath.mean().item())
+      # inds_do_clouds = (cldpath.squeeze() > 1e-5)
+      if self.rad_cloud_masking:
+        qn_new_vint = qn_new.sum(axis=1)
+        inds_do_clouds = (qn_new_vint > 1e-6).squeeze() 
+        # inds_do_clouds = (cldpath.squeeze() > 1e-10)
+
+      if self.update_q_for_rad:
+        qv_new           = qv_before + out_denorm[:,:,1:2].detach().clone()*1200
       else:
         qv_new           = qv_before
       qv_new           = torch.clamp(qv_new, min=0.0)
-      T_new           = T_before + out_denorm[:,:,0:1]*1200
+      T_new           = T_before #+ out_denorm[:,:,0:1]*1200
 
       # 0. INPUT SCALING - gases
       # Water vapor specific humidity to volume mixing ratio                                      REMEMBER TO FIX THIS!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -1250,19 +1377,21 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
 
       # 1. MLP TO PREDICT OPTICAL PROPERTIES
       if self.physical_precip:
-        zeroes_crm_toa = torch.zeros(batch_size, 10, self.mp_ncol, device=device)
+        zeroes_crm_toa = torch.zeros(batch_size, self.ilev_crm, self.mp_ncol, device=device)
 
-        qn_before     = inputs_denorm[:,:,2:3] + inputs_denorm[:,:,3:4]   
-        qn_before     = torch.repeat_interleave(qn_before,self.mp_ncol,dim=2)
-        dqn           = torch.cat((zeroes_crm_toa, 1200*(dqn_crm/self.yscale_lev[self.ilev_crm:,2:3])),dim=1)
-        qn_new        = qn_before + self.relu(dqn)
+        # qn_before     = inputs_denorm[:,:,2:3] + inputs_denorm[:,:,3:4]   
+        # qn_before     = torch.repeat_interleave(qn_before,self.mp_ncol,dim=2)
+        # dqn           = torch.cat((zeroes_crm_toa, 1200*(dqn_crm/self.yscale_lev[self.ilev_crm:,2:3])),dim=1)
+        # qn_new        = qn_before + self.relu(dqn)
+        qn_new_crm = torch.cat((zeroes_crm_toa, qn_crm),dim=1)
+        # qv_new_crm = torch.cat((zeroes_crm_toa, qv_crm),dim=1)
 
-        crm_t_new0 = self.mp_ncol*T_new[:,self.ilev_crm:]*p_crm_t_new
+        t_new_crm0 = self.mp_ncol*T_new[:,self.ilev_crm:]*p_crm_t_new
         tlay_strat = torch.repeat_interleave(T_new[:,0:self.ilev_crm],self.mp_ncol,dim=2)
-        crm_t_new = torch.cat((tlay_strat, crm_t_new0),dim=1)
-        crm_t_new = (crm_t_new - 160 ) / (180)
+        t_new_crm = torch.cat((tlay_strat, t_new_crm0),dim=1)
+        t_new_crm = t_new_crm / 300
 
-        if self.use_existing_gas_optics_lw:
+        if self.use_existing_gas_optics_lw or self.use_existing_gas_optics_sw:
           pres1 = torch.log(play)
           vmr_h2o = (torch.sqrt(torch.sqrt(vmr_h2o)))
           o3 =  inputs_denorm[:,:,12:13] 
@@ -1270,116 +1399,165 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
           ch4 =  inputs_denorm[:,:,13:14]
           n2o =  inputs_denorm[:,:,14:15]
           co2 =  torch.full((batch_size, self.nlev, 1), 388.7e-6, device=device)
-          # co2 = torch.zeros(batch_size, self.nlev, 1, device=device)
-          
-          zero_gases = torch.zeros(batch_size, self.nlev, 11, device=device)
-          x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, ch4, n2o, zero_gases), dim=2)
-          x_gas = (x_gas - self.gas_optics_model_lw.xmin) / (self.gas_optics_model_lw.xmax - self.gas_optics_model_lw.xmin)
-          # print("x_gas T  min max", torch.min(x_gas[:,:,0]).item(), torch.max(x_gas[:,:,0]).item())
-          # print("x_gas P min max", torch.min(x_gas[:,:,1]).item(), torch.max(x_gas[:,:,1]).item())
-          # print("x_gas h2o min max", torch.min(x_gas[:,:,2]).item(), torch.max(x_gas[:,:,2]).item())
-          # print("x_gas o3 min max", torch.min(x_gas[:,:,3]).item(), torch.max(x_gas[:,:,3]).item())
-          # print("x_gas co2 min max", torch.min(x_gas[:,:,4]).item(), torch.max(x_gas[:,:,4]).item())
-          # print("x_gas  min max", torch.min(x_gas).item(), torch.max(x_gas).item(), "shape", x_gas.shape)
+          qn_new_crm0 = 3.5 * torch.sqrt((delta_plev[:,self.ilev_crm:]/self.g)*qn_crm)
 
-          x_gas = torch.transpose(x_gas,0,1).contiguous()
-          tau_lw, pfrac = self.gas_optics_model_lw(x_gas, col_dry)
-          if printdebug:
-            print("tau_lw0 min max mean", tau_lw.min().item(), tau_lw.max().item(), tau_lw.mean().item())
-            print("pfrac min max mean", pfrac.min().item(), pfrac.max().item(), pfrac.mean().item())
-
-          if self.reduce_lw_gas_optics:
-            tau_lw = self.gas_optics_lw_reduce1(tau_lw)
-            pfrac = self.gas_optics_lw_reduce2(pfrac) # (nlev, nb, g)
-            tau_lw = self.softplus(tau_lw)
-            # tau_lw = self.relu(tau_lw)
-            # tau_lw = 0.1*tau_lw
-            tau_lw = 0.01*tau_lw
-            # tau_lw = 0.005*tau_lw
-            # pfrac = torch.cat((pfrac,x_gas),dim=2)
-            pfrac = self.softmax(pfrac)
-          
-          if printdebug:
-            print("tau_lw1 min max mean", tau_lw.min().item(), tau_lw.max().item(), tau_lw.mean().item())
-            print("pfrac1 min max mean", pfrac.min().item(), pfrac.max().item(), pfrac.mean().item())
-
-          qn_new0 = 3.5 * torch.sqrt((delta_plev/self.g)*qn_new)
-          qn_new0 = qn_new0[:,self.ilev_crm:,:]
           # qn_new1        = 1 - torch.exp(-qn_new * self.lbd_qn)
           # print("qn_new1  min max", torch.min(qn_new1).item(), torch.max(qn_new1).item(), qn_new1.mean(), qn_new1.std() )
-          x_cld = torch.cat((qn_new0, crm_t_new0,rnn_mem), dim=2)
+          # x_cld = torch.cat((qn_new_crm0, t_new_crm0,rnn_mem), dim=2)
+          x_cld = torch.cat((qn_new_crm0, t_new_crm0, rnn_mem), dim=2)
           x_cld = torch.transpose(x_cld,0,1).contiguous()
-          # x_cld = torch.cat((qn_new1,liq_frac_diagnosed.unsqueeze(2)), dim=2)
-          tau_lw_cld = self.cloud_optics_lw(x_cld)
-          zeroes = torch.zeros(self.ilev_crm, batch_size, self.ng_lw, device=device)
-          tau_lw_cld = torch.cat((zeroes, tau_lw_cld),dim=0)
-          tau_lw_cld = 0.01*self.relu(tau_lw_cld)
-          # tau_lw_cld = 0.1*self.relu(tau_lw_cld)
-          # print("tau_lw_cld min max mean", tau_lw_cld.min().item(), tau_lw_cld.max().item(), tau_lw_cld.mean().item())
-          # tau_lw_cld      = torch.clamp(tau_lw_cld, max=1.50)
-          # tau_lw_cld      = torch.clamp(tau_lw_cld, max=5.0)
-          tau_lw = tau_lw + tau_lw_cld
-          # print("tau_lw1 min max mean", tau_lw.min().item(), tau_lw.max().item(), tau_lw.mean().item())
-          # shape is (nlev, ncol, ng)
-          # tau_lw      = torch.clamp(tau_lw, min=1e-7, max=100.0)
+          if self.rad_cloud_masking:
+            # print("shape do cld", x_cld[inds_do_clouds,:].shape, "not", x_cld[~inds_do_clouds,:].shape)
+            x_cld = x_cld[:,inds_do_clouds,:]
+            # print("shape x cld", x_cld.shape)
+          # x_cld = torch.cat((qn_new_crm1,liq_frac_diagnosed.unsqueeze(2)), dim=2)
+          if self.use_existing_gas_optics_lw:  
+            zero_gases = torch.zeros(batch_size, self.nlev, 11, device=device)
+            x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, ch4, n2o, zero_gases), dim=2)
+            x_gas = (x_gas - self.gas_optics_model_lw.xmin) / (self.gas_optics_model_lw.xmax - self.gas_optics_model_lw.xmin)
+            # print("x_gas T  min max", torch.min(x_gas[:,:,0]).item(), torch.max(x_gas[:,:,0]).item())
+            # print("x_gas P min max", torch.min(x_gas[:,:,1]).item(), torch.max(x_gas[:,:,1]).item())
+            # print("x_gas h2o min max", torch.min(x_gas[:,:,2]).item(), torch.max(x_gas[:,:,2]).item())
+            # print("x_gas o3 min max", torch.min(x_gas[:,:,3]).item(), torch.max(x_gas[:,:,3]).item())
+            # print("x_gas co2 min max", torch.min(x_gas[:,:,4]).item(), torch.max(x_gas[:,:,4]).item())
+            # print("x_gas  min max", torch.min(x_gas).item(), torch.max(x_gas).item(), "shape", x_gas.shape)
 
-        if self.use_existing_gas_optics_sw:
-            # inputs: ['tlay' 'play' 'h2o' 'o3' 'co2' 'n2o' 'ch4']
-          x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, n2o, ch4), dim=2)
-          x_gas = (x_gas - self.gas_optics_model_sw1.xmin) / (self.gas_optics_model_sw1.xmax - self.gas_optics_model_sw1.xmin)
-          x_gas = torch.transpose(x_gas,0,1).contiguous()
-        
-          tau_sw     = self.gas_optics_model_sw1(x_gas, col_dry)
-          tau_sw_scat= self.gas_optics_model_sw2(x_gas, col_dry)
+            x_gas = torch.transpose(x_gas,0,1).contiguous()
+            tau_lw, pfrac = self.gas_optics_model_lw(x_gas, col_dry)
+            if printdebug:
+              print("tau_lw0 min max mean", tau_lw.min().item(), tau_lw.max().item(), tau_lw.mean().item())
+              print("pfrac min max mean", pfrac.min().item(), pfrac.max().item(), pfrac.mean().item())
 
-          if self.reduce_sw_gas_optics:
-            tau_sw      = self.gas_optics_sw_reduce1(tau_sw)
-            tau_sw_scat = self.gas_optics_sw_reduce2(tau_sw_scat)
-            tau_sw      = 0.01*self.softplus(tau_sw) + 1.0e-7
-            tau_sw_scat = 0.01*self.softplus(tau_sw_scat)
+            if self.reduce_lw_gas_optics:
+              tau_lw = self.gas_optics_lw_reduce1(tau_lw)
+              pfrac = self.gas_optics_lw_reduce2(pfrac) # (nlev, nb, g)
+              tau_lw = self.softplus(tau_lw)
+              # tau_lw = self.relu(tau_lw)
+              # tau_lw = 0.1*tau_lw
+              tau_lw = 0.01*tau_lw
+              # tau_lw = 0.005*tau_lw
+              # pfrac = torch.cat((pfrac,x_gas),dim=2)
+              pfrac = self.softmax(pfrac)
+            
+            if printdebug:
+              print("tau_lw1 min max mean", tau_lw.min().item(), tau_lw.max().item(), tau_lw.mean().item())
+              print("pfrac1 min max mean", pfrac.min().item(), pfrac.max().item(), pfrac.mean().item())
 
-          # print("tau_sw min max mean", tau_sw.min().item(), tau_sw.max().item(), tau_sw.mean().item())
-          # print("tau_sw_scat min max mean", tau_sw_scat.min().item(), tau_sw_scat.max().item(), tau_sw_scat.mean().item())
+            tau_lw_cld = self.cloud_optics_lw(x_cld)
+            if self.use_cloud_overlap_rnn:
+              scaling_factor, dummy = self.cloud_mcica_scaling(x_cld)
+              scaling_factor = self.cloud_mcica_scaling2(scaling_factor)
+              tau_lw_cld = tau_lw_cld*self.relu(scaling_factor)
 
-          # tau_sw = tau_sw + tau_sw_scat 
-          # ssa_sw = tau_sw_scat / tau_sw
+            # x_cld = torch.permute(x_cld, (1, 2, 0)).contiguous()  # (nlev, nb, ng ) --> (nb, ng, nlev)
+            # tau_lw_cld = self.cloud_optics_lw(x_cld) # (nb, ng, nlev)
+            # tau_lw_cld = torch.permute(tau_lw_cld, (2, 0, 1)).contiguous()
 
-          sw_optprops = self.cloud_optics_sw(x_cld)
+            zeroes = torch.zeros(self.ilev_crm, batch_size, self.ng_lw, device=device)
+            # ----
+            if self.rad_cloud_masking:
+              # tau_lw_cld = torch.reshape(tau_lw_cld,(-1, self.ng_lw))
+              # print("shape tau lw cld", tau_lw_cld.shape)
+              tau_lw_cld0 = torch.zeros(self.nlev_crm, batch_size, self.ng_lw, device=device)
+              tau_lw_cld0[:,inds_do_clouds,:] = tau_lw_cld
+              tau_lw_cld = tau_lw_cld0
+            # ---
+            tau_lw_cld = cldpath*self.relu(tau_lw_cld)# 0.01*self.relu(tau_lw_cld)
+            # tau_lw_cld = 0.01*self.relu(tau_lw_cld)
+            tau_lw_cld = torch.cat((zeroes, tau_lw_cld),dim=0)
 
-          # (nlev, nb, ng*ny ) -->  (nlev, nb, ny, ng)
-          # print("shape sw optprops", sw_optprops_cld.shape)
-          sw_optprops = torch.reshape(sw_optprops,(50, batch_size, self.ny_sw_optprops, self.ng_sw))
+            # tau_lw_cld      = torch.clamp(tau_lw_cld, max=5.0)
+            tau_lw = tau_lw + tau_lw_cld # shape is (nlev, ncol, ng)
+            # tau_lw      = torch.clamp(tau_lw, min=1e-7, max=100.0)
 
-          tau_sw_cld, tau_sw_scat_cld, g_sw = sw_optprops.chunk(3,2 )
+          if self.use_existing_gas_optics_sw:
+              # inputs: ['tlay' 'play' 'h2o' 'o3' 'co2' 'n2o' 'ch4']
+            x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, n2o, ch4), dim=2)
+            x_gas = (x_gas - self.gas_optics_model_sw1.xmin) / (self.gas_optics_model_sw1.xmax - self.gas_optics_model_sw1.xmin)
+            x_gas = torch.transpose(x_gas,0,1).contiguous()
+          
+            tau_sw     = self.gas_optics_model_sw1(x_gas, col_dry)
+            tau_sw_scat= self.gas_optics_model_sw2(x_gas, col_dry)
 
-          if not self.ng_sw==self.ng_lw:
-              zeroes = torch.zeros(10, batch_size, self.ng_sw, device=device)
-          tau_sw_cld      = 0.01*self.relu(tau_sw_cld.squeeze())
-          tau_sw_scat_cld = 0.01*self.relu(tau_sw_scat_cld.squeeze())
+            if self.reduce_sw_gas_optics:
+              tau_sw      = self.gas_optics_sw_reduce1(tau_sw)
+              tau_sw_scat = self.gas_optics_sw_reduce2(tau_sw_scat)
+              tau_sw      = 0.01*self.softplus(tau_sw) + 1.0e-7
+              tau_sw_scat = 0.01*self.softplus(tau_sw_scat)
 
-          # print("tau_sw_cld min max mean", tau_sw_cld.min().item(), tau_sw_cld.max().item(), tau_sw.mean().item())
-          # print("tau_sw_scat_cld min max mean", tau_sw_scat_cld.min().item(), tau_sw_scat_cld.max().item(), tau_sw_cld.mean().item())
+            # Total (gas) optical depth
+            tau_sw  = tau_sw + tau_sw_scat
 
-          tau_sw_cld      = torch.cat((zeroes, tau_sw_cld),dim=0)
-          tau_sw_scat_cld = torch.cat((zeroes, tau_sw_scat_cld),dim=0)
-          g_sw            = torch.cat((zeroes, g_sw.squeeze()),dim=0)
+            sw_optprops = self.cloud_optics_sw(x_cld) 
+            # sw_optprops = torch.permute(sw_optprops, (2, 0, 1)).contiguous()
+            if self.use_cloud_overlap_rnn:
+              scaling_factor, dummy = self.cloud_mcica_scaling_sw(x_cld)
+              scaling_factor = self.cloud_mcica_scaling_sw2(scaling_factor)
 
-          tau_sw      = tau_sw + tau_sw_cld
-          tau_sw_scat = tau_sw_scat + tau_sw_scat_cld
+            # sw_optprops = self.cloud_optics_sw1(x_cld)
+            # sw_optprops = self.softsign(sw_optprops)
+            # sw_optprops = self.cloud_optics_sw2(sw_optprops)
+            # (nlev, nb, ng*ny ) -->  (nlev, nb, ny, ng)
+            # sw_optprops = torch.reshape(sw_optprops,(50, batch_size, self.ny_sw_optprops, self.ng_sw))
+            if self.rad_cloud_masking:
+              # sw_optprops = torch.reshape(sw_optprops,(-1, self.ny_sw_optprops, self.ng_sw))
+              # sw_optprops0 = torch.zeros(self.nlev_crm, batch_size, 3, self.ng_sw, device=device)
+              sw_optprops0 = torch.zeros(self.nlev_crm, batch_size, 3*self.ng_sw, device=device)
+              # print("shape sw_optprops", sw_optprops.shape)
+              sw_optprops0[:,inds_do_clouds,:] = sw_optprops
+              sw_optprops = sw_optprops0
+              if self.use_cloud_overlap_rnn:
+                scaling_factor0 = torch.ones(self.nlev_crm, batch_size, self.ng_sw, device=device)
+                scaling_factor0[:,inds_do_clouds,:] = scaling_factor
+                scaling_factor = scaling_factor0
 
+            # tau_sw_cld, tau_sw_scat_cld, g_sw_cld = sw_optprops.chunk(3,2 )
+            tau_sw_cld, ssa_sw_cld, g_sw_cld = sw_optprops.chunk(3,2 )
+            if self.use_cloud_overlap_rnn:
+              tau_sw_cld = tau_sw_cld*self.relu(scaling_factor)
+
+            if not self.ng_sw==self.ng_lw:
+                zeroes = torch.zeros(10, batch_size, self.ng_sw, device=device)
+            if self.reduce_sw_gas_optics:
+              # tau_sw_cld      = 0.002*self.relu(tau_sw_cld.squeeze())
+              tau_sw_cld      = cldpath*self.relu(tau_sw_cld.squeeze())
+              # tau_sw_scat_cld = 0.01*self.relu(tau_sw_scat_cld.squeeze())
+              # tau_sw_scat_cld = self.relu(tau_sw_cld*tau_sw_scat_cld.squeeze())
+
+            else:
+              # tau_sw_cld      = 0.005*self.relu(tau_sw_cld.squeeze())
+              tau_sw_cld      = cldpath*self.relu(tau_sw_cld.squeeze())
+              # tau_sw_scat_cld = 0.005*self.relu(tau_sw_scat_cld.squeeze())
+
+            # tau_sw_scat_cld = self.relu(tau_sw_cld*tau_sw_scat_cld.squeeze()) 
+
+            ssa_sw_cld      = self.sigmoid(ssa_sw_cld.squeeze())
+            # ssa_sw_cld      = torch.clamp(ssa_sw_cld.squeeze(), min=0.0, max=1.0) 
+            # ssa_sw_cld = 0.5*self.tanh(ssa_sw_cld.squeeze()) + 0.5
+            g_sw_cld        = self.sigmoid(g_sw_cld.squeeze())
+
+            # print("tau_sw_cld min max mean", tau_sw_cld.min().item(), tau_sw_cld.max().item(), tau_sw.mean().item())
+            # print("tau_sw_scat_cld min max mean", tau_sw_scat_cld.min().item(), tau_sw_scat_cld.max().item(), tau_sw_cld.mean().item())
+            # print("ssa_sw_cld min max mean", ssa_sw_cld.min().item(), ssa_sw_cld.max().item(), ssa_sw_cld.mean().item())
+            
+            tau_sw_cld      = torch.cat((zeroes, tau_sw_cld),dim=0)
+            # tau_sw_scat_cld = torch.cat((zeroes, tau_sw_scat_cld),dim=0)
+            ssa_sw_cld      = torch.cat((zeroes, ssa_sw_cld),dim=0)
+            tau_sw_scat_cld = ssa_sw_cld * tau_sw_cld
+            g_sw_cld        = torch.cat((zeroes, g_sw_cld.squeeze()),dim=0)
 
         # else:
         if not (self.use_existing_gas_optics_sw and self.use_existing_gas_optics_lw):
-          qv_before = torch.repeat_interleave(qv_before,self.mp_ncol,dim=2)
-          dqv       = torch.cat((zeroes_crm_toa, 1200*(dqv_crm/self.yscale_lev[self.ilev_crm:,1:2])),dim=1)
-          qv_new    = qv_before + self.relu(dqv)
+          # qv_before = torch.repeat_interleave(qv_before,self.mp_ncol,dim=2)
+          # dqv       = torch.cat((zeroes_crm_toa, 1200*(dqv_crm/self.yscale_lev[self.ilev_crm:,1:2])),dim=1)
+          # qv_new    = qv_before + self.relu(dqv)
           qv_new    = qv_new * 1.608079364 # (28.97 / 18.01528) # mol_weight_air / mol_weight_gas
           qv_new    = (torch.sqrt(torch.sqrt(qv_new))) / 0.497653
 
-          cloudfrac  = torch.zeros(batch_size, nlev, 1, device=device)
-          cloudfrac[:,10:] = rnn_mem[:,:,0:1]
+          mem  = torch.zeros(batch_size, nlev, self.nh_mem, device=device)
+          mem[:, self.ilev_crm:] = rnn_mem #[:,:,0:1]
           qn_new        = 1 - torch.exp(-qn_new * self.lbd_qn)
-          inputs_rad = torch.cat((pressure, crm_t_new, qv_new, qn_new, inputs_main[:,:,6:9], inputs_main[:,:,12:15], cloudfrac),dim=2)
+          inputs_rad = torch.cat((pressure, temp, qv_new, qn_new, inputs_main[:,:,6:9], inputs_main[:,:,12:15], mem),dim=2)
           inputs_rad = torch.transpose(inputs_rad,0,1).contiguous()
 
       else: # not self.physical_precip
@@ -1411,13 +1589,13 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         qice_new = 1 - torch.exp(-qice_new * self.lbd_qi)
         
         # Radiation inputs: pressure, temperature, water vapor, cloud ice and liquid, O3, CH4, N2O,, cld heterogeneity
-        # cloudfrac  = torch.zeros(batch_size, nlev, 1, device=device)
-        cloudfrac  = torch.zeros(batch_size, nlev, self.nh_mem, device=device)
+        # conv_mem  = torch.zeros(batch_size, nlev, 1, device=device)
+        conv_mem  = torch.zeros(batch_size, nlev, self.nh_mem, device=device)
 
-        # cloudfrac[:,10:] = rnn_mem[:,:,0:1]
-        cloudfrac[:,10:] = rnn_mem[:,:,:]
-        # inputs_rad = torch.cat((pressure, temp, vmr_h2o, qliq_new, qice_new, inputs_main[:,:,12:15], cloudfrac),dim=2)
-        inputs_rad = torch.cat((pressure, temp, vmr_h2o, qliq_new, qice_new, inputs_main[:,:,6:9], inputs_main[:,:,12:15], cloudfrac),dim=2)
+        # conv_mem[:, self.ilev_crm:] = rnn_mem[:,:,0:1]
+        conv_mem[:, self.ilev_crm:] = rnn_mem[:,:,:]
+        # inputs_rad = torch.cat((pressure, temp, vmr_h2o, qliq_new, qice_new, inputs_main[:,:,12:15], conv_mem),dim=2)
+        inputs_rad = torch.cat((pressure, temp, vmr_h2o, qliq_new, qice_new, inputs_main[:,:,6:9], inputs_main[:,:,12:15], conv_mem),dim=2)
         inputs_rad = torch.transpose(inputs_rad,0,1).contiguous()
 
       if not self.use_existing_gas_optics_lw:
@@ -1444,7 +1622,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
 
       # BELOW IS INCORRECT IF we just used the raw Planck fractions predicted by RRTMGP-NN, without reduction/changing last layer.
       # RRTMGP planck fracs sum to 1 only within bands, not across all g-points. 
-      # We should be multiplying with the total band-wise Planck emission, not total Planck emission. 
+      # We should be multiplying with the band-wise Planck emissions, not broadband Planck emission. 
       source_sfc  = pfrac[-1,:,:]*lwup_sfc.unsqueeze(1)
       if printdebug:
         print("lup sfc min max mean", lwup_sfc.min().item(), lwup_sfc.max().item(), lwup_sfc.mean().item())
@@ -1452,13 +1630,13 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         print("source_sfc min max mean", source_sfc.min().item(), source_sfc.max().item(), source_sfc.mean().item(), "shape", source_sfc.shape)
 
       # if self.physical_precip:
-      #   # p_crm_t_new = self.softmax(self.mlp_t_crm(rnn2out))
-      #   # print("shape tlev", tlev.shape, "p", p_crm_t_new.shape)
+      #   # p_t_new_crm = self.softmax(self.mlp_t_crm(rnn2out))
+      #   # print("shape tlev", tlev.shape, "p", p_t_new_crm.shape)
       #   tlev0 = tlev.transpose(0,1)
-      #   crm_t_new = self.ng_lw*tlev0[:,11:].unsqueeze(2)*p_crm_t_new
+      #   t_new_crm = self.ng_lw*tlev0[:,11:].unsqueeze(2)*p_t_new_crm
       #   tlev_strat = torch.repeat_interleave(tlev0[:,0:11].unsqueeze(2),self.ng_lw,dim=2)
-      #   crm_t_new = torch.cat((tlev_strat, crm_t_new),dim=1) # (nb, nlev, ng)
-      #   lwup_lev    = self.outgoing_lw(crm_t_new).transpose(0,1).contiguous() # (nlev+1, nb, ng)
+      #   t_new_crm = torch.cat((tlev_strat, t_new_crm),dim=1) # (nb, nlev, ng)
+      #   lwup_lev    = self.outgoing_lw(t_new_crm).transpose(0,1).contiguous() # (nlev+1, nb, ng)
       # else:
       lwup_lev    = torch.unsqueeze(self.outgoing_lw(tlev),2) # (nlev+1, nb, ng)
       # print("pfrac min max", torch.min(pfrac[:,:]).item(), torch.max(pfrac[:,:]).item())
@@ -1491,16 +1669,18 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         print("source_up min max", torch.min(source_up[:,:]).item(), torch.max(source_up[:,:]).item())
 
       # Surface reflection and emission (vectorized)
-      albedos_lw = inputs_aux[:,7:9]
-      albedo_surf = self.mlp_sfc_albedo_lw(albedos_lw)
-      albedo_surf = self.sigmoid(albedo_surf)
-      albedo_surf = albedo_surf.view(-1)
+      # albedos_lw = inputs_aux[:,7:9]
+      # albedos_lw = self.mlp_sfc_albedo_lw(albedos_lw)
+      # albedos_lw = self.sigmoid(albedos_lw)
+      emissivity_surf = torch.ones_like(source_sfc)
+      emissivity_surf = emissivity_surf.view(-1)
       source_sfc  = source_sfc.view(-1)
       
       # flux_lw_dn_gpt = torch.zeros(nlev+1, batch_size*self.ng_lw,  device=device)
       # flux_lw_up_gpt = torch.zeros(nlev+1, batch_size*self.ng_lw, device=device)
-      if printdebug: print("albedo_surf min max mean", albedo_surf.min().item(), albedo_surf.max().item(), albedo_surf.mean().item())
-      flux_lw_dn, flux_lw_up = self.lw_solver_noscat_batchlast(trans_lw, source_dn, source_up, source_sfc, albedo_surf)
+      if printdebug: 
+        print("emissivity_surf min max mean", emissivity_surf.min().item(), emissivity_surf.max().item(), emissivity_surf.mean().item())
+      flux_lw_dn, flux_lw_up = self.lw_solver_noscat_batchlast(trans_lw, source_dn, source_up, source_sfc, emissivity_surf)
       if printdebug: print("flux lw gpt up  min max mean", flux_lw_up.min().item(), flux_lw_up.max().item(),flux_lw_up.mean().item())
 
       flux_lw_up = flux_lw_up.view(nlev+1,batch_size, self.ng_lw)
@@ -1514,25 +1694,56 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
       # -------------------------- SHORTWAVE -----------------------------
       if not self.use_existing_gas_optics_sw:
         sw_optprops = self.mlp_sw_optprops(inputs_rad)
+        # sw_optprops = self.mlp_sw_optprops1(inputs_rad)
+        # sw_optprops = self.softsign(sw_optprops)
+        # sw_optprops = self.mlp_sw_optprops2(sw_optprops)
 
         # (nlev, nb, ng*ny ) -->  (nlev, nb, ny, ng)
         sw_optprops = torch.reshape(sw_optprops,(nlev, batch_size, self.ny_sw_optprops, self.ng_sw))
-        tau_sw, tau_sw_scat, g_sw = sw_optprops.chunk(3,2 )
+        # tau_sw, tau_sw_scat, g_sw = sw_optprops.chunk(3,2 )
+        tau_sw, ssa_sw, g_sw = sw_optprops.chunk(3,2 )
+        g_sw        = self.sigmoid(g_sw.squeeze())
+        ssa_sw      = self.sigmoid(ssa_sw.squeeze())
+
         # print("tau sha", tau_sw.shape, "coldry", col_dry.shape)
         tau_sw      = torch.pow(tau_sw.squeeze(), 8)
         tau_sw      = tau_sw*(1e-24*col_dry)
         tau_sw      = torch.clamp(tau_sw, min=1e-6, max=40.0) 
-        tau_sw_scat  = torch.pow(tau_sw_scat.squeeze(), 8)
-        tau_sw_scat  = tau_sw_scat*(1e-24*col_dry)
-        tau_sw_scat  = torch.clamp(tau_sw_scat, min=1e-6, max=40.0) 
-      tau_sw      = tau_sw + tau_sw_scat
-      ssa_sw      = tau_sw_scat / tau_sw
-      g_sw        = self.sigmoid(g_sw.squeeze())
-      del sw_optprops, tau_sw_scat
+        # tau_sw_scat  = torch.pow(tau_sw_scat.squeeze(), 8)
+        # tau_sw_scat  = tau_sw_scat*(1e-24*col_dry)
+        # tau_sw_scat  = torch.clamp(tau_sw_scat, min=1e-6, max=40.0) 
+
+        # tau_sw      = tau_sw + tau_sw_scat
+        # ssa_sw      = tau_sw_scat / tau_sw
+        # # g_sw        = self.sigmoid(g_sw.squeeze())
+        # g_sw        = torch.clamp(g_sw.squeeze(), min=0.0, max=1.0) 
+        # # g_sw        = (g_sw*tau_sw_scat_cld) / torch.maximum(tau_sw_scat, torch.tensor(1.0e-12))
+        del sw_optprops
+      else:
+        # Compute total optical depth as gas (total) optical depth + cloud (total) optical depth
+        tau_sw_tot = tau_sw + tau_sw_cld
+        # Compute single-scattering albedo of the cloud-gas mixture as (total scattering optical depth)/(total optical depth)
+        tau_sw_scat_tot = tau_sw_scat + tau_sw_scat_cld # total scattering optical depth 
+        # Combine cloud and gas asymmetry factors, weighting by scattering optical depth 
+        #        gas g*tau_scat         cloud g*tau_scat        total tau_scat
+        # g_sw    = (g_sw*tau_sw_scat + g_sw_cld*tau_sw_scat_cld) / (tau_sw_scat_tot) 
+        # HOWEVER g_sw from gases is zero, so lose first term
+        g_sw = g_sw_cld*tau_sw_scat_cld / tau_sw_scat_tot
+        tau_sw  = tau_sw_tot 
+        ssa_sw  = tau_sw_scat_tot / tau_sw_tot
+        # print("min max g_sw_cld", g_sw_cld.min().item(), g_sw_cld.max().item())
+        # print("min max mean tau_sw_cld", tau_sw_cld.min().item(), tau_sw_cld.max().item(), tau_sw_cld.mean().item())
+        # print("min max mean tau_sw_scat", tau_sw_scat.min().item(), tau_sw_scat.max().item(), tau_sw_scat.mean().item())
+        # print("min max mean tau_sw_scat_tot", tau_sw_scat_tot.min().item(), tau_sw_scat_tot.max().item(), tau_sw_scat_tot.mean().item())        # print("min max mean g sw cld", g_sw_cld.min().item(), g_sw_cld.max().item(), g_sw_cld.max().item())
+        # print("min max mean g sw", g_sw.min().item(), g_sw.max().item(), g_sw.max().item())
+        # print("min max ssa", ssa_sw.min().item(), ssa_sw.max().item(), "tau", tau_sw.min().item(), tau_sw.max().item())
+
+        del tau_sw_scat, tau_sw_scat_tot, tau_sw_scat_cld
       
       # ---- REFTRANS SW ------
       mu0 = torch.reshape(inputs_aux[:,6:7],(-1,1,1))
-      mu0 = torch.clamp(mu0, min=1e-3) 
+      min_mu = 1e-6 #1e-3
+      mu0 = torch.clamp(mu0, min=min_mu) 
 
       # (ncol) -> (nlev, ncol) -> (nlev,ng*ncol)
       mu0_rep = torch.repeat_interleave(torch.repeat_interleave(mu0.reshape((1,-1)), nlev, dim=0),self.ng_sw,dim=1)
@@ -1546,8 +1757,8 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
       # batched_reftra = torch.func.vmap(self.calc_reflectance_transmittance_sw)
       
       # print("shape mu0", mu0.shape, "tausw", tau_sw.shape, "ssasw", ssa_sw.shape, "gsw", g_sw.shape)
-      ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir = self.calc_reflectance_transmittance_sw(mu0_rep.view(-1), tau_sw.view(-1), ssa_sw.view(-1), g_sw.view(-1))
-      
+      # ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir = self.calc_reflectance_transmittance_sw(mu0_rep.view(-1), tau_sw.view(-1), ssa_sw.view(-1), g_sw.view(-1))
+      ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir = self.calc_ref_trans_sw(mu0_rep.view(-1), tau_sw.view(-1), ssa_sw.view(-1), g_sw.view(-1))
       # ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir = batched_reftra(mu0, tau_sw, ssa_sw, g_sw)
       ref_diff            = ref_diff.view(nlev, -1)
       trans_diff          = trans_diff.view(nlev, -1)
@@ -1561,30 +1772,77 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
 
       incoming_toa    = inputs_aux[:,1:2]
 
-      # Here we apply torch.square to ensure the values are positive, then softmax so that they sum to 1
-      toa_spectral = self.softmax_dim1(torch.square(self.sw_solar_weights))
+      if printdebug:
+        print("incoming toa", incoming_toa[500:560])
+
+      if (self.use_existing_gas_optics_sw and (not self.reduce_sw_gas_optics)):
+        toa_spectral = self.sw_solar_weights 
+      else:
+        # Here we apply torch.square to ensure the weights are positive, then softmax so that they sum to 1
+        toa_spectral = self.softmax_dim1(torch.square(self.sw_solar_weights))
     
       # toa_spectral = torch.repeat_interleave(toa_spectral,self.ng_sw)
 
       incoming_toa = incoming_toa*toa_spectral
       incoming_toa = torch.flatten(incoming_toa)
 
-      albedo_surf_diff_sw     = inputs_aux[:,9]
-      albedo_surf_dir_sw      = inputs_aux[:,10]
-      albedos_sw = inputs_aux[:,9:11]
-      if printdebug:
-        print("albedo_surf_dir", albedo_surf_dir_sw[500], "min", albedo_surf_dir_sw.min().item(), "max", albedo_surf_dir_sw.max().item())
-        print("albedo_surf_diff_sw", albedo_surf_diff_sw[500], "min", albedo_surf_diff_sw.min().item(), "max", albedo_surf_diff_sw.max().item())
+      # emissivity_surf_diff_sw_sca   = inputs_aux[:,9]
+      # emissivity_surf_dir_sw_sca    = inputs_aux[:,10]
+      # emissivity_surf_diff_sw = torch.repeat_interleave(emissivity_surf_diff_sw_sca,self.ng_sw)
+      # emissivity_surf_dir_sw = torch.repeat_interleave(emissivity_surf_dir_sw_sca,self.ng_sw)
+
+      # albedos_sw = inputs_aux[:,7:11]
+      # emissivity_surf_diff_sw = self.sigmoid(self.mlp_sfc_albedo_sw1(albedos_sw)).view(-1)
+      # emissivity_surf_dir_sw = self.sigmoid(self.mlp_sfc_albedo_sw2(albedos_sw)).view(-1)
+
+      aldif = inputs_aux[:,7].view(1,-1)
+      aldir = inputs_aux[:,8].view(1,-1)
+      asdif = inputs_aux[:,9].view(1,-1)
+      asdir  = inputs_aux[:,10].view(1,-1)
+
+      # Extract spectral points associated with near-IR and visible radiation
+      # If we are using RRTMGP(-NN), then this should exactly match how things are done in subroutine set_albedo in E3SM/components/eam/src/physics/rrtmgp/radiation.F90
+      # If we are learning a new gas optics module on the fly, or a decoder to shrink the spectral (=hidden) dimension after RRTMGP-NN, then the lines below assume that it's a good
+      # idea to follow RRTMGP in how much of the spectral space is allocated to near-IR versus visible. Might be a poor assumption but don't know what else to do!
+      iend_ir = int(np.round((80/112)*self.ng_sw)) # RRTMGP bands 1-9 (g-points 1-88) encompass 820-12850 cm-1 (near-ir), see data/rrtmgp-data-sw-g112-210809.nc
+      iend_mix=int(np.round((89/112)*self.ng_sw)) # RRTMGP band 10 is in between UV/visible and near-IR, and bands 11-14 (89-112) are fully in visible range (> 14286 ! cm^-1)
+      
+      emissivity_surf_dir_sw   = torch.ones(self.ng_sw, batch_size, device=device)
+      emissivity_surf_diff_sw  = torch.ones(self.ng_sw, batch_size, device=device)
+      ng_ir  = iend_ir
+      ng_mix = iend_mix - iend_ir
+      ng_vis = self.ng_sw - iend_mix
+
+      aldir1 = torch.repeat_interleave(aldir,ng_ir,dim=0)
+      aldir2 = torch.repeat_interleave(aldir,ng_mix,dim=0)
+      asdir1 = torch.repeat_interleave(asdir,ng_vis,dim=0)
+      asdir2 = torch.repeat_interleave(asdir,ng_mix,dim=0)
+
+      aldif1 = torch.repeat_interleave(aldif,ng_ir,dim=0)
+      aldif2 = torch.repeat_interleave(aldif,ng_mix,dim=0)
+      asdif1 = torch.repeat_interleave(asdif,ng_vis,dim=0)
+      asdif2 = torch.repeat_interleave(asdif,ng_mix,dim=0)
+
+      emissivity_surf_dir_sw[0:iend_ir]         =  aldir1
+      emissivity_surf_dir_sw[iend_ir:iend_mix]  =  0.5*(aldir2 + asdir2)
+      emissivity_surf_dir_sw[iend_mix:]         =  asdir1
+
+      emissivity_surf_diff_sw[0:iend_ir]         =  aldif1
+      emissivity_surf_diff_sw[iend_ir:iend_mix]  =  0.5*(aldif2 + asdif2)
+      emissivity_surf_diff_sw[iend_mix:]         =  asdif1
+
+      emissivity_surf_dir_sw = torch.transpose(emissivity_surf_dir_sw,0,1).contiguous().view(-1)
+      emissivity_surf_diff_sw = torch.transpose(emissivity_surf_diff_sw,0,1).contiguous().view(-1)
+
+      # if printdebug:
+      #   print("emissivity_surf_dir", emissivity_surf_dir_sw[500], "min", emissivity_surf_dir_sw.min().item(), "max", emissivity_surf_dir_sw.max().item())
+      #   print("emissivity_surf_diff_sw", emissivity_surf_diff_sw[500], "min", emissivity_surf_diff_sw.min().item(), "max", emissivity_surf_diff_sw.max().item())
 
       # cos_sza = torch.repeat_interleave(mu0.flatten().unsqueeze(1),self.ng_sw).flatten()
-      albedo_surf_diff_sw = self.sigmoid(self.mlp_sfc_albedo_sw1(albedos_sw)).view(-1)
-      albedo_surf_dir_sw = self.sigmoid(self.mlp_sfc_albedo_sw2(albedos_sw)).view(-1)
-
-      # albedo_surf_diff_sw = torch.repeat_interleave(albedo_surf_diff_sw,self.ng_sw)
-      # albedo_surf_dir_sw = torch.repeat_interleave(albedo_surf_dir_sw,self.ng_sw)
 
       if self.experimental_rad:
-        xx = torch.transpose(rnn2out,1,2)
+        # xx = torch.transpose(rnn2out,1,2)
+        xx = torch.transpose(qn_crm,1,2)
         v_mat = self.sigmoid(self.conv_vmat(xx)) # (nb, ng, nlev)
         v_mat = torch.transpose(v_mat,1,2) # (nb, nlev, ng)
         v_mat = torch.transpose(v_mat,0,1) # (nlev, nb, ng)
@@ -1595,7 +1853,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         v_mat       = torch.reshape(v_mat, (nlev+1, -1))
 
         flux_sw_up, flux_sw_dn_diffuse, flux_sw_dn_direct = self.adding_tc_sw_batchlast(incoming_toa, 
-                    albedo_surf_diff_sw, albedo_surf_dir_sw, ref_diff, 
+                    emissivity_surf_diff_sw, emissivity_surf_dir_sw, ref_diff, 
                     trans_diff, ref_dir, trans_dir_diff, trans_dir_dir, v_mat)
         flux_sw_dn_diffuse = flux_sw_dn_diffuse*v_mat
         flux_sw_dn_direct = flux_sw_dn_direct*v_mat
@@ -1603,11 +1861,17 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
 
         # flux_sw_up, flux_sw_dn_diffuse, flux_sw_dn_direct = self.adding_ica_sw_batchlast(incoming_toa, 
         flux_sw_up, flux_sw_dn_diffuse, flux_sw_dn_direct = self.adding_ica_sw_batchlast_opt(incoming_toa, 
-                    albedo_surf_diff_sw, albedo_surf_dir_sw, 
+                    emissivity_surf_diff_sw, emissivity_surf_dir_sw, 
                     ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir)
       
       del ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir
-      
+
+      # mu0_rep = torch.repeat_interleave(torch.repeat_interleave(inputs_aux[:,6:7].reshape((1,-1)), nlev, dim=0),self.ng_sw,dim=1)
+      # inds_zero = mu0_rep < min_mu
+      # flux_sw_up[inds_zero] = 0.0
+      # flux_sw_dn_diffuse[inds_zero] = 0.0
+      # flux_sw_dn_direct[inds_zero] = 0.0
+
       # print("flux_sw_up  min max", torch.min(flux_sw_up[:,:]).item(), torch.max(flux_sw_up[:,:]).item())
       # print("flux_sw_dn_diffuse  min max", torch.min(flux_sw_dn_diffuse[:,:]).item(), torch.max(flux_sw_dn_diffuse[:,:]).item())
       # print("flux_sw_dn_direct  min max", torch.min(flux_sw_dn_direct[:,:]).item(), torch.max(flux_sw_dn_direct[:,:]).item())
@@ -1624,8 +1888,8 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
       # If we are using RRTMGP(-NN), then this should exactly match how things are done in subroutine export_surface_fluxes in E3SM/components/eam/src/physics/rrtmgp/radiation.F90
       # If we are learning a new gas optics module on the fly, or a decoder to shrink the spectral (=hidden) dimension after RRTMGP-NN, then the lines below assume that it's a good
       # idea to follow RRTMGP in how much of the spectral space is allocated to near-IR versus visible. Might be a poor assumption but don't know what else to do!
-      iend_ir = int(np.round((89/112)*self.ng_sw)) # RRTMGP bands 1-10 (g-points 1-89) encompass 820-16000 cm-1 (near-ir), see data/rrtmgp-data-sw-g112-210809.nc
-      iend_mix=int(np.round((96/112)*self.ng_sw)) # RRTMGP band 11 is in between UV/visible and near-IR, and bands 12-14 (96-112) are in visible range
+      # iend_ir = int(np.round((80/112)*self.ng_sw)) # RRTMGP bands 1-9 (g-points 1-88) encompass 820-12850 cm-1 (near-ir), see data/rrtmgp-data-sw-g112-210809.nc
+      # iend_mix=int(np.round((89/112)*self.ng_sw)) # RRTMGP band 10 is in between UV/visible and near-IR, and bands 11-14 (89-112) are fully in visible range (> 14286 ! cm^-1) near-IR, and bands 12-14 (96-112) are in visible range
       
       sw_dir_dn_mixband = torch.sum(flux_sw_dn_direct[-1,:,iend_ir:iend_mix],dim=1,keepdim=True)
       SOLL = torch.sum(flux_sw_dn_direct[-1,:,0:iend_ir],dim=1,keepdim=True) + 0.5*sw_dir_dn_mixband
@@ -1634,10 +1898,6 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
       sw_diff_dn_mixband = torch.sum(flux_sw_dn_diffuse[-1,:,iend_ir:iend_mix],dim=1,keepdim=True)
       SOLLD = torch.sum(flux_sw_dn_diffuse[-1,:,0:iend_ir],dim=1,keepdim=True) + 0.5*sw_diff_dn_mixband
       SOLSD = torch.sum(flux_sw_dn_diffuse[-1,:,iend_mix:],dim=1,keepdim=True) + 0.5*sw_diff_dn_mixband
-      # SOLS = flux_sw_dn_direct[-1,:,0:1]  # SOLS (ncol, 1)
-      # SOLL = flux_sw_dn_direct[-1,:,1:2]  # SOLL
-      # SOLSD = flux_sw_dn_diffuse[-1,:,0:1] # SOLSD
-      # SOLLD = flux_sw_dn_diffuse[-1,:,1:2]  # SOLLD
 
       flux_sw_up          = torch.sum(flux_sw_up,dim=2)
       flux_sw_dn_diffuse  = torch.sum(flux_sw_dn_diffuse,dim=2)
@@ -1647,9 +1907,14 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
       flux_sw_dn_sfc      = flux_sw_dn[-1,:].unsqueeze(1)             # NETSW  
 
       flux_sw_net = flux_sw_dn - flux_sw_up
-      mu_rep = torch.repeat_interleave(inputs_aux[:,6:7].reshape(1,-1),nlev+1,dim=0)
-      inds_zero = mu_rep < 1e-3
-      flux_sw_net[inds_zero] = 0.0
+      # mu_rep = torch.repeat_interleave(inputs_aux[:,6:7].reshape(1,-1),nlev+1,dim=0)
+      inds_zero = inputs_aux[:,6] < min_mu
+      flux_sw_net[:,inds_zero] = 0.0
+      SOLL[inds_zero] = 0.0
+      SOLS[inds_zero] = 0.0
+      SOLLD[inds_zero] = 0.0
+      SOLSD[inds_zero] = 0.0
+
 
       if printdebug:
         print("flux sw dn ", flux_sw_dn[:,500])
@@ -1669,7 +1934,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
       # flux_net = flux_lw_net
       flux_net = flux_lw_net + flux_sw_net
       flux_diff = flux_net[1:,:] - flux_net[0:-1,:]
-      dT_rad = -(flux_diff / delta_plev) * 0.009767579681 # * g/cp = 9.80665 / 1004
+      dT_rad = -(flux_diff / delta_plev) * 0.009761357302 # * g/cp = 9.80665 / 1004.64
       # # print("flux_diff  min max", torch.min(flux_diff[:,:]).item(), torch.max(flux_diff[:,:]).item())
       # # print("pres_diff  min max", torch.min(delta_plev[:,:]).item(), torch.max(pres_diff[:,:]).item())
       # # print("dT_rad  min max", torch.min(dT_rad[:,:]).item(), torch.max(dT_rad[:,:]).item())
@@ -1688,23 +1953,23 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
       dT_rad = dT_rad * self.yscale_lev[:,0].unsqueeze(0)
       # print("mean dt rad tot", dT_rad[:,0:2].mean().item())
       # print("plev", plev[:,0:2].mean())
-
-      # print("dT_rad 2  min max", torch.min(dT_rad[:,:]).item(), torch.max(dT_rad[:,:]).item())
-      out_new[:,:,0:1] = out_new[:,:,0:1] + dT_rad.unsqueeze(2)
-
+      
       # #1D (scalar) Output variables: ['cam_out_NETSW', 'cam_out_FLWDS', 'cam_out_PRECSC', 
       # #'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
       out_sfc_rad = torch.cat((flux_sw_dn_sfc, flux_lw_dn_sfc,  SOLS, SOLL, SOLSD, SOLLD ), dim=1)
       out_sfc_rad =  out_sfc_rad * self.yscale_sca_rad
-      
-      return out_new, out_sfc_rad 
+
+      return dT_rad, out_sfc_rad
+      # return out_new, out_sfc_rad 
         
     
     def forward(self, inp_list : List[Tensor]):
         inputs_main     = inp_list[0]
         inputs_aux      = inp_list[1]
-        rnn_mem        = inp_list[2]
+        rnn_mem         = inp_list[2]
         inputs_denorm   = inp_list[3]
+        if self.training:
+          out_new_true = inp_list[4]
         # print("shape inp main", inputs_main.shape, "aux", inputs_aux.shape, "mem", rnn_mem.shape, "denorm", inputs_denorm.shape)
         if self.physical_precip and self.store_precip: 
           P_old = rnn_mem[:,-1,-1] 
@@ -1724,7 +1989,7 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         if self.add_pres:
             sp = torch.unsqueeze(inputs_aux[:,0:1],1)
             # undo scaling
-            sp = sp*35451.17 + 98623.664
+            sp = sp*self.xdiv_sca[0:1] + self.xmean_sca[0:1]
             pres  = self.preslay(sp)
             inputs_main = torch.cat((inputs_main,pres),dim=2)
             play = self.preslay_nonorm(sp)
@@ -1738,11 +2003,11 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         
         # if self.separate_radiation:
         # Do not use inputs -2,-3,-4 (O3, CH4, N2O) or first 10 levels
-        inputs_main_crm = torch.cat((inputs_main[:,10:,0:-4], inputs_main[:,10:,-1:]),dim=2)
+        inputs_main_crm = torch.cat((inputs_main[:, self.ilev_crm:,0:-4], inputs_main[:, self.ilev_crm:,-1:]),dim=2)
 
         if self.use_initial_mlp:
             inputs_main_crm = self.mlp_initial(inputs_main_crm)
-            inputs_main_crm = self.nonlin(inputs_main_crm)  
+            inputs_main_crm = self.tanh(inputs_main_crm)  
             
         # inputs_main_crm = torch.cat((inputs_main_crm,rnn_mem), dim=2)
         inputs_main_crm = torch.cat((inputs_main_crm,rnn_mem[:,:,0:self.nh_mem0]), dim=2)
@@ -1759,10 +2024,10 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
         inputs_sfc = torch.cat((inputs_aux[:,0:6],inputs_aux[:,11:]),dim=1)
 
         hx = self.mlp_surface1(inputs_sfc)
-        hx = self.nonlin(hx)
+        hx = self.tanh(hx)
         if self.use_lstm: 
             cx = self.mlp_surface2(inputs_sfc)
-            # cx = self.nonlin(cx)
+            # cx = self.tanh(cx)
             hidden = (torch.unsqueeze(hx,0), torch.unsqueeze(cx,0))  
         else:
             hidden = torch.unsqueeze(hx,0)
@@ -1823,21 +2088,27 @@ class LSTM_autoreg_torchscript_physrad(nn.Module):
               with torch.autocast(device_type=rnn2out.device.type, enabled=False):
                 rnn2out = rnn2out.float()
                 last_h = last_h.float()
-                out_new, precc, precsc, rnn_mem, dqn_crm, dqv_crm, p_crm_t_new,prec_negative = self.microphysics_decode(inputs_main, 
+                out_new, precc, precsc, rnn_mem, qn_crm, qv_crm, p_crm_t_new,prec_negative = self.microphysics_decode(inputs_main, 
                                                     inputs_denorm, delta_plev, play, plev, P_old, out, rnn_mem, rnn2out, last_h, out_new)
            else:
-              out_new, precc, precsc, rnn_mem, dqn_crm, dqv_crm, p_crm_t_new,prec_negative = self.microphysics_decode(inputs_main, 
+              out_new, precc, precsc, rnn_mem, qn_crm, qv_crm, p_crm_t_new,prec_negative = self.microphysics_decode(inputs_main, 
                                                       inputs_denorm, delta_plev, play, plev, P_old, out, rnn_mem, rnn2out, last_h, out_new)
                 
         else:
-          dqn_crm, p_crm_t_new = None, None
+          qn_crm, p_crm_t_new = None, None
 
 
         if self.training:
           with torch.autocast(device_type=rnn2out.device.type, enabled=False):
-            out_new, out_sfc_rad = self.radiative_transfer(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, rnn_mem, rnn2out, dqn_crm, dqv_crm, p_crm_t_new, out_new)
+            dT_rad, out_sfc_rad = self.radiative_transfer(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
+                                      rnn_mem, rnn2out, qn_crm, qv_crm, p_crm_t_new, out_new_true)
         else:
-          out_new, out_sfc_rad = self.radiative_transfer(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, rnn_mem, rnn2out, dqn_crm, dqv_crm, p_crm_t_new, out_new)
+          dT_rad, out_sfc_rad = self.radiative_transfer(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
+                                      rnn_mem, rnn2out, qn_crm, qv_crm, p_crm_t_new, out_new)
+
+        # print("dT_rad 2  min max", torch.min(dT_rad[:,:]).item(), torch.max(dT_rad[:,:]).item())
+        out_new[:,:,0:1] = out_new[:,:,0:1] + dT_rad.unsqueeze(2)
+
 
         # # rad predicts everything except PRECSC, PRECC
         if self.physical_precip:

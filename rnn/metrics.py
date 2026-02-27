@@ -139,11 +139,15 @@ def huber_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=None):
 
     return err
 
-def metrics_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=None):
+def metrics_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=None, weights_sfc=None):
     
     if weights is not None:
         y_pred_lev = weights*y_pred_lev
         y_true_lev = weights*y_true_lev
+
+    if weights_sfc is not None:
+        y_pred_sfc = weights_sfc*y_pred_sfc
+        y_true_sfc = weights_sfc*y_true_sfc
 
     y_pred_flat =  torch.cat((y_pred_lev.flatten(start_dim=1),y_pred_sfc),dim=1)
     y_true_flat =  torch.cat((y_true_lev.flatten(start_dim=1),y_true_sfc),dim=1)
@@ -168,9 +172,9 @@ def get_huber_flatten(weights):
         return huber_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=weights)
     return my_huber_flatten
 
-def get_metrics_flatten(weights):
+def get_metrics_flatten(weights, weights_sfc):
     def my_loss_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc):
-        return metrics_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=weights)
+        return metrics_flatten(y_true_lev, y_true_sfc, y_pred_lev, y_pred_sfc, weights=weights, weights_sfc=weights_sfc)
     return my_loss_flatten 
 
 def mse(y_true, y_pred):
