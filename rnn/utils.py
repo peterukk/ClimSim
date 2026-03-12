@@ -245,6 +245,10 @@ class train_or_eval_one_epoch:
         j = 0; j2 = 0; k = 0; k2=0; k3 = 0 
         mixing_ratio = 0.0
         device = self.device
+        if self.train:
+            enable_autocast = self.cfg.mp_autocast
+        else:
+            enable_autocast = False
         # torch.cuda.memory._record_memory_history(enabled='all')
 
         if self.cfg.optimizer == "adamwschedulefree":
@@ -260,8 +264,9 @@ class train_or_eval_one_epoch:
             yto_lay = []; yto_sfc = []
             x_true_prev = []; y_true_prev = []; y_pred_prev = []
             inds_rnd = 0; prev_outputs = 0 
-            rnn1_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev_mem, self.model.nh_mem, device=device)
+            rnn_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev_mem, self.model.nh_mem, device=device)
             x_pred = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev, 6, device=device)
+              
             loss_update_start_index = 60
         else:
             loss_update_start_index = 0
@@ -302,7 +307,7 @@ class train_or_eval_one_epoch:
         else:
             use_ar_noise = False 
         for i,data in enumerate(self.loader):
-            # print("shape mem 2 {}".format(model.rnn1_mem.shape))
+            # print("shape mem 2 {}".format(model.rnn_mem.shape))
             x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk, yto_lay_chk, yto_sfc_chk  = data 
 
             x_lay_chk       = x_lay_chk.to(device)
@@ -418,7 +423,7 @@ class train_or_eval_one_epoch:
                     x_lay_raw1 = x_lay_raw0
                   # print("shape inp main", inputs_main.shape)          
                 
-                with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
+                with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=enable_autocast):#self.cfg.mp_autocast):
                     if j>timesteps:
                       if self.replay=="full":
                         # x_lay0 = torch.cat((x_lay0[:,:,0:-5], prev_outputs),dim=2)
@@ -439,14 +444,35 @@ class train_or_eval_one_epoch:
                         x_lay0 = x_lay0_new
                         
                     inp_list = [x_lay0, x_sfc0]
-                    # rnn1_mem[:,:,-1] = 0.0
+                    # rnn_mem[:,:,-1] = 0.0
                     if self.cfg.autoregressive:
-                        inp_list.append(rnn1_mem)
+                        if self.cfg.model_type=="physrad":
+                          # if self.model.track_explicit_subgrid_states and (j%100==0):#j==0:
+                          if self.model.track_explicit_subgrid_states and j==0:
+                            T_crm = torch.repeat_interleave(x_lay_raw1[:,self.model.ilev_crm:,0:1],repeats=self.model.mp_ncol,dim=-1)
+                            qn_crm = x_lay_raw1[:,self.model.ilev_crm:,2:3] + x_lay_raw1[:,self.model.ilev_crm:,3:4]
+                            qn_crm = 1/16*torch.ones_like(T_crm)
+                            # qn_crm = torch.repeat_interleave(qn_crm,repeats=self.model.mp_ncol,dim=-1)
+                            qv_crm = torch.repeat_interleave(x_lay_raw1[:,self.model.ilev_crm:,-1:],repeats=self.model.mp_ncol,dim=-1)
+                            # if j==0:
+                            rnn_mem = torch.stack((rnn_mem, T_crm, qv_crm, qn_crm),dim=0)
+                            # else:
+                            #   # print("reset")
+                            #   T_crm0 = rnn_mem[1]; qv_crm0 = rnn_mem[2]; qn_crm0 = rnn_mem[3]; rnn_mem = rnn_mem[0]
+                            #   # bias_T = T_crm - T_crm0.mean(dim=-1,keepdim=True)
+                            #   # print("old T crm 100 40", T_crm0[100,40,:], "true",T_crm[100,40,0:1] )
+                            #   T_crm = F.relu(T_crm0 + (T_crm - T_crm0.mean(dim=-1,keepdim=True)))
+                            #   # print("cor T crm 100 40", T_crm[100,40,:])
+                            #   qv_crm = F.relu(qv_crm0 + (qv_crm - qv_crm0.mean(dim=-1,keepdim=True)))
+                            #   qn_crm = F.relu(qn_crm0 + (qn_crm - qn_crm0.mean(dim=-1,keepdim=True)))
+                            #   rnn_mem = torch.stack((rnn_mem, T_crm, qv_crm, qn_crm),dim=0)
+                            # # print("shape rnn mem", rnn_mem.shape)
+                        inp_list.append(rnn_mem)
                     if use_ar_noise:
                         inp_list.append(eps_prev)
                     if self.cfg.model_type in ["physrad", "radflux"] or self.cfg.physical_precip: #or self.cfg.mp_mode==-2:
                         inp_list.append(x_lay_raw1)
-                        if self.cfg.model_type=="physrad" and self.cfg.physical_precip:
+                        if self.cfg.model_type=="physrad" and self.cfg.physical_precip and self.train:
                           inp_list.append(target_lay0)
                     # print("1 xlayraw shape", x_lay_raw0.shape)
                     outs = self.model(inp_list)
@@ -455,13 +481,13 @@ class train_or_eval_one_epoch:
                         
                     preds_lay0, preds_sfc0 = outs[0], outs[1]
                     if self.cfg.autoregressive:
-                      rnn1_mem = outs[2]
+                      rnn_mem = outs[2]
                       if use_ar_noise:
                         eps_prev = outs[3]
-                        if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb" and self.model_is_stochastic:
+                        if self.cfg.model_type=="RNN_autoreg_torchscript_perturb" and self.model_is_stochastic:
                           dummy = outs[4]
                       else:
-                        if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb" and self.model_is_stochastic:
+                        if self.cfg.model_type=="RNN_autoreg_torchscript_perturb" and self.model_is_stochastic:
                           dummy=outs[3]
                       if self.cfg.physical_precip:
                         if self.model.return_neg_precip:
@@ -471,15 +497,15 @@ class train_or_eval_one_epoch:
 
                     # if self.cfg.autoregressive:
                     #     if use_ar_noise:
-                    #         if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb" and self.model_is_stochastic:
-                    #             preds_lay0, preds_sfc0, rnn1_mem, eps_prev, dummy = outs
+                    #         if self.cfg.model_type=="RNN_autoreg_torchscript_perturb" and self.model_is_stochastic:
+                    #             preds_lay0, preds_sfc0, rnn_mem, eps_prev, dummy = outs
                     #         else:
-                    #             preds_lay0, preds_sfc0, rnn1_mem, eps_prev = outs
+                    #             preds_lay0, preds_sfc0, rnn_mem, eps_prev = outs
                     #     else:
-                    #         if self.cfg.model_type=="LSTM_autoreg_torchscript_perturb" and self.model_is_stochastic:
-                    #             preds_lay0, preds_sfc0, rnn1_mem, dummy = outs
+                    #         if self.cfg.model_type=="RNN_autoreg_torchscript_perturb" and self.model_is_stochastic:
+                    #             preds_lay0, preds_sfc0, rnn_mem, dummy = outs
                     #         else:
-                    #             preds_lay0, preds_sfc0, rnn1_mem = outs
+                    #             preds_lay0, preds_sfc0, rnn_mem = outs
 
                     # else:
                     #     preds_lay0, preds_sfc0 = outs
@@ -527,7 +553,7 @@ class train_or_eval_one_epoch:
                         yto_lay     = torch.cat(yto_lay)
                         yto_sfc     = torch.cat(yto_sfc)
 
-                    with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=self.cfg.mp_autocast):
+                    with torch.autocast(device_type=device.type, dtype=self.dtype, enabled=enable_autocast):#self.cfg.mp_autocast):
                         
                         if self.model_is_stochastic:
                             loss = lossf(targets_lay, targets_sfc, preds_lay, preds_sfc, timesteps)
@@ -805,6 +831,10 @@ class train_or_eval_one_epoch:
                             r2swsfcgpt = np.corrcoef((sfc_pred[4:,:].flatten(),sfc_true[4:,:].flatten()))[0,1]**2
                             r2lw = np.corrcoef((sfc_pred[1,:],sfc_true[1,:]))[0,1]**2
 
+                            # r2sw = ccc(sfc_pred[0,:],sfc_true[0,:])**2
+                            # r2swsfcgpt = ccc(sfc_pred[4:,:].flatten(),sfc_true[4:,:].flatten())**2
+                            # r2lw = ccc(sfc_pred[1,:],sfc_true[1,:])**2
+
                             qv_before       = x_lay_raw[:,:,-1].cpu().numpy().reshape((-1,60))  
                             qliq_before     = x_lay_raw[:,:,2].cpu().numpy().reshape((-1,60))
                             qice_before     = x_lay_raw[:,:,3].cpu().numpy().reshape((-1,60))
@@ -814,8 +844,8 @@ class train_or_eval_one_epoch:
                             dqn_pred        = ypo_lay[:,:,2] + ypo_lay[:,:,3]
                             qn_new          = qn_before + dqn*1200; qn_new_vint = qn_new.sum(axis=1)
                             qn_new_pred     = qn_before + dqn_pred*1200; qn_new_pred_vint = qn_new_pred.sum(axis=1) 
-                            inds = ((qn_new_vint < 1e-6) & (qn_new_pred_vint < 5e-6))
-                            # inds = (qn_new_vint < 1e-6) 
+                            # inds = ((qn_new_vint < 1e-6) & (qn_new_pred_vint < 5e-6))
+                            inds = (qn_new_vint < 1e-6) 
                             tcw = np.mean(qt_before.sum(axis=1))
                             x_sfc_raw = (x_sfc*self.model.xdiv_sca) + self.model.xmean_sca
                             x_sfc_raw = x_sfc_raw.cpu().numpy()
@@ -874,7 +904,7 @@ class train_or_eval_one_epoch:
                         targets_lay = []; targets_sfc = [] 
                         x_lay_raw = []; yto_lay = []; yto_sfc = []
                         x_sfc = []
-                        rnn1_mem = rnn1_mem.detach()
+                        rnn_mem = rnn_mem.detach()
                         # now pick random indices comprising 50% of total indices, where we will use past predictions instead of past truth
                         inds_all = list(np.arange(self.batch_size))
                         if self.cfg.gradual_mixing_end_epoch != 0: # enable gradual mixing
@@ -934,9 +964,13 @@ class train_or_eval_one_epoch:
                     if self.cfg.physical_precip:
                         if self.model.return_neg_precip:
                             running_precip_neg  = running_precip_neg / fac
-                            print("Negative precipitation mse {:.2f}".format(running_precip_neg))
-                        if self.model.store_precip:
-                            prec = rnn1_mem[:,-1,-1].detach()
+                            if self.model.store_precip: 
+                                prec = rnn_mem[:,-1,-1].detach()
+                                print("Negative precip. mse {:.2f} | Stored precip. mean {:.2f}  max {:.2f}".format(running_precip_neg,torch.mean(prec).item(), torch.max(prec).item()))
+                            else:
+                                print("Negative precipitation mse {:.2f}".format(running_precip_neg))
+                        if self.model.store_precip and not self.model.return_neg_precip:
+                            prec = rnn_mem[:,-1,-1].detach()
                             print("Stored precipitation mean {:.2f}  max {:.2f} min {:.2f}".format(torch.mean(prec).item(), torch.max(prec).item(), torch.min(prec).item()))
                         # print("Weight w1 value:", self.model.w1)
                     running_loss = 0.0; running_energy = 0.0; running_water=0.0; running_cldpath=0.0; running_precip=0.0; running_precip_neg=0.0
@@ -1050,9 +1084,9 @@ class train_or_eval_one_epoch:
         #self.metric_R2_heating.reset(); self.metric_R2_precc.reset()
         # if self.autoregressive:
         #     # self.model.reset_states()
-        #     # model.rnn1_mem = torch.randn_like(model.rnn1_mem)
-        #     # model.rnn1_mem = torch.randn(self.batch_size, nlev, model.nh_mem, device=device)
-        #     model.rnn1_mem = torch.zeros(self.batch_size, nlev, model.nh_mem, device=device)
+        #     # model.rnn_mem = torch.randn_like(model.rnn_mem)
+        #     # model.rnn_mem = torch.randn(self.batch_size, nlev, model.nh_mem, device=device)
+        #     model.rnn_mem = torch.zeros(self.batch_size, nlev, model.nh_mem, device=device)
 
         datatype = "TRAIN" if self.train else "VAL"
         print('Epoch {} {} loss: {:.2e}  MSE: {:.2e}  h-con:  {:.2e}   R2: {:.2f}  R2-dT/dt: {:.2f}   R2-dq/dt: {:.2f}   R2-precc: {:.3f}'.format(epoch+1, datatype, 
@@ -1068,7 +1102,7 @@ class train_or_eval_one_epoch:
         
         del loss, h_con, wcon
         if self.cfg.autoregressive:
-            del rnn1_mem,preds_lay,preds_sfc,targets_lay ,targets_sfc,x_sfc
+            del rnn_mem,preds_lay,preds_sfc,targets_lay ,targets_sfc,x_sfc
             del x_lay_raw, yto_lay, yto_sfc, x_true_prev, y_true_prev, y_pred_prev, prev_outputs, x_pred 
         # if self.cfg.physical_precip: 
         #     print("Weight w1 value:", self.model.w1)

@@ -100,7 +100,7 @@ def main(cfg: DictConfig):
     # mp_mode = -1  # 6 outputs, predict qv + qn + liq_frac 
     # mp_mode = -2  # 6 outputs, predict qv + qn + liq_frac (fraction of cloud that is liquid) + cld_water_frac (fraction of total water that is cloud)
     # physical_precip: attempt to incorporate mass conservation via predicting fluxes and microphysical tendencies, diagnose precipitation  (see models.py)
-    if cfg.model_type != "LSTM_autoreg_torchscript_physprec2":
+    if cfg.model_type != "RNN_autoreg_torchscript_physprec2":
       if cfg.physical_precip and cfg.mp_mode==0:
         raise NotImplementedError("Physical_precip=true not compatible with mp_mode=0 as it requires qn")
 
@@ -305,7 +305,7 @@ def main(cfg: DictConfig):
             elif cfg.mp_mode==-2: #                                         cld_water_frac
                 yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval,  5.914,   1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
             elif cfg.mp_mode==0:
-                if cfg.model_type != "LSTM_autoreg_torchscript_physprec2":
+                if cfg.model_type != "RNN_autoreg_torchscript_physprec2":
                     raise NotImplementedError()
                 yscale_lev_new = yscale_lev
                 # yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval, scaleval, 1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
@@ -477,16 +477,30 @@ def main(cfg: DictConfig):
 
     # ---------------------------------------- SELECT MODEL  -----------------------------------------
 
+    conf = OmegaConf.to_container(cfg)
+    dtypestr = "{}".format(dtype)
+    cwd = os.getcwd()
+    conf["dtypestr"] = dtypestr
+    conf["cwd"] = cwd
+    conf["model_num"] = randrange(10,99999)
+    
+    if cfg.use_wandb:
+        os.environ["WANDB__SERVICE_WAIT"]="400"
+        run = wandb.init(
+            project="climsim",
+            config=conf
+        )       
+    
     print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
 
     if cfg.model_type in ["LSTM","GRU"]:
-        from models import LSTM_autoreg_torchscript, LSTM_torchscript
+        from models import RNN_autoreg_torchscript, LSTM_torchscript
         if cfg.model_type=="LSTM":
             use_lstm=True 
         else:
             use_lstm=False 
         if cfg.autoregressive:
-            model = LSTM_autoreg_torchscript(hyam,hybm,hyai,hybi,
+            model = RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
                         out_scale = yscale_lev,
                         out_sfc_scale = yscale_sca, 
                         xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
@@ -544,9 +558,9 @@ def main(cfg: DictConfig):
                         output_prune = cfg.output_prune,
                         concat = cfg.concat,
                         nh_mem = cfg.nh_mem)#,
-    elif cfg.model_type == "LSTM_autoreg_torchscript_physprec2":
-          from models import LSTM_autoreg_torchscript_physprec2
-          model = LSTM_autoreg_torchscript_physprec2(hyam,hybm,hyai,hybi,
+    elif cfg.model_type == "RNN_autoreg_torchscript_physprec2":
+          from models import RNN_autoreg_torchscript_physprec2
+          model = RNN_autoreg_torchscript_physprec2(hyam,hybm,hyai,hybi,
               out_scale = yscale_lev,
               out_sfc_scale = yscale_sca, 
               xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
@@ -593,10 +607,10 @@ def main(cfg: DictConfig):
                     ar_noise_mode = cfg.ar_noise_mode,
                     ar_tau = cfg.ar_tau,
                     use_surface_memory=cfg.use_surface_memory)#,
-    elif cfg.model_type=="LSTM_autoreg_torchscript_perturb":
-        from models import LSTM_autoreg_torchscript_perturb
+    elif cfg.model_type=="RNN_autoreg_torchscript_perturb":
+        from models import RNN_autoreg_torchscript_perturb
         # if cfg.autoregressive:
-        model =  LSTM_autoreg_torchscript_perturb(hyam,hybm,hyai,hybi,
+        model =  RNN_autoreg_torchscript_perturb(hyam,hybm,hyai,hybi,
                                     out_scale = yscale_lev,
                                     out_sfc_scale = yscale_sca, 
                                     xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
@@ -658,8 +672,8 @@ def main(cfg: DictConfig):
           print("Loading pre-existing shortwave !RAYLEIGH! gas optics model from {}".format(existing_gasopt_file_sw2))
           mlp_gasopt_model_sw2 = load_gas_optics_model(existing_gasopt_file_sw2, device, num_outputs_desired=ng_sw)
 
-        from models_rad import LSTM_autoreg_torchscript_physrad
-        model = LSTM_autoreg_torchscript_physrad(hyam,hybm,hyai,hybi,
+        from models_rad import RNN_autoreg_torchscript_physrad
+        model = RNN_autoreg_torchscript_physrad(hyam,hybm,hyai,hybi,
                     out_scale = yscale_lev,
                     out_sfc_scale = yscale_sca, 
                     xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
@@ -678,27 +692,9 @@ def main(cfg: DictConfig):
                     add_pres = cfg.add_pres,
                     add_stochastic_layer = cfg.add_stochastic_layer, 
                     physical_precip = cfg.physical_precip,
-                    predict_liq_frac=predict_liq_frac,
+                    # predict_liq_frac=predict_liq_frac,
                     output_prune = cfg.output_prune,
                     concat = cfg.concat,
-                    nh_mem = cfg.nh_mem,
-                    mp_mode = cfg.mp_mode)
-    elif cfg.model_type=="radflux":
-        from models_experimental import LSTM_autoreg_torchscript_radflux
-        model = LSTM_autoreg_torchscript_radflux(hyam,hybm,hyai,hybi,
-                    out_scale = yscale_lev,
-                    out_sfc_scale = yscale_sca, 
-                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                    device=device,
-                    nx = nx, nx_sfc=nx_sfc, 
-                    ny = ny, ny_sfc=ny_sfc, 
-                    nneur=cfg.nneur, 
-                    use_initial_mlp = cfg.use_initial_mlp,
-                    use_intermediate_mlp = cfg.use_intermediate_mlp,
-                    add_pres = cfg.add_pres,
-                    output_prune = cfg.output_prune,
-                    use_memory = cfg.autoregressive,
                     nh_mem = cfg.nh_mem,
                     mp_mode = cfg.mp_mode)
     else:
@@ -724,6 +720,9 @@ def main(cfg: DictConfig):
     
     infostr = summary(model)
     num_params = infostr.total_params
+    if cfg.use_wandb:
+        conf["num_params"] = num_params 
+        wandb.config.update(conf)
 
     # ------------------------------------------------------------------------------------------------
     # --------------------------------------- DATA I/O -----------------------------------------------
@@ -889,21 +888,6 @@ def main(cfg: DictConfig):
     else:
       raise NotImplementedError(("scheduler {} not supported".format(cfg.lr_scheduler)))
     
-    conf = OmegaConf.to_container(cfg)
-    dtypestr = "{}".format(dtype)
-    cwd = os.getcwd()
-    conf["dtypestr"] = dtypestr
-    conf["cwd"] = cwd
-    conf["model_num"] = randrange(10,99999)
-    conf["num_params"] = num_params 
-    
-    if cfg.use_wandb:
-        os.environ["WANDB__SERVICE_WAIT"]="400"
-        run = wandb.init(
-            project="climsim",
-            config=conf
-        )       
-    
     train_runner = train_or_eval_one_epoch(train_loader, model, device, dtype, cfg, metrics_det, 
                                            metric_h_con, metric_water_con, metric_rh, batch_size_tr,  train=True, model_is_stochastic=is_stochastic)
     val_runner = train_or_eval_one_epoch(val_loader, model, device, dtype, cfg, metrics_det,
@@ -945,6 +929,7 @@ def main(cfg: DictConfig):
           save_file_torch1 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
           save_file_torch1_gpu = "saved_models/" + MODEL_STR + "_script_gpu.pt"
           save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu2.pt"
+          save_file_torch2_gpu = "saved_models/" + MODEL_STR + "_script_gpu2.pt"
           if is_stochastic:
               model.use_ensemble=False
           if cfg.physical_precip:
@@ -954,7 +939,7 @@ def main(cfg: DictConfig):
               model.return_neg_precip = False
           print("model allow xtra heating: {} ".format(model.allow_extra_heating))
           model.train(False)
-        #   model = model.eval()
+          model = model.eval()
 
         #   # model.compile(mode="max-autotune")
         #   scripted_model = torch . jit . script ( model )
@@ -972,7 +957,6 @@ def main(cfg: DictConfig):
           dummy_mem  = torch.zeros(384,model.nlev_mem, model.nh_mem)
           inp_list = [dummy_input_lay, dummy_input_sfc, dummy_mem, dummy_input_lay]
           scripted_model = torch.jit.trace(model, example_inputs=(inp_list,))
-      
           scripted_model = scripted_model.eval()
           # scripted_model = torch.jit.optimize_for_inference(scripted_model)
           scripted_model.save(save_file_torch2)
@@ -983,6 +967,48 @@ def main(cfg: DictConfig):
           # print(scripted_model)
  
           model = model.to(device)
+          dummy_input_lay = dummy_input_lay.to(device)
+          dummy_input_sfc = dummy_input_sfc.to(device)
+          dummy_mem = dummy_mem.to(device)
+          inp_list = [dummy_input_lay, dummy_input_sfc, dummy_mem, dummy_input_lay]
+          scripted_model = torch.jit.trace(model, example_inputs=(inp_list,))
+          scripted_model.save(save_file_torch2_gpu)
+          print("saved model to: ", save_file_torch2_gpu)
+
+          import torch_tensorrt
+          save_file_torch2_gpu = "saved_models/" + MODEL_STR + "_script_gpu2.ts"
+
+        #   trt_gm = torch_tensorrt.compile(model, ir="dynamo", arg_inputs=inp_list)
+
+        #   input_signature = (
+        #     torch_tensorrt.Input(shape=[384, 60, model.nx0], dtype=torch.float),
+        #     torch_tensorrt.Input(shape=[384, model.nx_sfc0], dtype=torch.float),
+        #     torch_tensorrt.Input(shape=[384,model.nlev_mem, model.nh_mem], dtype=torch.float)
+        #     )
+        #   compile_spec = {
+        #         "input_signature": input_signature,
+        #         "device": torch_tensorrt.Device("gpu:0"),
+        #         "enabled_precisions": {torch.float},
+        #         "min_block_size": 1,
+        #         "require_full_compilation": True,
+        #         "ir":"dynamo",
+        #     }    
+        #   trt_gm = torch_tensorrt.ts.compile(model, **compile_spec)
+        #   input_signature = [
+        #     torch_tensorrt.Input(shape=[384, 60, model.nx0], dtype=torch.float),
+        #     torch_tensorrt.Input(shape=[384, model.nx_sfc0], dtype=torch.float),
+        #     torch_tensorrt.Input(shape=[384,model.nlev_mem, model.nh_mem], dtype=torch.float)
+        #     ]
+
+        #   trt_gm = torch_tensorrt.compile(model, ir="ts", inputs=(inp_list,))
+        #   trt_gm = torch_tensorrt.dynamo.compile(model, inputs=(inp_list,))
+        #   trt_gm = torch_tensorrt.dynamo.trace(model, inputs=(inp_list,))
+        #   trt_gm = torch.compile(model, backend="torch_tensorrt", dynamic=False)
+        #   trt_gm = torch.jit.trace(trt_gm, example_inputs=(inp_list,))
+
+        #   torch_tensorrt.save(trt_gm, save_file_torch2_gpu, output_format="torchscript", inputs=(inp_list,))
+        #   print("saved model to: ", save_file_torch2_gpu)
+
           quit()
     
     prev_nan = False
@@ -1045,7 +1071,10 @@ def main(cfg: DictConfig):
         # if (bool(epoch%2) and (epoch>=cfg.val_epoch_start)):
         if (epoch>=cfg.val_epoch_start):
             print("VALIDATION..")
-            val_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps)
+            model.train(False)
+            with torch.no_grad():
+                val_runner.eval_one_epoch(loss_fn, optimizer, epoch, timesteps)
+            model.train(True)
             if val_runner.loader.dataset.cache:
                 val_runner.loader.dataset.cache_loaded = True
 
