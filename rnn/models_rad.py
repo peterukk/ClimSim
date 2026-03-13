@@ -335,10 +335,20 @@ class RNN_autoreg_torchscript_physrad(nn.Module):
                 self.gas_optics_lw_reduce2 = nn.Linear(self.gas_optics_model_lw.ng, self.ng_lw)
               # and we still need MLPs for cloud optical properties (only abs. optical depth)
               if self.cloud_optics_separate_liq_ice:
-                self.cloud_optics_lw_liq = nn.Linear(self.mp_ncol+self.nh_mem, self.ng_lw)
-                self.cloud_optics_lw_ice = nn.Linear(self.mp_ncol+self.nh_mem, self.ng_lw)
+                print("For LW cloud optics, using the simple E3SM cloud optics scheme and not neural networks")
+                # # self.cloud_optics_lw_liq = nn.Linear(self.mp_ncol+self.nh_mem, self.ng_lw)
+                # # self.cloud_optics_lw_ice = nn.Linear(self.mp_ncol+self.nh_mem, self.ng_lw)
+                # self.cloud_optics_lw_liq = nn.Linear(3, self.ng_lw)
+                # self.cloud_optics_lw_ice = nn.Linear(3, self.ng_lw)
+                # # self.cloud_optics_lw_liq = nn.Linear(3, self.ng_lw)
+                # # self.cloud_optics_lw_ice = nn.Linear(3, self.ng_lw)
+                # # self.cloud_optics_lw_liq2 = nn.Linear(self.ng_lw,1)
+                # # self.cloud_optics_lw_ice2 = nn.Linear(self.ng_lw, 1)
               else:
-                self.cloud_optics_lw = nn.Linear(2*self.mp_ncol+self.nh_mem +2, self.ng_lw)
+                # self.cloud_optics_lw = nn.Linear(2*self.mp_ncol+self.nh_mem +2, self.ng_lw)
+                # self.cloud_optics_lw = nn.Linear(self.mp_ncol+self.nh_mem +2, self.ng_lw)
+                # self.cloud_optics_lw = nn.Linear(3, self.ng_lw)
+                self.cloud_optics_lw = nn.Linear(2 + self.mp_ncol, self.ng_lw)
 
               # self.cloud_optics_lw = nn.Conv1d(2*self.mp_ncol, self.ng_lw, 3, stride=1, padding=1)
               if self.use_cloud_overlap_rnn:
@@ -359,7 +369,8 @@ class RNN_autoreg_torchscript_physrad(nn.Module):
                 self.register_buffer('sw_solar_weights', sw_solar_weights)
               # and we still need MLPs for cloud optical properties (optical depth, ssa, g)
               if self.cloud_optics_separate_liq_ice:
-                self.cloud_optics_sw = nn.Linear(self.mp_ncol+self.nh_mem, 4*self.ng_sw)
+                # self.cloud_optics_sw = nn.Linear(self.mp_ncol+self.nh_mem, 4*self.ng_sw)
+                self.cloud_optics_sw = nn.Linear(3, 4*self.ng_sw)
                 self.cloud_optics_sw2 = nn.Linear(4*self.ng_sw, 4*self.ng_sw)
               else:
                 self.cloud_optics_sw = nn.Linear(2*self.mp_ncol+self.nh_mem +2, 3*self.ng_sw)
@@ -1430,13 +1441,103 @@ class RNN_autoreg_torchscript_physrad(nn.Module):
 
         return out_new, precc, precsc, rnn_mem, T_crm, qv_crm, qn_crm, area_frac.detach().clone(), prec_negative
     
-    def radiative_transfer(self, inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, rnn_mem, rnn2out, 
-                T_crm, qv_crm, qn_crm, T_new, qv_new, qn_new, qliq_new, qice_new):
+    def reitab(self, t: torch.Tensor) -> torch.Tensor:
+      """
+      Interpolate effective radius from temperature using tabulated values.
+      
+      Args:
+          t: Temperature tensor of shape (N,) where N = ncol * pver (or any flat shape)
+      
+      Returns:
+          re: Effective radius tensor, same shape as t
+      """
+      retab = torch.tensor([
+          0.05,      0.05,      0.05,      0.05,      0.05,      0.05,
+          0.055,     0.06,      0.07,      0.08,      0.09,      0.1,
+          0.2,       0.3,       0.40,      0.50,      0.60,      0.70,
+          0.8,       0.9,       1.0,       1.1,       1.2,       1.3,
+          1.4,       1.5,       1.6,       1.8,       2.0,       2.2,
+          2.4,       2.6,       2.8,       3.0,       3.2,       3.5,
+          3.8,       4.1,       4.4,       4.7,       5.0,       5.3,
+          5.6,
+          5.92779,   6.26422,   6.61973,   6.99539,   7.39234,
+          7.81177,   8.25496,   8.72323,   9.21800,   9.74075,   10.2930,
+          10.8765,   11.4929,   12.1440,   12.8317,   13.5581,   14.2319,
+          15.0351,   15.8799,   16.7674,   17.6986,   18.6744,   19.6955,
+          20.7623,   21.8757,   23.0364,   24.2452,   25.5034,   26.8125,
+          27.7895,   28.6450,   29.4167,   30.1088,   30.7306,   31.2943,
+          31.8151,   32.3077,   32.7870,   33.2657,   33.7540,   34.2601,
+          34.7892,   35.3442,   35.9255,   36.5316,   37.1602,   37.8078,
+          38.4720,   39.1508,   39.8442,   40.5552,   41.2912,   42.0635,
+          42.8876,   43.7863,   44.7853,   45.9170,   47.2165,   48.7221,
+          50.4710,   52.4980,   54.8315,   57.4898,   60.4785,   63.7898,
+          65.5604,   71.2885,   75.4113,   79.7368,   84.2351,   88.8833,
+          93.6658,   98.5739,   103.603,   108.752,   114.025,   119.424,
+          124.954,   130.630,   136.457,   142.446,   148.608,   154.956,
+          161.503,   168.262,   175.248,   182.473,   189.952,   197.699,
+          205.728,   214.055,   222.694,   231.661,   240.971,   250.639,
+      ], dtype=t.dtype, device=t.device)
 
+      min_retab = 136.0
+      len_retab = len(retab)  # 138
+
+      index = (t - min_retab).to(torch.int32)
+      index = index.clamp(1, len_retab - 2)  # clamp to [1, 136] for safe index+1 access
+
+      corr = t - t.floor()
+
+      re = retab[index] * (1.0 - corr) + retab[index + 1] * corr
+
+      return re
+    
+    def reltab(self,
+            t: torch.Tensor,          # (N,) flattened from (ncol, pver)
+            landfrac: torch.Tensor,   # (N,) — repeated across levels by caller
+            icefrac: torch.Tensor,    # (N,) — repeated across levels by caller
+            snowh: torch.Tensor,      # (N,) — repeated across levels by caller
+        ) -> torch.Tensor:
+            """
+            Compute liquid cloud droplet effective radius.
+
+            Args:
+                t:        Temperature, shape (N,) where N = ncol * pver
+                landfrac: Land fraction, shape (N,) — ncol values repeated pver times
+                icefrac:  Ice fraction,  shape (N,) — ncol values repeated pver times
+                snowh:    Snow depth (m, water equivalent), shape (N,) — same tiling
+
+            Returns:
+                rel: Liquid effective drop size in microns, shape (N,)
+            """
+            rliqocean = 14.0
+            rliqice   = 14.0
+            rliqland  =  8.0
+
+            # Temperature-dependent baseline: continental air, ramped toward ocean value when cold
+            rel = rliqland + (rliqocean - rliqland) * ((273.15 - t) * 0.05).clamp(0.0, 1.0)
+
+            # Modify for snow depth over land
+            rel = rel + (rliqocean - rel) * (snowh * 10.0).clamp(0.0, 1.0)
+
+            # Ramp from land (polluted) to ocean (clean)
+            rel = rel + (rliqocean - rel) * (1.0 - landfrac).clamp(0.0, 1.0)
+
+            # Ramp toward sea-ice value in presence of ice
+            rel = rel + (rliqice - rel) * icefrac.clamp(0.0, 1.0)
+
+            return rel
+    
+    def radiative_transfer(self, inputs_main, inputs_aux0, inputs_denorm, play, plev, delta_plev, rnn_mem, rnn2out, 
+                T_crm, qv_crm, qn_crm, T_new, qv_new, qn_new, qliq_new, qice_new, area_frac):
+      
+      # McICA philosophy of using area fractions: for each g-point, sample the cloud state from the CRM values according
+      # to the probability given by their corresponding area_frac. Thus for a given g-point, we could sample the same 
+      # index of qn_crm 
+      # replace qv_crm, qn_crm by qice_crm, qliq_crm?
       
       batch_size, nlev, nx = inputs_main.shape 
       device = inputs_main.device
-      
+      inputs_aux =  (inputs_aux0*self.xdiv_sca) + self.xmean_sca
+
       # T_before        = inputs_denorm[:,:,0:1] 
 
       # ----------------- PHYSICAL RADIATIVE TRANSFER ----------------
@@ -1470,12 +1571,19 @@ class RNN_autoreg_torchscript_physrad(nn.Module):
       col_dry = torch.reshape(col_dry,(nlev,batch_size,1))
 
       if self.cloud_optics_separate_liq_ice:
-        cldpath_liq       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qliq_new[:,self.ilev_crm:],0,1).contiguous()
-        cldpath_ice       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qice_new[:,self.ilev_crm:],0,1).contiguous()
+        # cldpath_liq       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qliq_new[:,self.ilev_crm:],0,1).contiguous()
+        # cldpath_ice       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qice_new[:,self.ilev_crm:],0,1).contiguous()
+        liq_frac          = self.temperature_scaling(T_crm.squeeze())
+        qliq_crm          = qn_crm*liq_frac 
+        qice_crm          = qn_crm*(1-liq_frac)
+        cldpath_liq       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qliq_crm,0,1).contiguous()
+        cldpath_ice       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qice_crm,0,1).contiguous()
+        cldpath_tot       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qn_crm,0,1).contiguous()
       else:
         # just use column dry air "path" to scale
         # cldpath = col_dry[self.ilev_crm:,:] #0.002
-        cldpath       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qn_new[:,self.ilev_crm:],0,1).contiguous()
+        # cldpath       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qn_new[:,self.ilev_crm:],0,1).contiguous()
+        cldpath       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qn_crm,0,1).contiguous()
 
       # print("cldpath min max mean", cldpath.min().item(), cldpath.max().item(), cldpath.mean().item())
       # inds_do_clouds = (cldpath.squeeze() > 1e-5)
@@ -1522,19 +1630,48 @@ class RNN_autoreg_torchscript_physrad(nn.Module):
           ql_new0     = 3.5 * torch.sqrt((delta_plev[:,self.ilev_crm:]/self.g)*qliq_new[:,self.ilev_crm:])
           # print("qn_new_crm0  min max mean", torch.min(qn_new_crm0).item(), torch.max(qn_new_crm0).item(), qn_new_crm0.mean())
 
+          T_new1 = T_new[:,self.ilev_crm:].transpose(0,1).contiguous().view(-1)
+          ice_eff_rad = self.reitab(T_new1)
+          ice_eff_rad = ice_eff_rad.view((self.nlev_crm, batch_size,1))
+          icefrac   =  torch.repeat_interleave(inputs_aux[:,12].view(1,-1),self.nlev_crm,dim=0)
+          landfrac  =  torch.repeat_interleave(inputs_aux[:,13].view(1,-1),self.nlev_crm,dim=0)
+          snowh     =  torch.repeat_interleave(inputs_aux[:,15].view(1,-1),self.nlev_crm,dim=0)
+          liq_eff_rad = self.reltab(T_new1, landfrac.view(-1), icefrac.view(-1), snowh.view(-1))
+          liq_eff_rad = liq_eff_rad.view((self.nlev_crm, batch_size,1))
+          T_new1      = T_new1.view((self.nlev_crm, batch_size,1))
+
+          # T_new1        = (T_new1 - 170.0 ) / (140.0)
+          # liq_eff_rad   = (liq_eff_rad - 7.0 ) / (5.5)
+          # ice_eff_rad   = (ice_eff_rad - 3.5 ) / (247.0)
+          # T_new1        = T_new1 / 250
+          # liq_eff_rad   = liq_eff_rad / 13.5
+          # ice_eff_rad   = ice_eff_rad / 125.0
+
+          # print("min max mean ice_eff_rad", ice_eff_rad.min().item(), ice_eff_rad.max().item(), ice_eff_rad.mean().item())
+          # print("min max mean liq_eff_rad", liq_eff_rad.min().item(), liq_eff_rad.max().item(), liq_eff_rad.mean().item())
+          # print("min max mean T_new1", T_new1.min().item(), T_new1.max().item(), T_new1.mean().item())
+
           # qn_new1        = 1 - torch.exp(-qn_new * self.lbd_qn)
           # print("qn_new1  min max", torch.min(qn_new1).item(), torch.max(qn_new1).item(), qn_new1.mean(), qn_new1.std() )
           # x_cld = torch.cat((qn_new_crm0, t_new_crm, rnn_mem), dim=2)
           if self.cloud_optics_separate_liq_ice:
-            x_cld = torch.cat((qn_new_crm0, rnn_mem), dim=2)
+            # x_cld = torch.cat((qn_new_crm0, rnn_mem), dim=2)
+            x_cld =  torch.cat((T_new1, ice_eff_rad, liq_eff_rad), dim=2)
           else:
-            x_cld = torch.cat((ql_new0, qice_new0, qn_new_crm0, t_new_crm, rnn_mem), dim=2)
-          x_cld = torch.transpose(x_cld,0,1).contiguous()
+            # x_cld = torch.cat((ql_new0, qice_new0, qn_new_crm0, t_new_crm, rnn_mem), dim=2)
+
+            # x_cld = torch.cat((ql_new0, qice_new0, t_new_crm, rnn_mem), dim=2)
+            # x_cld = torch.transpose(x_cld,0,1).contiguous()
+
+            x_cld =  torch.cat((T_new1, ice_eff_rad, liq_eff_rad), dim=2)
+            x_cld =  torch.cat((torch.transpose(t_new_crm,0,1).contiguous(),torch.transpose(area_frac,0,1).contiguous(), ice_eff_rad, liq_eff_rad), dim=2)
+
           if self.rad_cloud_masking:
             # print("shape do cld", x_cld[inds_do_clouds,:].shape, "not", x_cld[~inds_do_clouds,:].shape)
             x_cld = x_cld[:,inds_do_clouds,:]
             # print("shape x cld", x_cld.shape)
           # x_cld = torch.cat((qn_new_crm1,liq_frac_diagnosed.unsqueeze(2)), dim=2)
+
           if self.use_existing_gas_optics_lw:  
             zero_gases = torch.zeros(batch_size, self.nlev, 11, device=device)
             x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, ch4, n2o, zero_gases), dim=2)
@@ -1567,10 +1704,17 @@ class RNN_autoreg_torchscript_physrad(nn.Module):
               print("tau_lw1 min max mean", tau_lw.min().item(), tau_lw.max().item(), tau_lw.mean().item())
               print("pfrac1 min max mean", pfrac.min().item(), pfrac.max().item(), pfrac.mean().item())
 
-            if self.cloud_optics_separate_liq_ice:
-              tau_lw_cld_liq0 = self.cloud_optics_lw_liq(x_cld)
-              tau_lw_cld_ice0 = self.cloud_optics_lw_ice(x_cld)
-            else:
+            # if self.cloud_optics_separate_liq_ice:
+            #   tau_lw_cld_liq0 = self.cloud_optics_lw_liq(x_cld)
+            #   tau_lw_cld_ice0 = self.cloud_optics_lw_ice(x_cld)
+            #   # # tau_lw_cld_liq0 = self.softplus(tau_lw_cld_liq0)
+            #   # # tau_lw_cld_ice0 = self.softplus(tau_lw_cld_ice0)
+            #   # tau_lw_cld_liq0 = self.cloud_optics_lw_liq2(tau_lw_cld_liq0)
+            #   # tau_lw_cld_ice0 = self.cloud_optics_lw_ice2(tau_lw_cld_ice0)
+            #   # tau_lw_cld_liq0 = torch.repeat_interleave(tau_lw_cld_liq0,self.ng_lw,dim=2)
+            #   # tau_lw_cld_ice0 = torch.repeat_interleave(tau_lw_cld_ice0,self.ng_lw,dim=2)
+            # else:
+            if not self.cloud_optics_separate_liq_ice:
               tau_lw_cld = self.cloud_optics_lw(x_cld)
 
             if self.use_cloud_overlap_rnn:
@@ -1599,9 +1743,20 @@ class RNN_autoreg_torchscript_physrad(nn.Module):
 
             # ---
             if self.cloud_optics_separate_liq_ice:
-              tau_lw_cld_liq      = cldpath_liq*self.relu(tau_lw_cld_liq.squeeze())
-              tau_lw_cld_ice      = cldpath_ice*self.relu(tau_lw_cld_ice.squeeze())
-              tau_lw_cld          = tau_lw_cld_liq + tau_lw_cld_ice
+              # tau_lw_cld_liq      = cldpath_liq*self.relu(tau_lw_cld_liq.squeeze())
+              # tau_lw_cld_ice      = cldpath_ice*self.relu(tau_lw_cld_ice.squeeze())
+
+              # slingo_liq_optics_lw: https://github.com/NVlabs/E3SM/blob/main/components/eam/src/physics/rrtmgp/slingo.F90#L147
+              # Strange that there's no spectral dependence, cannot be very accurate!
+              icefrac         = cldpath_ice / torch.clamp(cldpath_tot, min=1.0e-8)
+              tau_lw_cld_liq  =  1000*cldpath_tot*0.090361*(1-icefrac)
+
+              # ec_ice_optics_lw : https://github.com/NVlabs/E3SM/blob/main/components/eam/src/physics/rrtmgp/ebert_curry.F90#L132
+              tau_lw_cld_ice  = 1000*cldpath_tot*icefrac*(0.005 + 1.0 / ice_eff_rad.clamp(13.0, 130.0))
+              tau_lw_cld      = tau_lw_cld_liq + tau_lw_cld_ice
+              idx         = torch.randperm(self.ng_lw)
+              tau_lw_cld  = tau_lw_cld[:,:,idx]
+              # print("minmaxmean taulwcld", tau_lw_cld.min().item(), tau_lw_cld.max().item(), tau_lw_cld.mean().item())
             else:
               tau_lw_cld = cldpath*self.relu(tau_lw_cld)# 0.01*self.relu(tau_lw_cld)
 
@@ -1779,7 +1934,8 @@ class RNN_autoreg_torchscript_physrad(nn.Module):
       plev        = torch.transpose(plev.squeeze(),0,1).contiguous()
       tlev        = self.interpolate_tlev_batchlast(T_new.squeeze(), play.squeeze(), plev.squeeze()) # (nlev+1, nb)
       # print("tlev min max mean", tlev.min().item(), tlev.max().item(), tlev.mean().item())
-      lwup_sfc    = (inputs_aux[:,11]*self.xdiv_sca[11]) + self.xmean_sca[11]
+      # lwup_sfc    = (inputs_aux[:,11]*self.xdiv_sca[11]) + self.xmean_sca[11]
+      lwup_sfc    = inputs_aux[:,11]
 
       # BELOW IS INCORRECT IF we just used the raw Planck fractions predicted by RRTMGP-NN, without reduction/changing last layer.
       # RRTMGP planck fracs sum to 1 only within bands, not across all g-points. 
@@ -2317,10 +2473,10 @@ class RNN_autoreg_torchscript_physrad(nn.Module):
             # qv_crm = qv_crm * scale
             # print("mmm qn_crm 1", qn_crm.min().item(), qn_crm.max().item(), qn_crm.mean().item())
 
-            # qn_crm_rad      = qn_crm.detach().clone()
-            # qn_mean_old     = (qn_crm_rad * area_frac).sum(dim=-1, keepdim=True)
+            # qn_crm          = qn_crm.detach().clone()
+            # qn_mean_old     = (qn_crm * area_frac).sum(dim=-1, keepdim=True)
             # scale           = (qn[:,self.ilev_crm:]/qn_mean_old).nan_to_num(nan=0.0, posinf=0.0)
-            # qn_crm_rad      = qn_crm_rad * scale
+            # qn_crm          = qn_crm * scale
 
             # qn_crm_rad = qn_crm.detach().clone()
             # qn_mean_old = (qn_crm_rad * area_frac).sum(dim=-1, keepdim=True)
@@ -2335,7 +2491,7 @@ class RNN_autoreg_torchscript_physrad(nn.Module):
 
           with torch.autocast(device_type=rnn2out.device.type, enabled=False):
             dT_rad, out_sfc_rad = self.radiative_transfer(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
-                                      rnn_mem, rnn2out, T_crm, qv_crm, qn_crm, T, qv, qn, qliq, qice)
+                                      rnn_mem, rnn2out, T_crm, qv_crm, qn_crm, T, qv, qn, qliq, qice, area_frac)
         else:
           if self.update_states_for_rad:
             out_denorm    = out_new / self.yscale_lev 
@@ -2348,7 +2504,7 @@ class RNN_autoreg_torchscript_physrad(nn.Module):
             qliq          = liq_frac_constrained.unsqueeze(2)*qn
             qice          = (1-liq_frac_constrained).unsqueeze(2)*qn
           dT_rad, out_sfc_rad = self.radiative_transfer(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
-                                      rnn_mem, rnn2out, T_crm, qv_crm, qn_crm, T, qv, qn, qliq, qice)
+                                      rnn_mem, rnn2out, T_crm, qv_crm, qn_crm, T, qv, qn, qliq, qice, area_frac)
 
         # print("dT_rad 2  min max", torch.min(dT_rad[:,:]).item(), torch.max(dT_rad[:,:]).item())
         out_new[:,:,0:1] = out_new[:,:,0:1] + dT_rad.unsqueeze(2)

@@ -938,9 +938,6 @@ class train_or_eval_one_epoch:
 
                     r2raw = self.metric_R2.compute()
 
-                    print("R2SW: {:.2f} R2SWsfcgpt: {:.2f} R2LW: {:.2f} R2dTtop: {:.2f} | Clear-sky R2SW: {:.2f}  R2LW: {:.2f} R2dTtop: {:.2f} biasdTtop: {:.2e} | TCW: {:.2e} SWalb: {:.2e} SWin: {:.2e}".format(r2sw, 
-                        r2swsfcgpt, r2lw, r2_heating_top, r2swclearsky, r2lwclearsky, r2_heating_top_clearsky, bias_heating_top, tcw, swalb, incflux))
-
                     if self.model_is_stochastic:
                         running_var = running_var / fac
                         running_det = running_det / fac
@@ -952,15 +949,19 @@ class train_or_eval_one_epoch:
                     else:
                         print("[{:d}, {:d}] Loss: {:.2e}  h: {:.2e}  w: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f} rh-MSE: {:.2e}, took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
                                                         j+1, running_loss,running_energy,running_water,running_precip, running_bias, r2raw, running_rh_mse, elaps, t_comp), flush=True)
+                    
+                    print("RAD:   R2 SW {:.2f}  SWsfcgpt {:.2f}  LW {:.2f}  dTtop {:.2f} | Clearsky SW {:.2f} LW {:.2f} dTtop {:.2f} biasdTtop {:.2e} | TCW {:.2e} SWalb {:.2e} SWin {:.2e}".format(r2sw, 
+                                r2swsfcgpt, r2lw, r2_heating_top, r2swclearsky, r2lwclearsky, r2_heating_top_clearsky, bias_heating_top, tcw, swalb, incflux))
+                           
                     # print("R2 q {:.2f} liq {:.2f} ice {:.2f}".format(np.nanmean(r2_lev[:,1]),np.nanmean(r2_lev[:,2]),np.nanmean(r2_lev[:,3])))
                     if self.cfg.mp_mode==-1:
-                      print("R2 raw qv {:.2f} qn {:.2f} liqfrac {:.2f} wcon-p {:.2e} wcon-t {:.2e} cldpath {:.2e} qvpos {:.2e} qnpos {:.2e}".format(np.nanmean(r2_lev_raw[:,1]),
+                      print("MOIST: R2 qv {:.2f} qn {:.2f} liqfrac {:.2f} wcon-p {:.2e} wcon-t {:.2e} cldpath {:.2e} qvpos {:.2e} qnpos {:.2e}".format(np.nanmean(r2_lev_raw[:,1]),
                             np.nanmean(r2_lev_raw[:,2]),np.nanmean(r2_lev_raw[:,3]),running_wcon, running_wcon_true, running_cldpath, running_qv_pos, running_qn_pos))
 
                     elif self.cfg.mp_mode==-2:
-                      print("R2 raw qtot {:.2f} cldfrac {:.2f} liqfrac {:.2f} wcon-p {:.2e}  wcon-t {:.2e}  cldpath {:.2e} qvpos {:.2e} qnpos {:.2e}".format(np.nanmean(r2_lev_raw[:,1]),
+                      print("MOIST: R2 qtot {:.2f} cldfrac {:.2f} liqfrac {:.2f} wcon-p {:.2e}  wcon-t {:.2e}  cldpath {:.2e} qvpos {:.2e} qnpos {:.2e}".format(np.nanmean(r2_lev_raw[:,1]),
                             np.nanmean(r2_lev_raw[:,2]),np.nanmean(r2_lev_raw[:,3]),running_wcon, running_wcon_true, running_cldpath, running_qv_pos, running_qn_pos))
-                                                                                                                             
+                                                                             
                     if self.cfg.physical_precip:
                         if self.model.return_neg_precip:
                             running_precip_neg  = running_precip_neg / fac
@@ -973,6 +974,7 @@ class train_or_eval_one_epoch:
                             prec = rnn_mem[:,-1,-1].detach()
                             print("Stored precipitation mean {:.2f}  max {:.2f} min {:.2f}".format(torch.mean(prec).item(), torch.max(prec).item(), torch.min(prec).item()))
                         # print("Weight w1 value:", self.model.w1)
+                    print("--------------------------------------------------------------------------")
                     running_loss = 0.0; running_energy = 0.0; running_water=0.0; running_cldpath=0.0; running_precip=0.0; running_precip_neg=0.0
                     running_bias = 0.0; running_wcon = 0.0; running_wcon_true = 0.0; running_rh_mse=0.0; running_qv_pos=0.0; running_qn_pos=0.0
                     t0_it = time.time()
