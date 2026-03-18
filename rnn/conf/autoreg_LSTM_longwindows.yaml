@@ -85,6 +85,7 @@ strat_temp_weight_factor: 1.0
 scalar_weight_factor: 1.0 
 
 nh_mem: 16
+mp_ncol: 16
 nneur:
 - 144
 - 144

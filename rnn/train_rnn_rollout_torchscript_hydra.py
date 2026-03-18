@@ -696,6 +696,7 @@ def main(cfg: DictConfig):
                     output_prune = cfg.output_prune,
                     concat = cfg.concat,
                     nh_mem = cfg.nh_mem,
+                    mp_ncol = cfg.mp_ncol,
                     mp_mode = cfg.mp_mode)
     else:
       print("using SSM")

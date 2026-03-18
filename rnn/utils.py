@@ -863,7 +863,7 @@ class train_or_eval_one_epoch:
                             epoch_R2flwds_clearsky +=r2lwclearsky
                             r2_heating_top = np.corrcoef((yto_lay[:,1:10,0].flatten(),ypo_lay[:,1:10,0].flatten()))[0,1]**2
                             # r2_heating_top_clearsky = np.corrcoef((yto_lay[inds,1:10,0].flatten(),ypo_lay[inds,1:10,0].flatten()))[0,1]**2
-                            r2_heating_top_clearsky = ccc(yto_lay[inds,1:10,0].flatten(),ypo_lay[inds,1:10,0].flatten())**2
+                            # r2_heating_top_clearsky = ccc(yto_lay[inds,1:10,0].flatten(),ypo_lay[inds,1:10,0].flatten())**2
                             bias_heating_top = np.mean(yto_lay[inds,1:10,0]) - np.mean(ypo_lay[inds,1:10,0])
                             epoch_bias_heating_top +=bias_heating_top
                             prec_pred = sfc_pred[3,:]
@@ -950,8 +950,8 @@ class train_or_eval_one_epoch:
                         print("[{:d}, {:d}] Loss: {:.2e}  h: {:.2e}  w: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f} rh-MSE: {:.2e}, took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
                                                         j+1, running_loss,running_energy,running_water,running_precip, running_bias, r2raw, running_rh_mse, elaps, t_comp), flush=True)
                     
-                    print("RAD:   R2 SW {:.2f}  SWsfcgpt {:.2f}  LW {:.2f}  dTtop {:.2f} | Clearsky SW {:.2f} LW {:.2f} dTtop {:.2f} biasdTtop {:.2e} | TCW {:.2e} SWalb {:.2e} SWin {:.2e}".format(r2sw, 
-                                r2swsfcgpt, r2lw, r2_heating_top, r2swclearsky, r2lwclearsky, r2_heating_top_clearsky, bias_heating_top, tcw, swalb, incflux))
+                    print("RAD:   R2 SW {:.2f}  SWsfcgpt {:.2f}  LW {:.2f}  dTtop {:.2f} | Clearsky SW {:.2f} LW {:.2f} bias-dTtop {:.2e}".format(r2sw, 
+                                r2swsfcgpt, r2lw, r2_heating_top, r2swclearsky, r2lwclearsky, bias_heating_top))
                            
                     # print("R2 q {:.2f} liq {:.2f} ice {:.2f}".format(np.nanmean(r2_lev[:,1]),np.nanmean(r2_lev[:,2]),np.nanmean(r2_lev[:,3])))
                     if self.cfg.mp_mode==-1:
