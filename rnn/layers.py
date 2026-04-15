@@ -19,6 +19,23 @@ import numpy as np
 from typing import Final 
 import time 
 
+
+class PositiveLinear(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(PositiveLinear, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.weight)
+
+    # def forward(self, input):
+    #     return nn.functional.linear(input, self.weight.exp())
+    def forward(self, input):
+        return nn.functional.linear(input, self.weight.clamp(min=0.))
+        
 class LayerPressure(nn.Module):
     def __init__(self,hyam, hybm, name='LayerPressure',
                  norm=True,

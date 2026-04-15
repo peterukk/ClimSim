@@ -83,7 +83,8 @@ def main(cfg: DictConfig):
 
     if cfg.save_loaded_model_and_quit:
       import settings 
-      settings.change_compile_setting(True)
+      disable_compile=True
+      settings.change_compile_setting(disable_compile)
       cfg.use_wandb=False
 
     # torch.autograd.set_detect_anomaly(True)
@@ -95,14 +96,16 @@ def main(cfg: DictConfig):
     # SELECT OUTPUTS / MICROPHYSICS CONSTRAINT
     #          ['ptend_t', 'ptend_q0001', 'ptend_q0002', 'ptend_q0003', 'ptend_u', 'ptend_v']
     # Temperature tendency, q-wv tendency, cloud liquid tendency, cloud ice tendency, wind tendencies
-    # mp_mode = 0   # regular 6 outputs
-    # mp_mode = 1   # 5 outputs, predict qv + qn, liq_frac DIAGNOSED from temperature (Hu et al.)
-    # mp_mode = -1  # 6 outputs, predict qv + qn + liq_frac 
-    # mp_mode = -2  # 6 outputs, predict qv + qn + liq_frac (fraction of cloud that is liquid) + cld_water_frac (fraction of total water that is cloud)
-    # physical_precip: attempt to incorporate mass conservation via predicting fluxes and microphysical tendencies, diagnose precipitation  (see models.py)
-    if cfg.model_type != "RNN_autoreg_torchscript_physprec2":
-      if cfg.physical_precip and cfg.mp_mode==0:
-        raise NotImplementedError("Physical_precip=true not compatible with mp_mode=0 as it requires qn")
+    # Temperature and wind tendencies are predicted in each case, but humidity/water outputs differ
+    # mp_mode = 0   # regular 6 outputs: tendencies of (T), qv, qliq, qice, (u), (v)
+    # mp_mode = 1   # 5 outputs: qv and qn; liq_frac DIAGNOSED from temperature (Hu et al.)
+    # mp_mode = -1  # 6 outputs: qv, qn and liq_frac 
+    # mp_mode = -2  # 6 outputs: (qtot=qv+qn), liq_frac (fraction of cloud that is liquid) and cld_water_frac (fraction of total water that is cloud)
+    
+    # predict_fluxes: attempt to incorporate mass conservation via predicting fluxes and microphysical tendencies, diagnose precipitation  (see models.py)
+    # if cfg.model_type != "RNN_autoreg_torchscript_physprec2":
+    #   if cfg.predict_fluxes and cfg.mp_mode==0:
+    #     raise NotImplementedError("predict_fluxes=true not compatible with mp_mode=0 as it requires qn")
 
     if cfg.memory=="None":
         cfg.autoregressive=False
@@ -153,14 +156,15 @@ def main(cfg: DictConfig):
     print("data utils initialized", flush=True)
     data.set_to_v4_rnn_vars()
     
-    hyam = torch.from_numpy(data.grid_info['hyam'].values).to(device, torch.float32)
-    hybm = torch.from_numpy(data.grid_info['hybm'].values).to(device, torch.float32)
-    hyai = torch.from_numpy(data.grid_info['hyai'].values).to(device, torch.float32)
-    hybi = torch.from_numpy(data.grid_info['hybi'].values).to(device, torch.float32)
-    sp_max = torch.from_numpy(data.input_max['state_ps'].values).to(device, torch.float32)
-    sp_min = torch.from_numpy(data.input_min['state_ps'].values).to(device, torch.float32)
-    sp_mean = torch.from_numpy(data.input_mean['state_ps'].values).to(device, torch.float32)
-    
+    # hyam = torch.from_numpy(data.grid_info['hyam'].values).to(device, torch.float32)
+    # hybm = torch.from_numpy(data.grid_info['hybm'].values).to(device, torch.float32)
+    # hyai = torch.from_numpy(data.grid_info['hyai'].values).to(device, torch.float32)
+    # hybi = torch.from_numpy(data.grid_info['hybi'].values).to(device, torch.float32)
+    hyam = np.float32(data.grid_info['hyam'].values)
+    hybm = np.float32(data.grid_info['hybm'].values)
+    hyai = np.float32(data.grid_info['hyai'].values)
+    hybi = np.float32(data.grid_info['hybi'].values)
+
     hf = h5py.File(tr_data_path, 'r')
     print(hf.keys()) # <KeysViewHDF5 ['input_lev', 'input_sca', 'output_lev', 'output_sca']>
     print(hf['input_lev'].attrs.keys())
@@ -212,13 +216,8 @@ def main(cfg: DictConfig):
         vars_2D_outp.remove('ptend_q0002')
         vars_2D_outp.remove('ptend_q0003')
         vars_2D_outp.insert(2,"ptend_qn")
-        # if not cfg.output_norm_per_level:
-        #     raise NotImplementedError("output_norm_per_level=false not compatible with mp_mode !=0")
 
     if cfg.include_prev_outputs:
-        # if not cfg.output_norm_per_level:
-        #     raise NotImplementedError("Only level-specific norm coefficients saved for previous tendency outputs")
-
         vars_2D_inp.append('state_t_prvphy')
         vars_2D_inp.append('state_q0001_prvphy')
         vars_2D_inp.append('state_q0002_prvphy')
@@ -237,11 +236,7 @@ def main(cfg: DictConfig):
         skip_first_index=True 
     else:
         skip_first_index=False
-
-    # if cfg.use_surface_memory:
-    #     nx_sfc = nx_sfc + 2
         
-    # if use_mp_constraint:
     if cfg.mp_mode>0:
         ny_pp = ny # The 6 original outputs will be after postprocessing
         ny = ny - 1 # The model itself only has 5 outputs (total cloud water)
@@ -253,11 +248,11 @@ def main(cfg: DictConfig):
         print("mp mode was <0, we are PREDICTING liquid fraction")
     else:
         predict_liq_frac=False
-
+        
     if cfg.use_rh_loss:
         if not (cfg.include_q_input or cfg.rh_input_to_q):
             raise NotImplementedError("use_rh_loss was on, need q input, setting include_q_input or rh_input_to_q to true")
-
+    if cfg.model_type=="physRNN": cfg.predict_fluxes = True 
     print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
 
     yscale_sca = output_scale[vars_1D_outp].to_dataarray(dim='features', name='outputs_sca').transpose().values
@@ -292,7 +287,7 @@ def main(cfg: DictConfig):
         if cfg.input_norm_per_level:
             raise NotImplementedError()
             
-        if cfg.physical_precip:
+        if cfg.predict_fluxes:
             # scaleval = 1.0
             # scaleval = 1.0e8
             scaleval = 1.58e8
@@ -305,10 +300,14 @@ def main(cfg: DictConfig):
             elif cfg.mp_mode==-2: #                                         cld_water_frac
                 yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval,  5.914,   1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
             elif cfg.mp_mode==0:
-                if cfg.model_type != "RNN_autoreg_torchscript_physprec2":
-                    raise NotImplementedError()
-                yscale_lev_new = yscale_lev
-                # yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval, scaleval, 1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+                # if cfg.model_type != "RNN_autoreg_torchscript_physprec2":
+                #     raise NotImplementedError()
+                yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval, scaleval, scaleval,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+            elif cfg.mp_mode==1:
+                yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval, scaleval,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
+                print("GOT HERE")
+                print("yscale lev 1", yscale_lev_new[55:,1], "2",yscale_lev_new[55:,2])
+
             else:
                 raise NotImplementedError()
             loss_weights =  yscale_lev / yscale_lev_new
@@ -405,7 +404,6 @@ def main(cfg: DictConfig):
                 # xmean_lev[0,1] = 0.0
                 xmean_lev[0,1] = q_mean
 
-
         xmin_lev = np.repeat(xmin_lev,nlev,axis=0)
         xmax_lev = np.repeat(xmax_lev,nlev,axis=0)
         xmean_lev = np.repeat(xmean_lev, nlev,axis=0)
@@ -413,7 +411,8 @@ def main(cfg: DictConfig):
     
     ycoeffs = (yscale_lev, yscale_sca)
     print("Y coeff shapes:", yscale_lev.shape, yscale_sca.shape)
-    
+    print("yscale lev 1", yscale_lev[55:,1], "2",yscale_lev[55:,2])
+
     xdiv_lev = xmax_lev - xmin_lev
     if xdiv_lev[-1,-1] == 0.0:
         # the division coefficients for N2O, CH4 are zero in lower atmosphere, fix:
@@ -491,168 +490,43 @@ def main(cfg: DictConfig):
             config=conf
         )       
     
+    coeffs = {
+        'yscale_lev': yscale_lev, 'yscale_sca': yscale_sca,
+        'xmean_lev': xmean_lev, 'xmean_sca': xmean_sca,       
+        'xdiv_lev': xdiv_lev, 'xdiv_sca': xdiv_sca,  
+        'hyam': hyam, 'hybm': hybm,       
+        'hyai': hyai, 'hybi': hybi,
+        'lbd_qc':lbd_qc, 'lbd_qi':lbd_qi, 'lbd_qn':lbd_qn
+    }
+    cfg.nx = nx
+    cfg.nx_sfc = nx_sfc
+    cfg.ny = ny
+    cfg.ny_sfc = ny_sfc
+    cfg.nlev = nlev
+    if cfg.model_type=="LSTM":
+        cfg.use_lstm=True 
+    else:
+        cfg.use_lstm=False 
     print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
 
     if cfg.model_type in ["LSTM","GRU"]:
-        from models import RNN_autoreg_torchscript, LSTM_torchscript
-        if cfg.model_type=="LSTM":
-            use_lstm=True 
-        else:
-            use_lstm=False 
+        # from models import RNN_autoreg_torchscript
         if cfg.autoregressive:
-            model = RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
-                        out_scale = yscale_lev,
-                        out_sfc_scale = yscale_sca, 
-                        xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                        xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                        lbd_qc = lbd_qc, lbd_qi=lbd_qi,  lbd_qn=lbd_qn, 
-                        device=device,
-                        nx = nx, nx_sfc=nx_sfc, 
-                        ny = ny, ny_sfc=ny_sfc, 
-                        nneur=cfg.nneur, 
-                        use_lstm = use_lstm, 
-                        use_initial_mlp = cfg.use_initial_mlp,
-                        use_intermediate_mlp = cfg.use_intermediate_mlp,
-                        add_pres = cfg.add_pres,
-                        add_stochastic_layer = cfg.add_stochastic_layer, 
-                        output_prune = cfg.output_prune,
-                        # repeat_mu = cfg.repeat_mu,
-                        mp_mode = cfg.mp_mode,
-                        separate_radiation = cfg.separate_radiation,
-                        physical_precip = cfg.physical_precip,
-                        predict_liq_frac=predict_liq_frac,
-                        randomly_initialize_cellstate=cfg.randomly_initialize_cellstate,
-                        output_sqrt_norm=cfg.new_nolev_scaling,
-                       # concat = cfg.concat,
-                        nh_mem = cfg.nh_mem)
+            from models.models import RNN_autoreg
+            model = RNN_autoreg(cfg, coeffs, device)
         else:
-            model = LSTM_torchscript(hyam,hybm,hyai,hybi,
-                        out_scale = yscale_lev,
-                        out_sfc_scale = yscale_sca, 
-                        xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                        xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                        device=device,
-                        nx = nx, nx_sfc=nx_sfc, 
-                        ny = ny, ny_sfc=ny_sfc, 
-                        nneur = cfg.nneur, 
-                        use_initial_mlp = cfg.use_initial_mlp,
-                        use_intermediate_mlp = cfg.use_intermediate_mlp,
-                        add_pres = cfg.add_pres, output_prune = cfg.output_prune)
-    elif cfg.model_type=="CFC":
-        if cfg.autoregressive:
-            from models_experimental import LiquidNN_autoreg_torchscript
-            model = LiquidNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
-                        out_scale = yscale_lev,
-                        out_sfc_scale = yscale_sca, 
-                        xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                        xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                        device=device,
-                        nx = nx, nx_sfc=nx_sfc, 
-                        ny = ny, ny_sfc=ny_sfc, 
-                        nneur=cfg.nneur, 
-                        nout_cfc=cfg.cfc_nout,
-                        use_initial_mlp = cfg.use_initial_mlp,
-                        use_intermediate_mlp = cfg.use_intermediate_mlp,
-                        add_pres = cfg.add_pres,
-                        add_stochastic_layer = cfg.add_stochastic_layer, 
-                        output_prune = cfg.output_prune,
-                        concat = cfg.concat,
-                        nh_mem = cfg.nh_mem)#,
-    elif cfg.model_type == "RNN_autoreg_torchscript_physprec2":
-          from models import RNN_autoreg_torchscript_physprec2
-          model = RNN_autoreg_torchscript_physprec2(hyam,hybm,hyai,hybi,
-              out_scale = yscale_lev,
-              out_sfc_scale = yscale_sca, 
-              xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-              xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-              lbd_qc = lbd_qc, lbd_qi=lbd_qi,  lbd_qn=lbd_qn, 
-              device=device,
-              nx = nx, nx_sfc=nx_sfc, 
-              ny = ny, ny_sfc=ny_sfc, 
-              nneur=cfg.nneur, 
-              use_lstm = False, 
-              use_initial_mlp = cfg.use_initial_mlp,
-              use_intermediate_mlp = cfg.use_intermediate_mlp,
-              add_pres = cfg.add_pres,
-              add_stochastic_layer = cfg.add_stochastic_layer, 
-              output_prune = cfg.output_prune,
-              mp_mode = cfg.mp_mode,
-              separate_radiation = cfg.separate_radiation,
-              predict_liq_frac=predict_liq_frac,
-              randomly_initialize_cellstate=cfg.randomly_initialize_cellstate,
-              output_sqrt_norm=cfg.new_nolev_scaling,
-              nh_mem = cfg.nh_mem)
-    elif cfg.model_type in ["SLSTM", "SGRU"]: #cfg.model_type=="SRNN":
-        from models import stochastic_RNN_autoreg_torchscript
-        if cfg.model_type=="SLSTM":
-            use_lstm=True 
-        else:
-            use_lstm=False 
-        model = stochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
-                    out_scale = yscale_lev,
-                    out_sfc_scale = yscale_sca, 
-                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                    device=device,
-                    nx = nx, nx_sfc=nx_sfc, 
-                    ny = ny, ny_sfc=ny_sfc, 
-                    nneur=cfg.nneur, 
-                    use_lstm=use_lstm,
-                    use_initial_mlp = cfg.use_initial_mlp,
-                    use_intermediate_mlp = cfg.use_intermediate_mlp,
-                    add_pres = cfg.add_pres,
-                    output_prune = cfg.output_prune,
-                    use_memory = cfg.autoregressive,
-                    nh_mem = cfg.nh_mem,
-                    ar_noise_mode = cfg.ar_noise_mode,
-                    ar_tau = cfg.ar_tau,
-                    use_surface_memory=cfg.use_surface_memory)#,
-    elif cfg.model_type=="RNN_autoreg_torchscript_perturb":
-        from models import RNN_autoreg_torchscript_perturb
-        # if cfg.autoregressive:
-        model =  RNN_autoreg_torchscript_perturb(hyam,hybm,hyai,hybi,
-                                    out_scale = yscale_lev,
-                                    out_sfc_scale = yscale_sca, 
-                                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                                    device=device,
-                                    nx = nx, nx_sfc=nx_sfc, 
-                                    ny = ny, ny_sfc=ny_sfc, 
-                                    nneur=cfg.nneur, 
-                                    use_initial_mlp=cfg.use_initial_mlp, 
-                                    separate_radiation=cfg.separate_radiation,
-                                    randomly_initialize_cellstate=cfg.randomly_initialize_cellstate,
-                                    deterministic_mode=not is_stochastic, # for pretraining the deterministic part only
-                                    return_det=is_stochastic, # if stochastic mode, perhaps useful to still output deterministic output
-                                    add_pres = cfg.add_pres,
-                                    output_prune = cfg.output_prune,
-                                    nh_mem=cfg.nh_mem)
-    elif cfg.model_type=="halfstochasticRNN":
-        from models import halfstochastic_RNN_autoreg_torchscript
-        model = halfstochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
-                    out_scale = yscale_lev,
-                    out_sfc_scale = yscale_sca, 
-                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                    device=device,
-                    nx = nx, nx_sfc=nx_sfc, 
-                    ny = ny, ny_sfc=ny_sfc, 
-                    nneur=cfg.nneur, 
-                    use_initial_mlp = cfg.use_initial_mlp,
-                    use_intermediate_mlp = cfg.use_intermediate_mlp,
-                    add_pres = cfg.add_pres,
-                    output_prune = cfg.output_prune,
-                    nh_mem = cfg.nh_mem,
-                    ar_noise_mode = cfg.ar_noise_mode,
-                    ar_tau = cfg.ar_tau,
-                    use_surface_memory=cfg.use_surface_memory)#,
-    elif cfg.model_type=="physrad":
+          raise NotImplementedError("Non-autoregressive model not implemented")
+
+    # elif cfg.model_type=="physrad":
+    elif cfg.model_type=="physRNN": 
+        
+        # if cfg.use_physrad:
         torch._functorch.config.donated_buffer=False
 
         ng_lw = 128
         ng_sw = 112 
         # Uncomment below to change the last layer of the pre-trained gas optics models so we can directly have a smaller spectral resolution
-        # without a decoder. Doesn't seem to really work
+        # without a separate decoder. Doesn't seem to really work
         # ng_lw = 16  
         # ng_sw = 16
         mlp_gasopt_model_lw, mlp_gasopt_model_sw, mlp_gasopt_model_sw2  = None,None,None
@@ -672,50 +546,116 @@ def main(cfg: DictConfig):
           print("Loading pre-existing shortwave !RAYLEIGH! gas optics model from {}".format(existing_gasopt_file_sw2))
           mlp_gasopt_model_sw2 = load_gas_optics_model(existing_gasopt_file_sw2, device, num_outputs_desired=ng_sw)
 
-        from models_rad import RNN_autoreg_torchscript_physrad
-        model = RNN_autoreg_torchscript_physrad(hyam,hybm,hyai,hybi,
-                    out_scale = yscale_lev,
-                    out_sfc_scale = yscale_sca, 
-                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                    device=device,
-                    # gasopt_lw_inp_min=gasopt_lw_inp_min, gasopt_lw_inp_max=gasopt_lw_inp_max,
-                    # gasopt_lw_outp_std=gasopt_lw_outp_std, gasopt_lw_outp_mean=gasopt_lw_outp_mean,
-                    nx = nx, nx_sfc=nx_sfc, 
-                    ny = ny, ny_sfc=ny_sfc, 
-                    nneur=cfg.nneur, 
+        from models.models_phys import physical_RNN_autoreg
+        model = physical_RNN_autoreg(cfg, coeffs, device,
                     gas_optics_model_lw = mlp_gasopt_model_lw,
                     gas_optics_model_sw1 = mlp_gasopt_model_sw,
-                    gas_optics_model_sw2 = mlp_gasopt_model_sw2,
-                    use_initial_mlp = cfg.use_initial_mlp,
-                    use_intermediate_mlp = cfg.use_intermediate_mlp,
-                    add_pres = cfg.add_pres,
-                    add_stochastic_layer = cfg.add_stochastic_layer, 
-                    physical_precip = cfg.physical_precip,
-                    # predict_liq_frac=predict_liq_frac,
-                    output_prune = cfg.output_prune,
-                    concat = cfg.concat,
-                    nh_mem = cfg.nh_mem,
-                    mp_ncol = cfg.mp_ncol,
-                    mp_mode = cfg.mp_mode)
-    else:
-      print("using SSM")
-      from models_experimental import SpaceStateModel_autoreg
-      model = SpaceStateModel_autoreg(hyam,hybm,hyai,hybi,
-                    out_scale = yscale_lev,
-                    out_sfc_scale = yscale_sca, 
-                    xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
-                    xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
-                    device=device,
-                    nx = nx, nx_sfc=nx_sfc, 
-                    ny = ny, ny_sfc=ny_sfc, 
-                    nneur=cfg.nneur, 
-                    model_type=cfg.model_type,
-                    use_initial_mlp = cfg.use_initial_mlp,
-                    use_intermediate_mlp = cfg.use_intermediate_mlp,
-                    add_pres = cfg.add_pres,
-                    output_prune = cfg.output_prune,
-                    nh_mem = cfg.nh_mem)#,
+                    gas_optics_model_sw2 = mlp_gasopt_model_sw2)
+
+
+    # elif cfg.model_type=="CFC":
+    #     if cfg.autoregressive:
+    #         from models_experimental import LiquidNN_autoreg_torchscript
+    #         model = LiquidNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
+    #                     out_scale = yscale_lev,
+    #                     out_sfc_scale = yscale_sca, 
+    #                     xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+    #                     xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+    #                     device=device,
+    #                     nx = nx, nx_sfc=nx_sfc, 
+    #                     ny = ny, ny_sfc=ny_sfc, 
+    #                     nneur=cfg.nneur, 
+    #                     nout_cfc=cfg.cfc_nout,
+    #                     use_initial_mlp = cfg.use_initial_mlp,
+    #                     use_intermediate_mlp = cfg.use_intermediate_mlp,
+    #                     add_pres = cfg.add_pres,
+    #                     add_stochastic_layer = cfg.add_stochastic_layer, 
+    #                     output_prune = cfg.output_prune,
+    #                     concat = cfg.concat,
+    #                     nh_mem = cfg.nh_mem)#,
+    # elif cfg.model_type in ["SLSTM", "SGRU"]: #cfg.model_type=="SRNN":
+    #     from models import stochastic_RNN_autoreg_torchscript
+    #     if cfg.model_type=="SLSTM":
+    #         use_lstm=True 
+    #     else:
+    #         use_lstm=False 
+    #     model = stochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
+    #                 out_scale = yscale_lev,
+    #                 out_sfc_scale = yscale_sca, 
+    #                 xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+    #                 xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+    #                 device=device,
+    #                 nx = nx, nx_sfc=nx_sfc, 
+    #                 ny = ny, ny_sfc=ny_sfc, 
+    #                 nneur=cfg.nneur, 
+    #                 use_lstm=use_lstm,
+    #                 use_initial_mlp = cfg.use_initial_mlp,
+    #                 use_intermediate_mlp = cfg.use_intermediate_mlp,
+    #                 add_pres = cfg.add_pres,
+    #                 output_prune = cfg.output_prune,
+    #                 use_memory = cfg.autoregressive,
+    #                 nh_mem = cfg.nh_mem,
+    #                 ar_noise_mode = cfg.ar_noise_mode,
+    #                 ar_tau = cfg.ar_tau,
+    #                 use_surface_memory=cfg.use_surface_memory)#,
+    # elif cfg.model_type=="RNN_autoreg_torchscript_perturb":
+    #     from models import RNN_autoreg_torchscript_perturb
+    #     # if cfg.autoregressive:
+    #     model =  RNN_autoreg_torchscript_perturb(hyam,hybm,hyai,hybi,
+    #                                 out_scale = yscale_lev,
+    #                                 out_sfc_scale = yscale_sca, 
+    #                                 xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+    #                                 xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+    #                                 device=device,
+    #                                 nx = nx, nx_sfc=nx_sfc, 
+    #                                 ny = ny, ny_sfc=ny_sfc, 
+    #                                 nneur=cfg.nneur, 
+    #                                 use_initial_mlp=cfg.use_initial_mlp, 
+    #                                 separate_radiation=cfg.separate_radiation,
+    #                                 randomly_initialize_cellstate=cfg.randomly_initialize_cellstate,
+    #                                 deterministic_mode=not is_stochastic, # for pretraining the deterministic part only
+    #                                 return_det=is_stochastic, # if stochastic mode, perhaps useful to still output deterministic output
+    #                                 add_pres = cfg.add_pres,
+    #                                 output_prune = cfg.output_prune,
+    #                                 nh_mem=cfg.nh_mem)
+    # elif cfg.model_type=="halfstochasticRNN":
+    #     from models import halfstochastic_RNN_autoreg_torchscript
+    #     model = halfstochastic_RNN_autoreg_torchscript(hyam,hybm,hyai,hybi,
+    #                 out_scale = yscale_lev,
+    #                 out_sfc_scale = yscale_sca, 
+    #                 xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+    #                 xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+    #                 device=device,
+    #                 nx = nx, nx_sfc=nx_sfc, 
+    #                 ny = ny, ny_sfc=ny_sfc, 
+    #                 nneur=cfg.nneur, 
+    #                 use_initial_mlp = cfg.use_initial_mlp,
+    #                 use_intermediate_mlp = cfg.use_intermediate_mlp,
+    #                 add_pres = cfg.add_pres,
+    #                 output_prune = cfg.output_prune,
+    #                 nh_mem = cfg.nh_mem,
+    #                 ar_noise_mode = cfg.ar_noise_mode,
+    #                 ar_tau = cfg.ar_tau,
+    #                 use_surface_memory=cfg.use_surface_memory)#,
+   
+    # else:
+    #   print("using SSM")
+    #   from models_experimental import SpaceStateModel_autoreg
+    #   model = SpaceStateModel_autoreg(hyam,hybm,hyai,hybi,
+    #                 out_scale = yscale_lev,
+    #                 out_sfc_scale = yscale_sca, 
+    #                 xmean_lev = xmean_lev, xmean_sca = xmean_sca, 
+    #                 xdiv_lev = xdiv_lev, xdiv_sca = xdiv_sca,
+    #                 device=device,
+    #                 nx = nx, nx_sfc=nx_sfc, 
+    #                 ny = ny, ny_sfc=ny_sfc, 
+    #                 nneur=cfg.nneur, 
+    #                 model_type=cfg.model_type,
+    #                 use_initial_mlp = cfg.use_initial_mlp,
+    #                 use_intermediate_mlp = cfg.use_intermediate_mlp,
+    #                 add_pres = cfg.add_pres,
+    #                 output_prune = cfg.output_prune,
+    #                 nh_mem = cfg.nh_mem)#,
     
     model = model.to(device)
     
@@ -753,7 +693,6 @@ def main(cfg: DictConfig):
                     hyam=hyam,hybm=hybm,
                     lbd_qc=lbd_qc, lbd_qi=lbd_qi, lbd_qn=lbd_qn,
                     cld_inp_transformation=cfg.cld_inp_transformation,
-                    output_sqrt_norm=cfg.new_nolev_scaling,
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
                     include_prev_inputs=cfg.include_prev_inputs, include_prev_outputs=cfg.include_prev_outputs,
                     ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
@@ -777,7 +716,6 @@ def main(cfg: DictConfig):
                     hyam=hyam,hybm=hybm,
                     lbd_qc=lbd_qc, lbd_qi=lbd_qi, lbd_qn=lbd_qn,
                     cld_inp_transformation=cfg.cld_inp_transformation,
-                    output_sqrt_norm=cfg.new_nolev_scaling,
                     qinput_prune = cfg.qinput_prune, output_prune = cfg.output_prune, 
                     include_prev_inputs=cfg.include_prev_inputs, include_prev_outputs=cfg.include_prev_outputs,
                     ycoeffs=ycoeffs, xcoeffs=xcoeffs, no_multiprocessing=no_multiprocessing)
@@ -804,10 +742,10 @@ def main(cfg: DictConfig):
     # -------------------------------------------------------------------------------------------------------
     # ----------------------------------- METRICS AND LOSS FUNCTIONS  ---------------------------------------
 
-    metric_h_con = metrics.get_energy_metric(hyai, hybi)
-    metric_water_con = metrics.get_water_conservation(hyai, hybi)
+    metric_h_con = metrics.get_energy_metric(hyai, hybi, device)
+    metric_water_con = metrics.get_water_conservation(hyai, hybi, device)
 
-    metric_rh = metrics.get_rh_loss(hyam,hybm)
+    metric_rh = metrics.get_rh_loss(hyam,hybm, device)
     
     # mse = metrics.get_mse_flatten(weights)
     metrics_det = metrics.get_metrics_flatten(loss_weights, loss_weights_sfc)
@@ -933,7 +871,7 @@ def main(cfg: DictConfig):
           save_file_torch2_gpu = "saved_models/" + MODEL_STR + "_script_gpu2.pt"
           if is_stochastic:
               model.use_ensemble=False
-          if cfg.physical_precip:
+          if cfg.predict_fluxes:
               return_neg_precip=False
               if model.return_neg_precip:
                   return_neg_precip=True 
@@ -1011,7 +949,30 @@ def main(cfg: DictConfig):
         #   print("saved model to: ", save_file_torch2_gpu)
 
           quit()
-    
+
+    if False: # test saving to TorchScript
+      SAVE_PATH       = "saved_models/" + MODEL_STR + ".pt"
+      save_file_torch1 = "saved_models/" + MODEL_STR + "_script_gpu.pt"
+      save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
+      print("saving model to", SAVE_PATH)
+      # print("New best validation result obtained, saving model to", SAVE_PATH)
+      if is_stochastic:
+          model.use_ensemble=False
+      if cfg.predict_fluxes:
+        return_neg_precip=False
+        if model.return_neg_precip:
+          return_neg_precip=True 
+          model.return_neg_precip = False
+      model.train(False)
+      # model.compile(mode="max-autotune")
+      scripted_model = torch . jit . script ( model )
+      scripted_model = scripted_model.eval()
+      scripted_model.save(save_file_torch1)
+      model = model.to("cpu")
+      scripted_model = torch . jit . script ( model )
+      scripted_model = scripted_model.eval()
+      scripted_model.save(save_file_torch2)
+
     prev_nan = False
     # --------------------------------------------------------------------------------------------------------
     # ----------------------------------------- START TRAINING -----------------------------------------------
@@ -1115,7 +1076,7 @@ def main(cfg: DictConfig):
                 # print("New best validation result obtained, saving model to", SAVE_PATH)
                 if is_stochastic:
                     model.use_ensemble=False
-                if cfg.physical_precip:
+                if cfg.predict_fluxes:
                   return_neg_precip=False
                   if model.return_neg_precip:
                     return_neg_precip=True 
@@ -1129,24 +1090,24 @@ def main(cfg: DictConfig):
                             'val_loss': val_loss,
                             }, SAVE_PATH)  
                 
-                # model.train(False)
-                # # model.compile(mode="max-autotune")
-                # scripted_model = torch . jit . script ( model )
-                # scripted_model = scripted_model.eval()
-                # scripted_model.save(save_file_torch1)
-                # model = model.to("cpu")
-                # scripted_model = torch . jit . script ( model )
-                # scripted_model = scripted_model.eval()
-                # scripted_model.save(save_file_torch2)
-                # best_val_loss = val_loss 
-                # model = model.to(device)
-                # model.train(True)
+                model.train(False)
+                # model.compile(mode="max-autotune")
+                scripted_model = torch . jit . script ( model )
+                scripted_model = scripted_model.eval()
+                scripted_model.save(save_file_torch1)
+                model = model.to("cpu")
+                scripted_model = torch . jit . script ( model )
+                scripted_model = scripted_model.eval()
+                scripted_model.save(save_file_torch2)
+                best_val_loss = val_loss 
+                model = model.to(device)
+                model.train(True)
                 # model.compile(mode="default")
-                # print("model saved!")
+                print("model saved!")
 
                 if is_stochastic:
                     model.use_ensemble=True
-                if cfg.physical_precip:
+                if cfg.predict_fluxes:
                   if return_neg_precip: 
                     model.return_neg_precip = True    
                 R2 = val_runner.metrics["R2_lev"]

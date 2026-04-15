@@ -104,7 +104,7 @@ def eice(T):
                        (c_ice[4]+np.maximum(c_ice[2],T-T0)*c_ice[5]))
      
 
-def relative_to_specific_humidity(rh, temp, pressure):
+def relative_to_specific_humidity_climsim(rh, temp, pressure):
     """
     Convert relative humidity to specific humidity using numpy arrays
     
@@ -116,37 +116,7 @@ def relative_to_specific_humidity(rh, temp, pressure):
     Returns:
         Specific humidity (kg water vapor / kg total air)
     """
-    
-    # Constants
-    # es0 = 611.2  # Reference saturation vapor pressure at T0 (Pa)
-    # T0 = 273.15  # Reference temperature (K) - triple point of water
-    # Rv = 461.5   # Specific gas constant for water vapor (J/(kg·K))
-    
-    # # Gas constant ratio (water vapor / dry air)
-    # epsilon = 0.622  # kg/kg
-    
-    # # Temperature-dependent latent heat of vaporization (J/kg)
-    # # Linear relationship: Lv = Lv0 + a * (T - T0)
-    # # where Lv0 = 2.501e6 J/kg at 273.15K, and a ≈ -2370 J/(kg·K)
-    # Lv0 = 2.501e6  # Latent heat at reference temperature (J/kg)
-    # a = -2370.0    # Temperature coefficient (J/(kg·K))
-    
-    # Lv = Lv0 + a * (temp - T0)
-    
-    # # Calculate saturation vapor pressure using Clausius-Clapeyron relation
-    # # es = es0 * exp((Lv/Rv) * (1/T0 - 1/T))
-    # e_sat = es0 * np.exp((Lv / Rv) * (1/T0 - 1/temp))
-    
-    # # Calculate actual vapor pressure
-    # # print("pressure in min max", np.min(pressure), np.max(pressure))
 
-    # e_actual = rh * e_sat
-    
-    # # Calculate specific humidity
-    # # q = (epsilon * e) / (p - e * (1 - epsilon))
-    # specific_humidity = (epsilon * e_actual) / (pressure - e_actual * (1 - epsilon))
-    
-    
     T0 = 273.16 # Freezing temperature in standard conditions
     T00 = 253.16 # Temperature below which we use e_ice
     omega = (temp - T00) / (T0 - T00)
@@ -159,12 +129,58 @@ def relative_to_specific_humidity(rh, temp, pressure):
     # rh = q / qvs 
     q = rh*qvs
     
-    # print("q ref max mean", np.max(specific_humidity), np.mean(specific_humidity))
     # print("q new max mean", np.max(q), np.mean(q))
-    # print("q sfc max mean", np.max(specific_humidity[:,-1]), np.mean(specific_humidity[:,-1]))
 
     return q
 
+
+def relative_to_specific_humidity(rh, temp, pressure):
+    """
+    Convert relative humidity to specific humidity using PyTorch tensors.
+    
+    Args:
+        rh (torch.Tensor): Relative humidity as a fraction (0-1)
+        temp (torch.Tensor): Temperature in Kelvin
+        pressure (torch.Tensor): Pressure in Pa (Pascals)
+    
+    Returns:
+        torch.Tensor: Specific humidity (kg water vapor / kg total air)
+    
+    Notes:
+        - Uses Clausius-Clapeyron relation for saturation vapor pressure
+        - Computes temperature-dependent latent heat of vaporization
+        - All calculations performed in Kelvin (no temperature conversion)
+    """
+    
+    # Constants
+    es0 = 611.2  # Reference saturation vapor pressure at T0 (Pa)
+    T0 = 273.15  # Reference temperature (K) - triple point of water
+    Rv = 461.5   # Specific gas constant for water vapor (J/(kg·K))
+    
+    # Gas constant ratio (water vapor / dry air)
+    epsilon = 0.622  # kg/kg
+    
+    # Temperature-dependent latent heat of vaporization (J/kg)
+    # Linear relationship: Lv = Lv0 + a * (T - T0)
+    # where Lv0 = 2.501e6 J/kg at 273.15K, and a ≈ -2370 J/(kg·K)
+    Lv0 = 2.501e6  # Latent heat at reference temperature (J/kg)
+    a = -2370.0    # Temperature coefficient (J/(kg·K))
+    
+    Lv = Lv0 + a * (temp - T0)
+    
+    # Calculate saturation vapor pressure using Clausius-Clapeyron relation
+    # es = es0 * exp((Lv/Rv) * (1/T0 - 1/T))
+    e_sat = es0 * torch.exp((Lv / Rv) * (1/T0 - 1/temp))
+    
+    # Calculate actual vapor pressure
+    e_actual = rh * e_sat
+    
+    # Calculate specific humidity
+    # q = (epsilon * e) / (p - e * (1 - epsilon))
+    specific_humidity = (epsilon * e_actual) / (pressure - e_actual * (1 - epsilon))
+    
+    return specific_humidity
+    
 class train_or_eval_one_epoch:
     def __init__(self, dataloader, 
                  model, 
@@ -265,7 +281,8 @@ class train_or_eval_one_epoch:
             x_true_prev = []; y_true_prev = []; y_pred_prev = []
             inds_rnd = 0; prev_outputs = 0 
             rnn_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev_mem, self.model.nh_mem, device=device)
-            x_pred = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev, 6, device=device)
+            if self.cfg.do_semi_online_training:
+              x_pred = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev, 6, device=device)
               
             loss_update_start_index = 60
         else:
@@ -415,7 +432,7 @@ class train_or_eval_one_epoch:
                   x_lay0 = x_lay0.flatten(0,1)
                   x_sfc0 = torch.repeat_interleave(x_sfc0.unsqueeze(0),repeats=self.cfg.ensemble_size,dim=0)
                   x_sfc0 = x_sfc0.flatten(0,1)
-                  if self.cfg.model_type in ["physrad", "radflux"] or self.cfg.physical_precip: #or self.cfg.mp_mode==-2:
+                  if self.cfg.model_type in ["physrad", "radflux"] or self.cfg.predict_fluxes: #or self.cfg.mp_mode==-2:
                     x_lay_raw1 = x_lay_raw0.unsqueeze(0)
                     x_lay_raw1 = torch.repeat_interleave(x_lay_raw1,repeats=self.cfg.ensemble_size,dim=0)
                     x_lay_raw1 = x_lay_raw1.flatten(0,1)
@@ -446,33 +463,34 @@ class train_or_eval_one_epoch:
                     inp_list = [x_lay0, x_sfc0]
                     # rnn_mem[:,:,-1] = 0.0
                     if self.cfg.autoregressive:
-                        if self.cfg.model_type=="physrad":
-                          # if self.model.track_explicit_subgrid_states and (j%100==0):#j==0:
-                          if self.model.track_explicit_subgrid_states and j==0:
-                            T_crm = torch.repeat_interleave(x_lay_raw1[:,self.model.ilev_crm:,0:1],repeats=self.model.mp_ncol,dim=-1)
-                            qn_crm = x_lay_raw1[:,self.model.ilev_crm:,2:3] + x_lay_raw1[:,self.model.ilev_crm:,3:4]
-                            qn_crm = 1/16*torch.ones_like(T_crm)
-                            # qn_crm = torch.repeat_interleave(qn_crm,repeats=self.model.mp_ncol,dim=-1)
-                            qv_crm = torch.repeat_interleave(x_lay_raw1[:,self.model.ilev_crm:,-1:],repeats=self.model.mp_ncol,dim=-1)
-                            # if j==0:
-                            rnn_mem = torch.stack((rnn_mem, T_crm, qv_crm, qn_crm),dim=0)
-                            # else:
-                            #   # print("reset")
-                            #   T_crm0 = rnn_mem[1]; qv_crm0 = rnn_mem[2]; qn_crm0 = rnn_mem[3]; rnn_mem = rnn_mem[0]
-                            #   # bias_T = T_crm - T_crm0.mean(dim=-1,keepdim=True)
-                            #   # print("old T crm 100 40", T_crm0[100,40,:], "true",T_crm[100,40,0:1] )
-                            #   T_crm = F.relu(T_crm0 + (T_crm - T_crm0.mean(dim=-1,keepdim=True)))
-                            #   # print("cor T crm 100 40", T_crm[100,40,:])
-                            #   qv_crm = F.relu(qv_crm0 + (qv_crm - qv_crm0.mean(dim=-1,keepdim=True)))
-                            #   qn_crm = F.relu(qn_crm0 + (qn_crm - qn_crm0.mean(dim=-1,keepdim=True)))
-                            #   rnn_mem = torch.stack((rnn_mem, T_crm, qv_crm, qn_crm),dim=0)
-                            # # print("shape rnn mem", rnn_mem.shape)
+                        # if self.cfg.model_type=="physrad":
+                        #   if self.model.track_explicit_subgrid_states and (j%100==0):#j==0:
+                        #   # if self.model.track_explicit_subgrid_states and j==0:
+                        #     T_crm = torch.repeat_interleave(x_lay_raw1[:,self.model.ilev_crm:,0:1],repeats=self.model.mp_ncol,dim=-1)
+                        #     qn_crm = x_lay_raw1[:,self.model.ilev_crm:,2:3] + x_lay_raw1[:,self.model.ilev_crm:,3:4]
+                        #     qn_crm = torch.repeat_interleave(qn_crm,repeats=self.model.mp_ncol,dim=-1)
+                        #     qv_crm = torch.repeat_interleave(x_lay_raw1[:,self.model.ilev_crm:,-1:],repeats=self.model.mp_ncol,dim=-1)
+                        #     if j==0:
+                        #       rnn_mem = torch.stack((rnn_mem, T_crm, qv_crm, qn_crm),dim=0)
+                        #     else:
+                        #       # print("reset")
+                        #       # T_crm0 = rnn_mem[1]; qv_crm0 = rnn_mem[2]; qn_crm0 = rnn_mem[3]; rnn_mem = rnn_mem[0]
+                        #       # # bias_T = T_crm - T_crm0.mean(dim=-1,keepdim=True)
+                        #       # # print("old T crm 100 40", T_crm0[100,40,:], "true",T_crm[100,40,0:1] )
+                        #       # T_crm = F.relu(T_crm0 + (T_crm - T_crm0.mean(dim=-1,keepdim=True)))
+                        #       # # print("cor T crm 100 40", T_crm[100,40,:])
+                        #       # qv_crm = F.relu(qv_crm0 + (qv_crm - qv_crm0.mean(dim=-1,keepdim=True)))
+                        #       # qn_crm = F.relu(qn_crm0 + (qn_crm - qn_crm0.mean(dim=-1,keepdim=True)))
+                        #       rnn_mem = torch.stack((rnn_mem[0], T_crm, qv_crm, qn_crm),dim=0)
+                        #     # print("shape rnn mem", rnn_mem.shape)
                         inp_list.append(rnn_mem)
                     if use_ar_noise:
                         inp_list.append(eps_prev)
-                    if self.cfg.model_type in ["physrad", "radflux"] or self.cfg.physical_precip: #or self.cfg.mp_mode==-2:
+                    # if self.cfg.model_type in ["physrad", "radflux"] or self.cfg.predict_fluxes: #or self.cfg.mp_mode==-2:
+                    if self.cfg.predict_fluxes: 
                         inp_list.append(x_lay_raw1)
-                        if self.cfg.model_type=="physrad" and self.cfg.physical_precip and self.train:
+                        # if self.cfg.model_type=="physrad" and self.cfg.predict_fluxes and self.train:
+                        if self.train:
                           inp_list.append(target_lay0)
                     # print("1 xlayraw shape", x_lay_raw0.shape)
                     outs = self.model(inp_list)
@@ -489,7 +507,7 @@ class train_or_eval_one_epoch:
                       else:
                         if self.cfg.model_type=="RNN_autoreg_torchscript_perturb" and self.model_is_stochastic:
                           dummy=outs[3]
-                      if self.cfg.physical_precip:
+                      if self.cfg.predict_fluxes:
                         if self.model.return_neg_precip:
                           precip_negative = outs[3]
                           precip_neg_mse += torch.mean(torch.square(precip_negative))
@@ -530,7 +548,10 @@ class train_or_eval_one_epoch:
 
                 if self.cfg.do_semi_online_training:
                   if self.use_mp_constraint:
-                      y_pred_prev, ypo_sfc = self.model.pp_mp(preds_lay0, preds_sfc0, x_lay_raw0)
+                      # y_pred_prev, ypo_sfc = self.model.pp_mp(preds_lay0, preds_sfc0, x_lay_raw0)
+                      y_pred_prev, ypo_sfc = self.model.postprocessing(preds_lay0, preds_sfc0, x_lay_raw0)
+
+
                       # with torch.no_grad(): 
                       #     yto_lay, yto_sfc = self.model.pp_mp(targets_lay, targets_sfc, x_lay_raw )
                       # ypo_lay, ypo_sfc, yto_lay, yto_sfc = model.pp_mp(preds_lay, preds_sfc, targets_lay, targets_sfc, x_lay_raw )
@@ -582,7 +603,8 @@ class train_or_eval_one_epoch:
                             x_sfc = torch.reshape(x_sfc[:,0,:,:], (timesteps*self.batch_size,-1))
 
                         if self.use_mp_constraint:
-                            ypo_lay, ypo_sfc = self.model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
+                            # ypo_lay, ypo_sfc = self.model.pp_mp(preds_lay, preds_sfc, x_lay_raw)
+                            ypo_lay, ypo_sfc = self.model.postprocessing(preds_lay, preds_sfc, x_lay_raw)
                         else:
                             ypo_lay, ypo_sfc = self.model.postprocessing(preds_lay, preds_sfc)
 
@@ -621,13 +643,25 @@ class train_or_eval_one_epoch:
 
                         # Positive cloud water metric 
 
-                        if True: #self.cfg.physical_precip:
+                        if True: #self.cfg.predict_fluxes:
                           # Metrics for the predicted vapor and cloud water being positive after tendency update
                           # Note: if mp_mode=-2, we are predicting only total water, qv_new is actually qtot_new
                           # and no point measuring positivity of both
                           if self.cfg.mp_mode != -2:
-                            qn_new = ((x_lay_raw[:,:,2] +  x_lay_raw[:,:,3]) + 1200*(preds_lay[:,:,2])/self.model.yscale_lev[:,2] + 
-                                    1200*(preds_lay[:,:,3])/self.model.yscale_lev[:,3])
+                            if self.cfg.mp_mode==1:
+                              # y (dT, dqv, dqn, u, v) (liq_frac_diagnosed)
+                              dqn = 1200*(preds_lay[:,:,2])/self.model.yscale_lev[:,2]
+                            elif self.cfg.mp_mode==-1:
+                              dqn =  1200*(preds_lay[:,:,2])/self.model.yscale_lev[:,2]
+                            #   dqn =  1200*(preds_lay[:,:,2])/self.model.yscale_lev[:,2] +  1200*(preds_lay[:,:,3])/self.model.yscale_lev[:,3]
+                            elif self.cfg.mp_mode==0:
+                              dqn =  1200*(preds_lay[:,:,2])/self.model.yscale_lev[:,2] +  1200*(preds_lay[:,:,3])/self.model.yscale_lev[:,3]
+                            else:
+                              # y (dT, dqv, dqliq, dqice u, v)
+                              # dqn =  1200*(preds_lay[:,:,2])/self.model.yscale_lev[:,2] +  1200*(preds_lay[:,:,3])/self.model.yscale_lev[:,3]
+                              raise NotImplementedError()
+
+                            qn_new = (x_lay_raw[:,:,2] +  x_lay_raw[:,:,3]) + dqn  
                             qn_pos_loss = torch.mean(torch.square(F.relu(-qn_new)))
                             del qn_new
                           # qv_old = x_lay_raw[:,:,-1] 
@@ -636,7 +670,7 @@ class train_or_eval_one_epoch:
                           # print("min qv_old",qv_old.min().item(), "max", qv_old.max().item())
                           # print("min qv new",qv_new.min().item(), "max", qv_new.max().item())
                           qv_pos_loss = torch.mean(torch.square(F.relu(-qv_new)))
-                          if self.cfg.physical_precip:
+                          if self.cfg.predict_fluxes:
                             if self.model.return_neg_precip: 
                               precip_neg_mse = precip_neg_mse / timesteps
                         # print("ut min max mean qn new-pred", torch.min(qn_new).item(),  torch.max(qn_new).item(), torch.mean(qn_new).item())
@@ -677,13 +711,13 @@ class train_or_eval_one_epoch:
                         if self.cfg.use_cloudpath_loss:
                             losses.append(self.cfg.w_cld * cloudpath_err)
 
-                        if self.cfg.use_qv_positivity_loss and self.model.physical_precip:
+                        if self.cfg.use_qv_positivity_loss and self.model.predict_fluxes:
                             losses.append(self.cfg.w_qvpos * qv_pos_loss)
 
-                        if self.cfg.use_qn_positivity_loss and self.cfg.mp_mode!=-2 and self.model.physical_precip:
+                        if self.cfg.use_qn_positivity_loss and self.cfg.mp_mode!=-2 and self.model.predict_fluxes:
                             losses.append(self.cfg.w_qnpos * qn_pos_loss)
 
-                        if self.cfg.physical_precip:
+                        if self.cfg.predict_fluxes:
                             if self.cfg.use_neg_precip_loss:
                                 losses.append(self.cfg.w_precip_neg * precip_neg_mse)
 
@@ -719,7 +753,7 @@ class train_or_eval_one_epoch:
                         rh_mse = rh_mse.detach()
                     cloudpath_err = cloudpath_err.detach()
                     # if self.cfg.use_water_positivity_loss and self.cfg.mp_mode!=-2:
-                    if True: # self.cfg.physical_precip: 
+                    if True: # self.cfg.predict_fluxes: 
                         qv_pos_loss = qv_pos_loss.detach()
                         if self.cfg.mp_mode != -2: 
                             qn_pos_loss = qn_pos_loss.detach()
@@ -748,7 +782,7 @@ class train_or_eval_one_epoch:
                     running_cldpath += cloudpath_err.item()
                     running_bias    += bias_tot.item() 
                     running_precip  += precip_sum_mse.item()
-                    if True: #self.cfg.physical_precip:
+                    if True: #self.cfg.predict_fluxes:
                         running_qv_pos  += qv_pos_loss.item()
                         if self.cfg.mp_mode != -2: 
                             running_qn_pos  += qn_pos_loss.item()
@@ -757,7 +791,7 @@ class train_or_eval_one_epoch:
                         running_var += ens_var.item() 
                         running_det += det_skill.item() 
 
-                    if self.cfg.physical_precip:
+                    if self.cfg.predict_fluxes:
                       if self.model.return_neg_precip:
                         precip_neg_mse = precip_neg_mse.detach()
                         running_precip_neg += precip_neg_mse.item()
@@ -778,7 +812,7 @@ class train_or_eval_one_epoch:
                             if self.cfg.use_rh_loss:
                                 epoch_rh_mse  += rh_mse.item()
                             epoch_accumprec += precip_sum_mse.item()
-                            if True: #self.cfg.physical_precip:
+                            if True: #self.cfg.predict_fluxes:
                                 epoch_qv_pos += qv_pos_loss.item()
                                 if self.cfg.mp_mode != -2:
                                     epoch_qn_pos += qn_pos_loss.item()
@@ -893,6 +927,9 @@ class train_or_eval_one_epoch:
                             targets_lay = targets_lay.reshape(-1,self.model.nlev,self.model.ny).cpu().numpy()
                             preds_lay = preds_lay.reshape(-1,self.model.nlev,self.model.ny).cpu().numpy()
 
+                            # print("target qliq mean {} std {}".format(targets_lay[:,:,2].mean(), targets_lay[:,:,2].std()))
+                            # print("pred qliq mean {} std {}".format(preds_lay[:,:,2].mean(), preds_lay[:,:,2].std()))
+
                             r2_lev_raw = metrics.corrcoeff_pairs_batchfirst(preds_lay, targets_lay)**2
 
                             epoch_mae_lev_clw +=  np.nanmean(np.abs(ypo_lay[:,:,2] - yto_lay[:,:,2]),axis=0)
@@ -926,7 +963,7 @@ class train_or_eval_one_epoch:
                     running_energy = running_energy / fac
                     running_water = running_water / fac
                     running_cldpath = running_cldpath / fac
-                    if True: # self.cfg.physical_precip:
+                    if True: # self.cfg.predict_fluxes:
                         running_qv_pos = running_qv_pos / fac
                         running_qn_pos = running_qn_pos / fac
                     running_bias = running_bias / fac
@@ -944,8 +981,8 @@ class train_or_eval_one_epoch:
                         print("[{:d}, {:d}] Loss: {:.2e} var: {:.2e} det: {:.2e} h: {:.2e}  w: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f}, took {:.1f}s (comp. {:.1f})" .format(epoch + 1, 
                                                         j+1, running_loss,running_var, running_det, running_energy,running_water, running_precip, running_bias, r2raw, elaps, t_comp), flush=True)
                         running_var = 0.0; running_det = 0.0
-                        print("[{:d}, {:d}] Loss: {:.2e}  h: {:.2e}  w: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f} rh-MSE: {:.2e}, took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
-                                                                                j+1, running_loss,running_energy,running_water,running_precip, running_bias, r2raw, running_rh_mse, elaps, t_comp), flush=True)
+                        # print("[{:d}, {:d}] Loss: {:.2e}  h: {:.2e}  w: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f} rh-MSE: {:.2e}, took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
+                        #                                                         j+1, running_loss,running_energy,running_water,running_precip, running_bias, r2raw, running_rh_mse, elaps, t_comp), flush=True)
                     else:
                         print("[{:d}, {:d}] Loss: {:.2e}  h: {:.2e}  w: {:.2e}  precip: {:.2e}  bias: {:.2e}  R2: {:.2f} rh-MSE: {:.2e}, took {:.1f}s (compute {:.1f})" .format(epoch + 1, 
                                                         j+1, running_loss,running_energy,running_water,running_precip, running_bias, r2raw, running_rh_mse, elaps, t_comp), flush=True)
@@ -954,6 +991,14 @@ class train_or_eval_one_epoch:
                                 r2swsfcgpt, r2lw, r2_heating_top, r2swclearsky, r2lwclearsky, bias_heating_top))
                            
                     # print("R2 q {:.2f} liq {:.2f} ice {:.2f}".format(np.nanmean(r2_lev[:,1]),np.nanmean(r2_lev[:,2]),np.nanmean(r2_lev[:,3])))
+                    if self.cfg.mp_mode==0:
+                      print("MOIST: R2 qv {:.2f} qliq {:.2f} qice {:.2f} wcon-p {:.2e} wcon-t {:.2e} cldpath {:.2e} qvpos {:.2e} qnpos {:.2e}".format(np.nanmean(r2_lev_raw[:,1]),
+                            np.nanmean(r2_lev_raw[:,2]),np.nanmean(r2_lev_raw[:,3]),running_wcon, running_wcon_true, running_cldpath, running_qv_pos, running_qn_pos))
+
+                    if self.cfg.mp_mode==1:
+                      print("MOIST: R2 qv {:.2f} qn {:.2f} wcon-p {:.2e} wcon-t {:.2e} cldpath {:.2e} qvpos {:.2e} qnpos {:.2e}".format(np.nanmean(r2_lev_raw[:,1]),
+                            np.nanmean(r2_lev_raw[:,2]),running_wcon, running_wcon_true, running_cldpath, running_qv_pos, running_qn_pos))
+
                     if self.cfg.mp_mode==-1:
                       print("MOIST: R2 qv {:.2f} qn {:.2f} liqfrac {:.2f} wcon-p {:.2e} wcon-t {:.2e} cldpath {:.2e} qvpos {:.2e} qnpos {:.2e}".format(np.nanmean(r2_lev_raw[:,1]),
                             np.nanmean(r2_lev_raw[:,2]),np.nanmean(r2_lev_raw[:,3]),running_wcon, running_wcon_true, running_cldpath, running_qv_pos, running_qn_pos))
@@ -962,7 +1007,7 @@ class train_or_eval_one_epoch:
                       print("MOIST: R2 qtot {:.2f} cldfrac {:.2f} liqfrac {:.2f} wcon-p {:.2e}  wcon-t {:.2e}  cldpath {:.2e} qvpos {:.2e} qnpos {:.2e}".format(np.nanmean(r2_lev_raw[:,1]),
                             np.nanmean(r2_lev_raw[:,2]),np.nanmean(r2_lev_raw[:,3]),running_wcon, running_wcon_true, running_cldpath, running_qv_pos, running_qn_pos))
                                                                              
-                    if self.cfg.physical_precip:
+                    if self.cfg.predict_fluxes:
                         if self.model.return_neg_precip:
                             running_precip_neg  = running_precip_neg / fac
                             if self.model.store_precip: 
@@ -1105,8 +1150,10 @@ class train_or_eval_one_epoch:
         del loss, h_con, wcon
         if self.cfg.autoregressive:
             del rnn_mem,preds_lay,preds_sfc,targets_lay ,targets_sfc,x_sfc
-            del x_lay_raw, yto_lay, yto_sfc, x_true_prev, y_true_prev, y_pred_prev, prev_outputs, x_pred 
-        # if self.cfg.physical_precip: 
+            del x_lay_raw, yto_lay, yto_sfc, x_true_prev, y_true_prev, y_pred_prev, prev_outputs
+        if self.cfg.do_semi_online_training:
+            del x_pred 
+        # if self.cfg.predict_fluxes: 
         #     print("Weight w1 value:", self.model.w1)
         # if self.cfg.use_surface_memory:
         #     del sfc_mem
@@ -1194,7 +1241,6 @@ class generator_xy(torch.utils.data.Dataset):
                  lbd_qc=None,lbd_qi=None,lbd_qn=None,
                  v4_to_v5_inputs=False,
                  cld_inp_transformation="exp", 
-                 output_sqrt_norm=False,
                  remove_past_sfc_inputs=False,
                  qinput_prune=False,
                  rh_input_to_q=False, # convert rh to q
@@ -1230,7 +1276,6 @@ class generator_xy(torch.utils.data.Dataset):
         self.output_prune=output_prune
         self.include_prev_inputs = include_prev_inputs
         self.include_prev_outputs = include_prev_outputs
-        self.output_sqrt_norm = output_sqrt_norm 
         if self.mp_mode==0: # predict qliq, qice
             self.hu_mp_constraint = False 
             self.pred_liq_frac = False
@@ -1250,12 +1295,14 @@ class generator_xy(torch.utils.data.Dataset):
         self.lbd_qc = lbd_qc
         self.lbd_qi = lbd_qi
         self.lbd_qn = lbd_qn
-        if self.rh_input_to_q and hyam==None:
-            raise NotImplementedError("Please provide hyam,hybm")
+        # if hyam is not None:
+        #     hyam = hyam.cpu().numpy(); hybm = hybm.cpu().numpy()
         if hyam is not None:
-            hyam = hyam.cpu().numpy(); hybm = hybm.cpu().numpy()
-        self.hyam=hyam
-        self.hybm=hybm
+          self.hyam=hyam
+          self.hybm=hybm
+        else:
+          if self.rh_input_to_q:
+            raise NotImplementedError("Please provide hyam,hybm")
         if xcoeffs_ref is None:
             # self.v4_to_v5_inputs    = False
             self.reverse_input_norm = False
@@ -1288,7 +1335,7 @@ class generator_xy(torch.utils.data.Dataset):
             
         if ycoeffs is not None:
             self.yscale_lev, self.yscale_sca = ycoeffs
-       
+          
         # if type(self.filepath)==list:
         #     # In this case, each time a chunk is fetched, all the files are opened and the
         #     # data is concatenated along the column dimension
@@ -1501,7 +1548,7 @@ class generator_xy(torch.utils.data.Dataset):
             temp = x_lev_b[:,:,0]
             sp = x_sfc_b[:,0:1]
             pressure = (sp * (self.hybm.reshape(1,-1)) + 100000.0 * (self.hyam.reshape(1,-1)))
-            qwv = np.float32(relative_to_specific_humidity(rh, temp, pressure))
+            qwv = np.float32(relative_to_specific_humidity_climsim(rh, temp, pressure))
             # print("min max qwv raw", qwv.min(), qwv.max())
             if self.include_q_input:
                 x_lev_b = np.concatenate((x_lev_b, qwv.reshape(-1,60,1)),axis=2)
@@ -1673,14 +1720,9 @@ class generator_xy(torch.utils.data.Dataset):
         # for i in range(5):
         #     print("OOO", i, "minmax y ", y_lev_b[:,50,i].min(), y_lev_b[:,50,i].max())
         if self.use_numba:
-            if self.output_sqrt_norm:
-                apply_output_norm_numba_sqrt(y_lev_b, self.yscale_lev)
-            else:
-                apply_output_norm_numba(y_lev_b, self.yscale_lev)
+            apply_output_norm_numba(y_lev_b, self.yscale_lev)
         else:
             y_lev_b  = y_lev_b * self.yscale_lev
-            if self.output_sqrt_norm:
-                raise NotImplementedError()
         # print("after min max mean liq frac", y_lev_b[100,:,3].min(), y_lev_b[100,:,3].max(),y_lev_b[100,:,3])
 
         # for ivar in range(6):

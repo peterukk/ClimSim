@@ -33,10 +33,9 @@ ar_noise_mode: 0
 ar_tau: 0.85
 
 mp_mode: 0
-physical_precip: false
+predict_fluxes: false
 input_norm_per_level: true
 output_norm_per_level: true
-new_nolev_scaling: false
 cld_inp_transformation: "exp"
 rh_input_to_q: false
 include_q_input: true
@@ -91,6 +90,12 @@ nneur:
 - 144
 cfc_nout: 24 
 
+nlev: 60
+nx: 15
+nx_sfc: 19
+ny: 6
+ny_sfc: 8
+
 add_pres: true
 add_refpres: false
 add_stochastic_layer: false
@@ -98,11 +103,15 @@ use_initial_mlp: true
 use_intermediate_mlp: true
 memory: Hidden
 model_type: LSTM
+use_lstm: true
 randomly_initialize_cellstate: false
 concat: false
 separate_radiation: false
+use_physrad: false
 existing_gasopt_file_lw: None
 existing_gasopt_file_sw: None 
+ng_lw: 16 
+ng_sw: 16
 ensemble_size: 1 
 crps_start_epoch: 0 
 
