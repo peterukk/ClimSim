@@ -340,7 +340,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         qliq_gcm    = inputs_denorm[:,self.ilev_crm:,2:3] 
         qice_gcm    = inputs_denorm[:,self.ilev_crm:,3:4] 
         qn_gcm      = qliq_gcm + qice_gcm
-        tlev        = interpolate_tlev_batchfirst(inputs_denorm[:,:,0], play.squeeze(), plev.squeeze()) # (nb, nlev+1)
+        # tlev        = interpolate_tlev_batchfirst(inputs_denorm[:,:,0], play.squeeze(), plev.squeeze()) # (nb, nlev+1)
 
         latent_state = rnn2out 
         # latent_state =  rnn_mem # rnn_mem_prev 
@@ -1289,7 +1289,13 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # The input (a vertical sequence) is concatenated with the (latent) convective memory
         if self.store_precip:
           rnn_mem = rnn_mem[:,:,0:self.nh_mem0] # remove stored precip from array
-        inputs_main_crm = torch.cat((inputs_main_crm,rnn_mem), dim=2)
+
+        if self.use_physrad:
+          rnn_mem0 = rnn_mem 
+        else:
+          zer = torch.zeros(batch_size, self.ilev_crm, self.nh_mem0, device=device)
+          rnn_mem0 = torch.cat((zer, rnn_mem), dim=1)
+        inputs_main_crm = torch.cat((inputs_main_crm,rnn_mem0), dim=2)
 
         # TOA is first in memory, so to start at the surface we need to go backwards
         rnn1_input = torch.flip(inputs_main_crm, [1])
@@ -1346,10 +1352,16 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             rnn_mem = rnn2out 
 
         if not self.use_physrad: # Need to predict surface radiation variables with an MLP
-            out_sfc_rad = self.mlp_surface_output_rad(last_h.float())
+            out_sfc_rad = self.mlp_surface_output_rad(last_h.squeeze())
             dT_rad = self.mlp_output_rad(rnn2out)
 
+            rnn_mem = rnn_mem[:,self.ilev_crm:,:]
+
         out = self.mlp_output(rnn_mem)
+
+        if not self.use_physrad:
+          rnn2out = rnn2out[:,self.ilev_crm:]
+          # out = out[:,self.ilev_crm:]
 
         # PHYSICAL MOIST PHYSICS MODULE
         out_new, precc, precsc, rnn_mem, T_crm, qv_crm, qn_crm, area_frac, prec_negative = self.microphysics_decode(inputs_denorm, 
@@ -1390,9 +1402,11 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
           dT_rad, out_sfc_rad = self.radiative_transfer(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
                                       rnn_mem, rnn2out, T_crm, qv_crm, qn_crm, T, qv, qn, area_frac)
+          dT_rad = dT_rad.unsqueeze(2)
 
         # print("dT_rad 2  min max", torch.min(dT_rad[:,:]).item(), torch.max(dT_rad[:,:]).item())
-        out_new[:,:,0:1] = out_new[:,:,0:1] + dT_rad.unsqueeze(2)
+        # print("shape out", out_new.shape, "dt", dT_rad.shape)
+        out_new[:,:,0:1] = out_new[:,:,0:1] + dT_rad
 
         # # rad predicts everything except PRECSC, PRECC
         out_sfc =  torch.cat((out_sfc_rad[:,0:2], precsc, precc, out_sfc_rad[:,2:]),dim=1)

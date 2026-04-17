@@ -521,7 +521,7 @@ def main(cfg: DictConfig):
     elif cfg.model_type=="physRNN": 
         
         # if cfg.use_physrad:
-        torch._functorch.config.donated_buffer=False
+        # torch._functorch.config.donated_buffer=False
 
         ng_lw = 128
         ng_sw = 112 
@@ -530,7 +530,7 @@ def main(cfg: DictConfig):
         # ng_lw = 16  
         # ng_sw = 16
         mlp_gasopt_model_lw, mlp_gasopt_model_sw, mlp_gasopt_model_sw2  = None,None,None
-        if cfg.existing_gasopt_file_lw != "None":
+        if cfg.existing_gasopt_file_lw != "None" and cfg.use_physrad:
           print("Loading pre-existing longwave gas optics model from {}".format(cfg.existing_gasopt_file_lw))
           # from norm_coefficients import gasopt_lw_inp_max, gasopt_lw_inp_min, gasopt_lw_outp_mean, gasopt_lw_outp_std
           # ng = 16
@@ -538,7 +538,7 @@ def main(cfg: DictConfig):
           # infostr = summary(mlp_gasopt_model_lw)
           # print(infostr)
 
-        if cfg.existing_gasopt_file_sw != "None":
+        if cfg.existing_gasopt_file_sw != "None" and cfg.use_physrad:
           print("Loading pre-existing shortwave !ABSORPTION! gas optics model from {}".format(cfg.existing_gasopt_file_sw))
           mlp_gasopt_model_sw = load_gas_optics_model(cfg.existing_gasopt_file_sw, device, num_outputs_desired=ng_sw)
           existing_gasopt_file_sw2 = cfg.existing_gasopt_file_sw.replace('absorption', 'rayleigh')
