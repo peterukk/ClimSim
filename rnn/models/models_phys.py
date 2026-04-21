@@ -12,7 +12,7 @@ from .models import Base_RNN_autoreg
 from models_torch_kernels import GLU
 from models_torch_kernels import *
 from .physics_rad import outgoing_lw, reftrans_lw, lw_solver_noscat_batchlast
-from .physics_rad import calc_ref_trans_sw, adding_ica_sw_batchlast_opt, adding_tc_sw_batchlast_opt
+from .physics_rad import calc_ref_trans_sw, adding_ica_sw_batchlast_opt, adding_ica_sw, adding_tc_sw_batchlast_opt
 from .physics_rad import stratified_sample, interpolate_tlev_batchfirst, interpolate_tlev_batchlast
 from .physics_rad_e3sm import reitab, reltab, slingo_liq_cloud_optics_sw, ec_ice_optics_sw
 from metrics import specific_to_relative_humidity_torch_cc, specific_to_relative_humidity_torch
@@ -276,12 +276,14 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             if self.experimental_rad:
               self.conv_vmat = nn.Conv1d(self.mp_ncol, self.mp_ncol*self.mp_ncol, 2, stride=1)
 
-            self.mlp_sfc_albedo_sw1  = nn.Linear(4, self.ng_sw)
-            self.mlp_sfc_albedo_sw2  = nn.Linear(4, self.ng_sw)
-
-            self.mlp_sfc_albedo_lw  = nn.Linear(2, self.ng_lw)
             if not (self.use_existing_gas_optics_sw and (not self.reduce_sw_gas_optics)): 
               self.sw_solar_weights   = nn.Parameter(torch.randn(1, self.ng_sw))
+          else:
+            print("Using physical radiation, but not existing gas optics models, instead a combined MLP for cloud+gas")
+            self.mlp_lw_optprops    = nn.Linear(self.nx_lw_optprops, self.ny_lw_optprops*self.ng_lw)
+            self.mlp_sw_optprops    = nn.Linear(self.nx_sw_optprops, self.ny_sw_optprops*self.ng_sw)
+            from norm_coefficients import rrtmgp_sw_solar_source
+            self.sw_solar_weights   = nn.Parameter(torch.randn(1, self.ng_sw))
         else:
           self.mlp_surface_output_rad = nn.Linear(self.nh_rnn2, 6)
           # ['cam_out_NETSW', 'cam_out_FLWDS', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
@@ -1181,9 +1183,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       #   # flux_sw_dn_diffuse = flux_sw_dn_diffuse*v_mat
       #   # flux_sw_dn_direct = flux_sw_dn_direct*v_mat
       # else:
-
-      flux_sw_up, flux_sw_dn_diffuse, flux_sw_dn_direct = adding_ica_sw_batchlast_opt(incoming_toa, 
-                  emissivity_surf_diff_sw, emissivity_surf_dir_sw, 
+      flux_sw_up, flux_sw_dn_diffuse, flux_sw_dn_direct = adding_ica_sw(
+                  incoming_toa, emissivity_surf_diff_sw, emissivity_surf_dir_sw, 
                   ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir)
       
       del ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir
@@ -1364,8 +1365,17 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # out = out[:,self.ilev_crm:]
 
         # PHYSICAL MOIST PHYSICS MODULE
+        # if torch.is_autocast_enabled() and self.training:
+        #   # print("autocast ON!!")
+        #   with torch.autocast(device_type=rnn2out.device.type, enabled=False):
+        #     rnn2out = rnn2out.float()
+        #     last_h = last_h.float()
+        #     # rnn_mem = rnn_mem.float()
+        #     out_new, precc, precsc, rnn_mem, T_crm, qv_crm, qn_crm, area_frac, prec_negative = self.microphysics_decode(inputs_denorm, 
+        #                                         delta_plev, play, plev, P_old, out, rnn_mem, rnn2out, last_h)
+        # else:
         out_new, precc, precsc, rnn_mem, T_crm, qv_crm, qn_crm, area_frac, prec_negative = self.microphysics_decode(inputs_denorm, 
-                                            delta_plev, play, plev, P_old, out, rnn_mem, rnn2out, last_h)
+                                              delta_plev, play, plev, P_old, out, rnn_mem, rnn2out, last_h)
         # area_frac = area_frac.detach()
         
         if self.use_physrad:

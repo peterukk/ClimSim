@@ -250,7 +250,12 @@ def adding_ica_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivit
                 reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir):
         """
         Adding method for shortwave radiation
-
+        Args are torch.Tensors:
+          incoming_toa[ncol], emissivity_surf_diffuse[ncol], emissivity_surf_diffuse[ncol],
+          reflectance[nlev,ncol], transmittance[nlev,ncol], ref_dir[nlev,ncol], trans_dir_diff[nlev,ncol],
+          trans_dir_dir[nlev,ncol]
+        Here ncol is a batch dimension without loop dependencies (actually columns x spectral intervals),
+        nlev is the number of vertical levels (has loop dependencies)
         Returns:
             tuple: (flux_up, flux_dn_diffuse, flux_dn_direct) each of shape [ncol, nlev+1]
         """
@@ -324,12 +329,184 @@ def adding_ica_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivit
         
         return flux_up, flux_dn_diffuse, flux_dn_direct
 
+# Claude's failed attempt at further optimizing the kernel - actually slower
+@torch.compile(dynamic=False, fullgraph=True)
+def adding_ica_sw_batchlast_opt_v2(
+    incoming_toa,
+    emissivity_surf_diffuse,
+    emissivity_surf_direct,
+    reflectance,
+    transmittance,
+    ref_dir,
+    trans_dir_diff,
+    trans_dir_dir,
+):
+    nlev, ncol = reflectance.shape
+
+    # --- Upward sweep ---
+    albedo    = [emissivity_surf_diffuse]
+    albedodir = [emissivity_surf_direct]
+
+    albedo0    = emissivity_surf_diffuse
+    albedodir0 = emissivity_surf_direct
+
+    for jlev in range(nlev - 1, -1, -1):
+        R  = reflectance[jlev]
+        T  = transmittance[jlev]
+
+        inv_denom  = 1.0 / (1.0 - albedo0 * R)   # computed ONCE, shared below
+
+        albedodir0 = (ref_dir[jlev] + (trans_dir_dir[jlev] * albedodir0
+                      + trans_dir_diff[jlev] * albedo0) * T * inv_denom)
+        albedodir += [albedodir0]
+
+        albedo0    = (R + T * T * albedo0 * inv_denom)
+        albedo    += [albedo0]
+
+
+    albedo.reverse()
+    albedodir.reverse()
+
+    # --- Downward sweep ---
+    fluxdndir  = incoming_toa
+    fluxdndiff = torch.zeros(ncol, dtype=reflectance.dtype, device=reflectance.device)
+    fluxup     = incoming_toa * albedodir[0]
+
+    flux_up         = [fluxup]
+    flux_dn_direct  = [fluxdndir]
+    flux_dn_diffuse = [fluxdndiff]
+
+    for jlev in range(nlev):
+        R     = reflectance[jlev]
+        T     = transmittance[jlev]
+        alb1  = albedo[jlev + 1]
+        adir1 = albedodir[jlev + 1]
+
+        inv_denom  = 1.0 / (1.0 - R * alb1)      # computed ONCE, shared below
+
+        fluxdndiff = (T * fluxdndiff + fluxdndir
+                      * (T * adir1 * R + trans_dir_diff[jlev]) * inv_denom)
+        fluxdndir  = fluxdndir * trans_dir_dir[jlev]
+
+        flux_dn_direct  += [fluxdndir]
+        flux_dn_diffuse += [fluxdndiff]
+        flux_up         += [fluxdndir * adir1 + fluxdndiff * alb1]
+
+    return (
+        torch.stack(flux_up),
+        torch.stack(flux_dn_diffuse),
+        torch.stack(flux_dn_direct),
+    )
+    
+@torch.jit.script
+def adding_ica_sw_inference(
+    incoming_toa: Tensor,
+    emissivity_surf_diffuse: Tensor,
+    emissivity_surf_direct: Tensor,
+    reflectance: Tensor,
+    transmittance: Tensor,
+    ref_dir: Tensor,
+    trans_dir_diff: Tensor,
+    trans_dir_dir: Tensor,
+) -> Tuple[Tensor, Tensor, Tensor]:
+
+    nlev, ncol = reflectance.shape
+
+    # --- Upward sweep ---
+    # Only keep current-level scalars; no list accumulation needed.
+    # BUT: the downward sweep still needs albedo[jlev+1] at every level,
+    # so we cannot avoid storing the full arrays.
+    # We CAN avoid the Python list + reverse + stack overhead by writing
+    # directly into pre-allocated tensors — safe here because autograd
+    # is not running, so no version counter issues.
+    albedo    = torch.empty(nlev + 1, ncol, dtype=reflectance.dtype,
+                             device=reflectance.device)
+    albedodir = torch.empty(nlev + 1, ncol, dtype=reflectance.dtype,
+                             device=reflectance.device)
+
+    albedo[0]    = emissivity_surf_diffuse
+    albedodir[0] = emissivity_surf_direct
+
+    alb0  = emissivity_surf_diffuse
+    adir0 = emissivity_surf_direct
+
+    for k in range(nlev):
+        jlev = nlev - 1 - k
+        R  = reflectance[jlev]
+        T  = transmittance[jlev]
+        inv_denom = 1.0 / (1.0 - alb0 * R)
+        adir0 = ref_dir[jlev] + (trans_dir_dir[jlev] * adir0
+                + trans_dir_diff[jlev] * alb0) * T * inv_denom
+        alb0  = R + T * T * alb0 * inv_denom
+        albedo   [k + 1] = alb0
+        albedodir[k + 1] = adir0
+
+    # albedo   [0]    = surface,  albedo   [nlev] = TOA (bottom-up order)
+    # For downward sweep: albedo below level jlev (0=TOA) = albedo[nlev - jlev]
+    # (same indexing as the fixed Triton kernel)
+
+    # --- Downward sweep ---
+    flux_up         = torch.empty(nlev + 1, ncol, dtype=reflectance.dtype,
+                                   device=reflectance.device)
+    flux_dn_diffuse = torch.empty(nlev + 1, ncol, dtype=reflectance.dtype,
+                                   device=reflectance.device)
+    flux_dn_direct  = torch.empty(nlev + 1, ncol, dtype=reflectance.dtype,
+                                   device=reflectance.device)
+
+    fluxdndir  = incoming_toa
+    fluxdndiff = torch.zeros(ncol, dtype=reflectance.dtype,
+                              device=reflectance.device)
+
+    flux_up        [0] = incoming_toa * albedodir[nlev]   # TOA = slot nlev
+    flux_dn_direct [0] = fluxdndir
+    flux_dn_diffuse[0] = fluxdndiff
+
+    for jlev in range(nlev):
+        R     = reflectance[jlev]
+        T     = transmittance[jlev]
+        # albedo below this level = slot (nlev - jlev)
+        below = nlev - jlev
+        alb1  = albedo   [below]
+        adir1 = albedodir[below]
+        inv_denom  = 1.0 / (1.0 - R * alb1)
+        fluxdndiff = (T * fluxdndiff
+                      + fluxdndir * (T * adir1 * R + trans_dir_diff[jlev])
+                      * inv_denom)
+        fluxdndir  = fluxdndir * trans_dir_dir[jlev]
+        flux_dn_direct [jlev + 1] = fluxdndir
+        flux_dn_diffuse[jlev + 1] = fluxdndiff
+        flux_up        [jlev + 1] = fluxdndir * adir1 + fluxdndiff * alb1
+
+    return flux_up, flux_dn_diffuse, flux_dn_direct
+
+def adding_ica_sw(
+    incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
+    reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir
+):
+    if torch.is_grad_enabled():
+        # print("calling normal adding!")
+        return adding_ica_sw_batchlast_opt(
+            incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
+            reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir
+        )
+    else:
+        # print("calling inference adding!")
+        return adding_ica_sw_inference(
+            incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
+            reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir
+        )
+
 @torch.compile(dynamic=False)
 def adding_tc_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
                 reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir, V, ncol_subgrid):
         """
         Adding method for shortwave radiation, experimental TripleClouds version
         Requires overlap matrix V
+
+        Args are torch.Tensors:
+          incoming_toa[ncol], emissivity_surf_diffuse[ncol], emissivity_surf_diffuse[ncol],
+          reflectance[nlev,ncol], transmittance[nlev,ncol], ref_dir[nlev,ncol], trans_dir_diff[nlev,ncol],
+          trans_dir_dir[nlev,ncol], V[nlev,ncol]
 
         Returns:
             tuple: (flux_up, flux_dn_diffuse, flux_dn_direct) each of shape [ncol, nlev+1]

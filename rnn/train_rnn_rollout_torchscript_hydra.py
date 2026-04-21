@@ -951,10 +951,9 @@ def main(cfg: DictConfig):
           quit()
 
     if False: # test saving to TorchScript
-      SAVE_PATH       = "saved_models/" + MODEL_STR + ".pt"
-      save_file_torch1 = "saved_models/" + MODEL_STR + "_script_gpu.pt"
-      save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
-      print("saving model to", SAVE_PATH)
+      save_file_torch1 = "saved_models/" + MODEL_STR + "_sscript_gpu.pt"
+      save_file_torch2 = "saved_models/" + MODEL_STR + "_sscript_cpu.pt"
+      print("saving model to", save_file_torch2)
       # print("New best validation result obtained, saving model to", SAVE_PATH)
       if is_stochastic:
           model.use_ensemble=False
@@ -966,13 +965,21 @@ def main(cfg: DictConfig):
       model.train(False)
       # model.compile(mode="max-autotune")
       scripted_model = torch . jit . script ( model )
+    #   attrs = ["nlev", "nh_mem","nlev_mem", "xmean_lev","xmean_sca","xdiv_lev","xdiv_sca",
+    #       "lbd_qc","lbd_qi","lbd_qn","yscale_lev","yscale_sca","hyam", "hybm", 
+    #       "postprocessing","temperature_scaling"]
+      # scripted_model = torch.jit.freeze(scripted_model,preserved_attrs=attrs)  
       scripted_model = scripted_model.eval()
       scripted_model.save(save_file_torch1)
       model = model.to("cpu")
       scripted_model = torch . jit . script ( model )
+      # scripted_model = torch.jit.freeze(scripted_model,preserved_attrs=attrs) 
       scripted_model = scripted_model.eval()
       scripted_model.save(save_file_torch2)
-
+      scripted_model.nmem = model.nh_mem
+      # print("nmem:", scripted_model.nmem, "nlev_mem", scripted_model.nlev_mem)
+      quit()
+      
     prev_nan = False
     # --------------------------------------------------------------------------------------------------------
     # ----------------------------------------- START TRAINING -----------------------------------------------
@@ -1063,13 +1070,13 @@ def main(cfg: DictConfig):
             # MODEL CHECKPOINT IF VALIDATION LOSS IMPROVED
             labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
             # if True:
-            if cfg.save_model and val_loss < best_val_loss:
-                if epoch==6:
-                    SAVE_PATH       = "saved_models/" + MODEL_STR + "_ep6_" + ".pt"
+            if cfg.save_model:
+              if val_loss < best_val_loss or epoch in [5,11,19,39]:
+                if val_loss < best_val_loss:
+                  SAVE_PATH       = "saved_models/" + MODEL_STR + "_BEST_ep{}_".format(epoch+1) + ".pt"
                 else:
-                    SAVE_PATH       = "saved_models/" + MODEL_STR + ".pt"
+                  SAVE_PATH       = "saved_models/" + MODEL_STR + "_ep{}_".format(epoch+1) + ".pt"
 
-            # if cfg.save_model and val_loss > best_val_loss:
                 save_file_torch1 = "saved_models/" + MODEL_STR + "_script_gpu.pt"
                 save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
                 print("saving model to", SAVE_PATH)
@@ -1094,10 +1101,12 @@ def main(cfg: DictConfig):
                 # model.compile(mode="max-autotune")
                 scripted_model = torch . jit . script ( model )
                 scripted_model = scripted_model.eval()
+                scripted_model = torch.jit.freeze(scripted_model)  
                 scripted_model.save(save_file_torch1)
                 model = model.to("cpu")
                 scripted_model = torch . jit . script ( model )
                 scripted_model = scripted_model.eval()
+                scripted_model = torch.jit.freeze(scripted_model)  
                 scripted_model.save(save_file_torch2)
                 best_val_loss = val_loss 
                 model = model.to(device)
