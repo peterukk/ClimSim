@@ -9,6 +9,7 @@ import torch.nn.parameter as Parameter
 import torch.nn.functional as F
 from torch import Tensor
 
+@torch.compile(dynamic=False)
 def reitab(t: torch.Tensor) -> torch.Tensor:
     """
     Interpolate effective radius from temperature using tabulated values.
@@ -58,6 +59,7 @@ def reitab(t: torch.Tensor) -> torch.Tensor:
 
     return re
 
+@torch.compile(dynamic=False)
 def reltab(
         t: torch.Tensor,          # (N,) flattened from (ncol, pver)
         landfrac: torch.Tensor,   # (N,) — repeated across levels by caller
@@ -94,7 +96,7 @@ def reltab(
 
         return rel
 
-def slingo_liq_cloud_optics_sw(rel):
+def slingo_liq_cloud_optics_sw(rel, ng=4):
     # Adapted from https://github.com/NVlabs/E3SM/blob/main/components/eam/src/physics/rrtmgp/slingo.F90#L32
     coeffs1 = torch.tensor([2.817e-02, 2.682e-02, 2.264e-02, 1.281e-02], dtype=rel.dtype, device=rel.device)  # A: extinction OD
     coeffs2 = torch.tensor([1.305,     1.346,     1.454,     1.641    ], dtype=rel.dtype, device=rel.device)  # B: extinction OD
@@ -102,14 +104,53 @@ def slingo_liq_cloud_optics_sw(rel):
     coeffs4 = torch.tensor([1.63e-07,  2.35e-05,  1.24e-03,  7.56e-03 ], dtype=rel.dtype, device=rel.device)  # D: single scat albedo
     coeffs5 = torch.tensor([0.829,     0.794,     0.754,     0.826    ], dtype=rel.dtype, device=rel.device)  # E: asymmetry parameter
     coeffs6 = torch.tensor([2.482e-03, 4.226e-03, 6.560e-03, 4.353e-03], dtype=rel.dtype, device=rel.device)  # F: asymmetry parameter
-    re_um   = rel.clamp(4.2, 16.6)
 
-    k       = (coeffs1 + coeffs2 / re_um)
-    ssa     = (1.0 - coeffs3 - re_um * coeffs4)
-    g       = coeffs5 + re_um * coeffs6
+    re_um   = rel.clamp(4.2, 16.0)
+    y = torch.empty(6, ng, dtype=rel.dtype, device=rel.device)
+
+    # bnd_limits_gpt
+    # 1,10 | 11,18 | 19,29 | 30,37 | 38,46 | 47,56 | 57,67 | 68,71 | 72,80 | 81,89 | 90, 96 | 97, 102 | 103, 109 | 110, 112 
+    # bnd_limits_wavenumber
+    # 820, 2680 | 2680, 3250 | 3250, 4000 | 4000, 4650 | 4650, 5150  | 5150, 6150 | 6150, 7700 | 7700, 8050  | 12850, 16000 | 
+    # 16000, 22650 | 22650, 29000 | 29000, 38000 | 38000, 50000 |
+
+    # if ng=4 (default argument), we just output the original bands 
+    # if ng=112, we map to RRTMGP's g-points using knowledge of in which bands the 112 g-points are 
+    # if ng is anything else, we use a similar band allocation as RRTMGP (assuming N g-points are divided into the same bands)
+    if ng != 4:
+        i_lim1 = int(round((29/112)*ng))
+        i_lim2 = int(round((37/112)*ng))
+        i_lim3 = int(round((67/112)*ng))
+        i_lim4 = int(round((71/112)*ng))
+        i_lim5 = int(round((80/112)*ng))
+        i_lim6 = int(round((89/112)*ng))
+
+        x = torch.stack([coeffs1, coeffs2, coeffs3, coeffs4, coeffs5, coeffs6])  
+        # x = torch.stack([coeffs6, coeffs5, coeffs4, coeffs3, coeffs2, coeffs1])  
+
+        # y[:, 0:i_lim1]      = x[:, 3:4]
+        # y[:, i_lim1:i_lim2] = 0.5 * (x[:, 2:3] + x[:, 3:4])
+        # y[:, i_lim2:i_lim3] = x[:, 2:3]
+        # y[:, i_lim3:i_lim4] = 0.5 * (x[:, 1:2] + x[:, 2:3])
+        # y[:, i_lim4:i_lim5] = x[:, 1:2]
+        # y[:, i_lim5:i_lim6] = 0.5 * (x[:, 0:1] + x[:, 1:2])
+        # y[:, i_lim6:]       = x[:, 0:1]
+        y[:, 0:i_lim2]      = x[:, 3:4]   # band 4
+        y[:, i_lim2:i_lim4] = x[:, 2:3]   # band 3
+        y[:, i_lim4:i_lim5] = x[:, 1:2]   # band 2
+        y[:, i_lim5:]       = x[:, 0:1]   # band 1
+                
+        k       = (y[0] + y[1] / re_um)
+        ssa     = (1.0 - y[2] - re_um * y[3]).clamp(max=0.999999)
+        g       = y[4] + re_um * y[5]   
+    else:
+
+        k       = (coeffs1 + coeffs2 / re_um)
+        ssa     = (1.0 - y[2] - re_um * y[3]).clamp(max=0.999999)
+        g       = coeffs5 + re_um * coeffs6
     return k, ssa, g 
 
-def ec_ice_optics_sw(rei):
+def ec_ice_optics_sw(rei, ng=4):
     # Adapted from https://github.com/NVlabs/E3SM/blob/main/components/eam/src/physics/rrtmgp/ebert_curry.F90#L30
     coeffs1 = torch.tensor([3.448e-03, 3.448e-03, 3.448e-03, 3.448e-03], dtype=rei.dtype, device=rei.device)  # a: extinction OD
     coeffs2 = torch.tensor([2.431,     2.431,     2.431,     2.431    ], dtype=rei.dtype, device=rei.device)  # b: extinction OD
@@ -119,8 +160,38 @@ def ec_ice_optics_sw(rei):
     coeffs6 = torch.tensor([5.851e-04, 5.665e-04, 7.267e-04, 1.076e-04], dtype=rei.dtype, device=rei.device)  # f: asymmetry parameter
 
     re_um   = rei.clamp(13.0, 130.0)
-    k       = (coeffs1 + coeffs2 / re_um)
-    ssa     = (1.0 - coeffs3 - re_um * coeffs4)
-    g       = coeffs5 + re_um * coeffs6
+
+    if ng != 4:
+        i_lim1 = int(round((29/112)*ng))
+        i_lim2 = int(round((37/112)*ng))
+        i_lim3 = int(round((67/112)*ng))
+        i_lim4 = int(round((71/112)*ng))
+        i_lim5 = int(round((80/112)*ng))
+        i_lim6 = int(round((89/112)*ng))
+
+        x = torch.stack([coeffs1, coeffs2, coeffs3, coeffs4, coeffs5, coeffs6])  
+        # x = torch.stack([coeffs6, coeffs5, coeffs4, coeffs3, coeffs2, coeffs1])  
+        y = torch.empty(6, ng, dtype=rei.dtype, device=rei.device)
+
+        # y[:, 0:i_lim1]      = x[:, 3:4]
+        # y[:, i_lim1:i_lim2] = 0.5 * (x[:, 2:3] + x[:, 3:4])
+        # y[:, i_lim2:i_lim3] = x[:, 2:3]
+        # y[:, i_lim3:i_lim4] = 0.5 * (x[:, 1:2] + x[:, 2:3])
+        # y[:, i_lim4:i_lim5] = x[:, 1:2]
+        # y[:, i_lim5:i_lim6] = 0.5 * (x[:, 0:1] + x[:, 1:2])
+        # y[:, i_lim6:]       = x[:, 0:1]
+        y[:, 0:i_lim2]      = x[:, 3:4]   # band 4
+        y[:, i_lim2:i_lim4] = x[:, 2:3]   # band 3
+        y[:, i_lim4:i_lim5] = x[:, 1:2]   # band 2
+        y[:, i_lim5:]       = x[:, 0:1]   # band 1
+        
+        k       = (y[0] + y[1] / re_um)
+        ssa     = (1.0 - y[2] - re_um * y[3]).clamp(max=0.999999)
+        g       = y[4] + re_um * y[5]   
+    else:
+         
+        k       = (coeffs1 + coeffs2 / re_um)
+        ssa     = (1.0 - coeffs3 - re_um * coeffs4).clamp(max=0.999999)
+        g       = coeffs5 + re_um * coeffs6
     return k, ssa, g 
     

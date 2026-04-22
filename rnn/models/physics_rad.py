@@ -166,10 +166,14 @@ def calc_ref_trans_sw(mu0, od, ssa, asymmetry):
     # ------------------------------------------------------------------ #
     # Two-stream gamma coefficients
     # ------------------------------------------------------------------ #
-    factor  = 0.75 * asymmetry
-    gamma1  = 2.0  - ssa * (1.25 + factor)
-    gamma2  = ssa  * (0.75 - factor)
-    gamma3  = 0.5  - mu0 * factor
+    # factor  = 0.75 * asymmetry
+    # gamma1  = 2.0  - ssa * (1.25 + factor)
+    # gamma2  = ssa  * (0.75 - factor)
+    # gamma3  = 0.5  - mu0 * factor
+    gamma1 = (8 - ssa*(5 + 3*asymmetry)) * 0.25
+    gamma2 = 3*(ssa*(1 - asymmetry)) * 0.25
+    gamma3 = (2 - 3*mu0*asymmetry) * 0.25
+
     gamma4  = 1.0  - gamma3
 
     # alpha1 / alpha2  (Eqs. 16-17)
@@ -245,6 +249,7 @@ def calc_ref_trans_sw(mu0, od, ssa, asymmetry):
     return ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir
 
 
+# @torch.jit.script
 @torch.compile(dynamic=False)
 def adding_ica_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
                 reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir):
@@ -305,9 +310,13 @@ def adding_ica_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivit
         # Work back down through the atmosphere computing the fluxes at each half-level
         for jlev in range(nlev):  # 1 to nlev in Fortran indexing
 
-            fluxdndiff = (transmittance[jlev]*fluxdndiff + fluxdndir 
-                    * (transmittance[jlev]*albedodir[jlev + 1]*reflectance[jlev]  + trans_dir_diff[jlev] ) 
-                    / (1.0-  reflectance[jlev]*albedo[jlev + 1])) 
+            # fluxdndiff = (transmittance[jlev]*fluxdndiff + fluxdndir 
+            #         * (transmittance[jlev]*albedodir[jlev + 1]*reflectance[jlev]  + trans_dir_diff[jlev] ) 
+            #         / (1.0-  reflectance[jlev]*albedo[jlev + 1])) 
+            
+            fluxdndiff = (transmittance[jlev]*fluxdndiff 
+                + fluxdndir * (transmittance[jlev]*albedodir[jlev+1]*reflectance[jlev] + trans_dir_diff[jlev])
+                ) / (1.0 - reflectance[jlev]*albedo[jlev+1])
 
             # flux_dn_direct[jlev + 1] = fluxdndir * trans_dir_dir[jlev,:]
             fluxdndir =  fluxdndir * trans_dir_dir[jlev,:]
@@ -324,80 +333,9 @@ def adding_ica_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivit
         flux_dn_diffuse = torch.stack(flux_dn_diffuse)
         flux_up = torch.stack(flux_up)
 
-        # Final cosine correction for surface direct flux
-        # flux_dn_direct[:, nlev] = flux_dn_direct[:, nlev] * cos_sza
-        
+
         return flux_up, flux_dn_diffuse, flux_dn_direct
 
-# Claude's failed attempt at further optimizing the kernel - actually slower
-@torch.compile(dynamic=False, fullgraph=True)
-def adding_ica_sw_batchlast_opt_v2(
-    incoming_toa,
-    emissivity_surf_diffuse,
-    emissivity_surf_direct,
-    reflectance,
-    transmittance,
-    ref_dir,
-    trans_dir_diff,
-    trans_dir_dir,
-):
-    nlev, ncol = reflectance.shape
-
-    # --- Upward sweep ---
-    albedo    = [emissivity_surf_diffuse]
-    albedodir = [emissivity_surf_direct]
-
-    albedo0    = emissivity_surf_diffuse
-    albedodir0 = emissivity_surf_direct
-
-    for jlev in range(nlev - 1, -1, -1):
-        R  = reflectance[jlev]
-        T  = transmittance[jlev]
-
-        inv_denom  = 1.0 / (1.0 - albedo0 * R)   # computed ONCE, shared below
-
-        albedodir0 = (ref_dir[jlev] + (trans_dir_dir[jlev] * albedodir0
-                      + trans_dir_diff[jlev] * albedo0) * T * inv_denom)
-        albedodir += [albedodir0]
-
-        albedo0    = (R + T * T * albedo0 * inv_denom)
-        albedo    += [albedo0]
-
-
-    albedo.reverse()
-    albedodir.reverse()
-
-    # --- Downward sweep ---
-    fluxdndir  = incoming_toa
-    fluxdndiff = torch.zeros(ncol, dtype=reflectance.dtype, device=reflectance.device)
-    fluxup     = incoming_toa * albedodir[0]
-
-    flux_up         = [fluxup]
-    flux_dn_direct  = [fluxdndir]
-    flux_dn_diffuse = [fluxdndiff]
-
-    for jlev in range(nlev):
-        R     = reflectance[jlev]
-        T     = transmittance[jlev]
-        alb1  = albedo[jlev + 1]
-        adir1 = albedodir[jlev + 1]
-
-        inv_denom  = 1.0 / (1.0 - R * alb1)      # computed ONCE, shared below
-
-        fluxdndiff = (T * fluxdndiff + fluxdndir
-                      * (T * adir1 * R + trans_dir_diff[jlev]) * inv_denom)
-        fluxdndir  = fluxdndir * trans_dir_dir[jlev]
-
-        flux_dn_direct  += [fluxdndir]
-        flux_dn_diffuse += [fluxdndiff]
-        flux_up         += [fluxdndir * adir1 + fluxdndiff * alb1]
-
-    return (
-        torch.stack(flux_up),
-        torch.stack(flux_dn_diffuse),
-        torch.stack(flux_dn_direct),
-    )
-    
 @torch.jit.script
 def adding_ica_sw_inference(
     incoming_toa: Tensor,
@@ -469,9 +407,7 @@ def adding_ica_sw_inference(
         alb1  = albedo   [below]
         adir1 = albedodir[below]
         inv_denom  = 1.0 / (1.0 - R * alb1)
-        fluxdndiff = (T * fluxdndiff
-                      + fluxdndir * (T * adir1 * R + trans_dir_diff[jlev])
-                      * inv_denom)
+        fluxdndiff = ((T * fluxdndiff  + fluxdndir * (T * adir1 * R + trans_dir_diff[jlev])) * inv_denom)
         fluxdndir  = fluxdndir * trans_dir_dir[jlev]
         flux_dn_direct [jlev + 1] = fluxdndir
         flux_dn_diffuse[jlev + 1] = fluxdndiff
@@ -608,7 +544,7 @@ def adding_tc_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivity
 
 
 
-def stratified_sample(p, G, shuffle=True):
+def stratified_sample(p, G, shuffle=False):
     """
     Stratified sampling: assign G spectral points among N sub-grid states proportional to p
 

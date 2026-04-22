@@ -1073,9 +1073,9 @@ def main(cfg: DictConfig):
             if cfg.save_model:
               if val_loss < best_val_loss or epoch in [5,11,19,39]:
                 if val_loss < best_val_loss:
-                  SAVE_PATH       = "saved_models/" + MODEL_STR + "_BEST_ep{}_".format(epoch+1) + ".pt"
+                  SAVE_PATH       = "saved_models/" + MODEL_STR + "_BEST.pt"
                 else:
-                  SAVE_PATH       = "saved_models/" + MODEL_STR + "_ep{}_".format(epoch+1) + ".pt"
+                  SAVE_PATH       = "saved_models/" + MODEL_STR + "_ep{}".format(epoch+1) + ".pt"
 
                 save_file_torch1 = "saved_models/" + MODEL_STR + "_script_gpu.pt"
                 save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
@@ -1101,12 +1101,12 @@ def main(cfg: DictConfig):
                 # model.compile(mode="max-autotune")
                 scripted_model = torch . jit . script ( model )
                 scripted_model = scripted_model.eval()
-                scripted_model = torch.jit.freeze(scripted_model)  
+                # scripted_model = torch.jit.freeze(scripted_model)  
                 scripted_model.save(save_file_torch1)
                 model = model.to("cpu")
                 scripted_model = torch . jit . script ( model )
                 scripted_model = scripted_model.eval()
-                scripted_model = torch.jit.freeze(scripted_model)  
+                # scripted_model = torch.jit.freeze(scripted_model)  
                 scripted_model.save(save_file_torch2)
                 best_val_loss = val_loss 
                 model = model.to(device)
