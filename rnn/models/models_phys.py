@@ -196,6 +196,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # 
         # --------- Physical radiation options configured here ---------
         # 
+        self.update_states_for_rad  = False
         if self.use_physrad:
 
           # Update (sub-grid?) humidity states by scaling with true grid scale values (updated with tendency)
