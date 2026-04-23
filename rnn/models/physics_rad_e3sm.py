@@ -106,7 +106,6 @@ def slingo_liq_cloud_optics_sw(rel:torch.Tensor, ng:int=4):
     coeffs6 = torch.tensor([2.482e-03, 4.226e-03, 6.560e-03, 4.353e-03], dtype=rel.dtype, device=rel.device)  # F: asymmetry parameter
 
     re_um   = rel.clamp(4.2, 16.0)
-    y = torch.empty(6, ng, dtype=rel.dtype, device=rel.device)
 
     # bnd_limits_gpt
     # 1,10 | 11,18 | 19,29 | 30,37 | 38,46 | 47,56 | 57,67 | 68,71 | 72,80 | 81,89 | 90, 96 | 97, 102 | 103, 109 | 110, 112 
@@ -127,6 +126,7 @@ def slingo_liq_cloud_optics_sw(rel:torch.Tensor, ng:int=4):
 
         x = torch.stack([coeffs1, coeffs2, coeffs3, coeffs4, coeffs5, coeffs6])  
         # x = torch.stack([coeffs6, coeffs5, coeffs4, coeffs3, coeffs2, coeffs1])  
+        y = torch.empty(6, ng, dtype=rel.dtype, device=rel.device)
 
         # y[:, 0:i_lim1]      = x[:, 3:4]
         # y[:, i_lim1:i_lim2] = 0.5 * (x[:, 2:3] + x[:, 3:4])
@@ -146,7 +146,7 @@ def slingo_liq_cloud_optics_sw(rel:torch.Tensor, ng:int=4):
     else:
 
         k       = (coeffs1 + coeffs2 / re_um)
-        ssa     = (1.0 - y[2] - re_um * y[3]).clamp(max=0.999999)
+        ssa     = (1.0 - coeffs3 - re_um * coeffs4).clamp(max=0.999999)
         g       = coeffs5 + re_um * coeffs6
     return k, ssa, g 
 
