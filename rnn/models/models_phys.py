@@ -51,7 +51,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     do_mcica: Final[bool]
     include_qv_variability: Final[bool]
     update_states_for_rad: Final[bool]
-    rad_cloud_masking: Final[bool]
     use_e3sm_cloud_optics: Final[bool] 
     use_existing_gas_optics_lw: Final[bool]
     use_existing_gas_optics_sw: Final[bool]
@@ -206,7 +205,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         #     self.update_states_for_rad = False
           self.use_e3sm_cloud_optics  = True 
           self.include_qv_variability = True
-          self.rad_cloud_masking      = False 
           # Option for using TripleClouds-style solver where fluxes are computed in each sub-grid region (mp_ncol) and g-point,
           # then summed over the regions
           # The vertical overlap between regions is handled by a matrix (v_matrix) which is here predicted with a convolutional layer
@@ -214,8 +212,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           self.do_mcica               = False 
           if self.experimental_rad:
             self.do_mcica=False
-          print("rad_cloud_mask: {}, use_e3sm_cld: {}, exp_rad {}, mcica: {}, include_qv_var: {}, updstates4rad {}".format(self.rad_cloud_masking, 
-                  self.use_e3sm_cloud_optics, self.experimental_rad, self.do_mcica, self.include_qv_variability, self.update_states_for_rad))
+          print("use_e3sm_cld: {}, exp_rad {}, mcica: {}, include_qv_var: {}, updstates4rad {}".format(self.use_e3sm_cloud_optics, 
+                          self.experimental_rad, self.do_mcica, self.include_qv_variability, self.update_states_for_rad))
           
           self.ny_sw_optprops     = 3  # tau_abs, tau_sca, g
           self.ny_lw_optprops     = 2  # tau_abs, planck_fraction (Fraction of Planck source associated with each g-point)
@@ -605,7 +603,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
         return out_new, precc, precsc, rnn_mem, T_crm, qv_crm, qn_crm, area_frac, prec_negative
     
-    def radiative_transfer(self, inputs_main, inputs_aux0, inputs_denorm, play, plev, delta_plev, rnn_mem, rnn2out, 
+    def radiative_transfer(self, inputs_main, inputs_aux0, inputs_denorm, play, plev, delta_plev, rnn_mem, 
                 T_crm, qv_crm, qn_crm, T_new, qv_new, qn_new, area_frac):
       
       
@@ -672,19 +670,14 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # However it may be difficult to optimize T_crm - instead, predict liq_frac_crm with a NN?
         # liq_frac_crm = self.sigmoid(self.mlp_liq_frac_crm(rnn2out)).transpose(0,1)
 
-        cldpath_tot       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qn_crm,0,1).contiguous()
+        cldpath_tot       = 1000*torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qn_crm,0,1).contiguous()
         cldpath_liq       = liq_frac_crm * cldpath_tot 
         cldpath_ice       = (1-liq_frac_crm) * cldpath_tot
       else:
         # just use column dry air "path" to scale
         # cldpath       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qn_new[:,self.ilev_crm:],0,1).contiguous()
-        cldpath       = torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qn_crm,0,1).contiguous()
+        cldpath       = 1000*torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qn_crm,0,1).contiguous()
         # print("cldpath min max mean", cldpath.min().item(), cldpath.max().item(), cldpath.mean().item())
-        if self.rad_cloud_masking:
-          qn_new_vint = qn_new.sum(axis=1)
-          inds_do_clouds = (qn_new_vint > 1e-6).squeeze() 
-          # inds_do_clouds = (cldpath.squeeze() > 1e-5)
-          # inds_do_clouds = (cldpath.squeeze() > 1e-10)
         
       temp        = (T_new - 160 ) / (180)
       pressure    = (torch.log(play) - 0.00515) / (11.59485)
@@ -709,11 +702,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         snowh     =  torch.repeat_interleave(inputs_aux[:,15].view(1,-1),self.nlev_crm,dim=0)
         liq_eff_rad = reltab(T_new1, landfrac.view(-1), icefrac.view(-1), snowh.view(-1))
         liq_eff_rad = liq_eff_rad.view((self.nlev_crm, batch_size,1))
-        
-        if self.rad_cloud_masking:
-            ice_eff_rad = ice_eff_rad[:,inds_do_clouds,:]
-            liq_eff_rad = liq_eff_rad[:,inds_do_clouds,:]
-            T_crm = T_crm[:,inds_do_clouds,:]
 
         # print("min max mean ice_eff_rad", ice_eff_rad.min().item(), ice_eff_rad.max().item(), ice_eff_rad.mean().item())
         # print("min max mean liq_eff_rad", liq_eff_rad.min().item(), liq_eff_rad.max().item(), liq_eff_rad.mean().item())
@@ -725,9 +713,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           ice_eff_rad_normed   = ice_eff_rad / 125.0
           x_cld =  torch.cat((torch.transpose(t_new_crm,0,1).contiguous(), ice_eff_rad_normed, liq_eff_rad_normed), dim=2)
           # x_cld =  torch.cat((torch.transpose(t_new_crm,0,1).contiguous(),torch.transpose(area_frac,0,1).contiguous(), ice_eff_rad, liq_eff_rad), dim=2)
-
-          if self.rad_cloud_masking:
-            x_cld = x_cld[:,inds_do_clouds,:]
 
         if self.use_existing_gas_optics_lw:  
           zero_gases = torch.zeros(batch_size, self.nlev, 11, device=device)
@@ -765,11 +750,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             tau_lw_cld = self.relu(self.cloud_optics_lw(x_cld))
 
           zeroes = torch.zeros(self.ilev_crm, batch_size, self.ng_lw, device=device)
-          # ----
-          if self.rad_cloud_masking and not self.use_e3sm_cloud_optics:
-            tau_lw_cld0 = torch.zeros(self.nlev_crm, batch_size, self.ng_lw, device=device)
-            tau_lw_cld0[:,inds_do_clouds,:] = tau_lw_cld
-            tau_lw_cld = tau_lw_cld0
           # ---
           if self.use_e3sm_cloud_optics:
             # tau_lw_cld_liq      = cldpath_liq*self.relu(tau_lw_cld_liq.squeeze())
@@ -778,10 +758,10 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             # slingo_liq_optics_lw: https://github.com/NVlabs/E3SM/blob/main/components/eam/src/physics/rrtmgp/slingo.F90#L147
             # Strange that there's no spectral dependence, cannot be very accurate!
             icefrac         = cldpath_ice / torch.clamp(cldpath_tot, min=1.0e-8)
-            tau_lw_cld_liq  =  1000*cldpath_tot*0.090361*(1-icefrac)
+            tau_lw_cld_liq  =  cldpath_tot*0.090361*(1-icefrac)
 
             # ec_ice_optics_lw : https://github.com/NVlabs/E3SM/blob/main/components/eam/src/physics/rrtmgp/ebert_curry.F90#L132
-            tau_lw_cld_ice  = 1000*cldpath_tot*icefrac*(0.005 + 1.0 / ice_eff_rad.clamp(13.0, 130.0))
+            tau_lw_cld_ice  = cldpath_tot*icefrac*(0.005 + 1.0 / ice_eff_rad.clamp(13.0, 130.0))
             tau_lw_cld      = tau_lw_cld_liq + tau_lw_cld_ice        
           else:
             tau_lw_cld = cldpath*self.relu(tau_lw_cld)# 0.01*self.relu(tau_lw_cld)
@@ -868,11 +848,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           if not self.use_e3sm_cloud_optics: 
             sw_optprops = self.cloud_optics_sw(x_cld)
             sw_optprops = self.cloud_optics_sw2(sw_optprops) 
-            if self.rad_cloud_masking:
-              sw_optprops0 = torch.zeros(self.nlev_crm, batch_size, 3*self.ng_sw, device=device)
-              sw_optprops0[:,inds_do_clouds,:] = sw_optprops
-              sw_optprops = sw_optprops0
-
 
           if self.experimental_rad:
               zeroes = torch.zeros(10, batch_size, self.ng_sw, self.mp_ncol, device=device)
@@ -924,14 +899,13 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                 kscag_sw_cld_ice = torch.repeat_interleave(kscag_sw_cld_ice.unsqueeze(3), self.mp_ncol,dim=3)
 
             cldeps = 1e-7
-            multfac = 1000
-            # optical depth (dimensionless) = 1000​​ (g/kg) * cldpath (kg/m2) *  k (m2/g)
-            tau_sw_cld_liq  = multfac*cldpath_liq*k_sw_cld_liq
-            tau_sw_cld_ice  = multfac*cldpath_ice*k_sw_cld_ice
-            tau_sw_scat_cld_liq  = multfac*cldpath_liq*ksca_sw_cld_liq
-            tau_sw_scat_cld_ice  = multfac*cldpath_ice*ksca_sw_cld_ice
-            g_tau_scat_sw_cld_liq  = multfac*cldpath_liq*kscag_sw_cld_liq
-            g_tau_scat_sw_cld_ice  = multfac*cldpath_ice*kscag_sw_cld_ice
+            # optical depth (dimensionless) = cldpath (1000 kg/m2) *  k (m2/g) =  (kg/m2) *  k (1000 g/kg m2/g)
+            tau_sw_cld_liq  = cldpath_liq*k_sw_cld_liq
+            tau_sw_cld_ice  = cldpath_ice*k_sw_cld_ice
+            tau_sw_scat_cld_liq  = cldpath_liq*ksca_sw_cld_liq
+            tau_sw_scat_cld_ice  = cldpath_ice*ksca_sw_cld_ice
+            g_tau_scat_sw_cld_liq  = cldpath_liq*kscag_sw_cld_liq
+            g_tau_scat_sw_cld_ice  = cldpath_ice*kscag_sw_cld_ice
 
             tau_sw_cld          = tau_sw_cld_ice + tau_sw_cld_liq
             tau_sw_scat_cld     = tau_sw_scat_cld_liq + tau_sw_scat_cld_ice 
@@ -958,7 +932,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             # print("shape args", tau_sw_cld_liq.shape, tau_sw_cld_ice.shape, ssa_sw_cld.shape, g_sw_cld.shape)
             ssa_sw_cld        = self.sigmoid(ssa_sw_cld.squeeze())
             tau_sw_cld      = torch.cat((zeroes, tau_sw_cld),dim=0)
-            tau_sw_cld      = cldpath*self.relu(tau_sw_cld.squeeze())
+            tau_sw_cld      = cldpath*self.relu(tau_sw_cld.squeeze()) # / 1000
             g_sw_cld        = self.sigmoid(g_sw_cld.squeeze())
             
             # if pred_cld_ssa:
@@ -1471,7 +1445,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             qv  = self.relu(qv + dqv)
 
           dT_rad, out_sfc_rad = self.radiative_transfer(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
-                                      rnn_mem, rnn2out, T_crm, qv_crm, qn_crm, T, qv, qn, area_frac)
+                                      rnn_mem, T_crm, qv_crm, qn_crm, T, qv, qn, area_frac)
           dT_rad = dT_rad.unsqueeze(2)
 
         # print("dT_rad 2  min max", torch.min(dT_rad[:,:]).item(), torch.max(dT_rad[:,:]).item())

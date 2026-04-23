@@ -96,7 +96,7 @@ def reltab(
 
         return rel
 
-def slingo_liq_cloud_optics_sw(rel, ng=4):
+def slingo_liq_cloud_optics_sw(rel:torch.Tensor, ng:int=4):
     # Adapted from https://github.com/NVlabs/E3SM/blob/main/components/eam/src/physics/rrtmgp/slingo.F90#L32
     coeffs1 = torch.tensor([2.817e-02, 2.682e-02, 2.264e-02, 1.281e-02], dtype=rel.dtype, device=rel.device)  # A: extinction OD
     coeffs2 = torch.tensor([1.305,     1.346,     1.454,     1.641    ], dtype=rel.dtype, device=rel.device)  # B: extinction OD
@@ -150,7 +150,7 @@ def slingo_liq_cloud_optics_sw(rel, ng=4):
         g       = coeffs5 + re_um * coeffs6
     return k, ssa, g 
 
-def ec_ice_optics_sw(rei, ng=4):
+def ec_ice_optics_sw(rei:torch.Tensor, ng:int=4):
     # Adapted from https://github.com/NVlabs/E3SM/blob/main/components/eam/src/physics/rrtmgp/ebert_curry.F90#L30
     coeffs1 = torch.tensor([3.448e-03, 3.448e-03, 3.448e-03, 3.448e-03], dtype=rei.dtype, device=rei.device)  # a: extinction OD
     coeffs2 = torch.tensor([2.431,     2.431,     2.431,     2.431    ], dtype=rei.dtype, device=rei.device)  # b: extinction OD
