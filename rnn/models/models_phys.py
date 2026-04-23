@@ -48,7 +48,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     # --- Options for physical radiation ---
     use_physrad: Final[bool]
     experimental_rad: Final[bool]
-    do_mcica: Final[bool]
+    use_mcica: Final[bool]
     include_qv_variability: Final[bool]
     update_states_for_rad: Final[bool]
     use_e3sm_cloud_optics: Final[bool] 
@@ -196,25 +196,34 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # 
         # --------- Physical radiation options configured here ---------
         # 
-        self.update_states_for_rad  = False
+        self.update_states_for_rad  = False  
         if self.use_physrad:
-
-          # Update (sub-grid?) humidity states by scaling with true grid scale values (updated with tendency)
+          # Update (latent/"sub-grid") variables for radiation after moist physics module ?
           self.update_states_for_rad  = True
-        #   if cfg.ensemble_size>1:
-        #     print("!!!!!!!!!!!!!!!!!!!!!!!CHANGING UPDATE STATES TO FALSE!!!!!!!!!!!!!!!!!!!!!!")
-        #     self.update_states_for_rad = False
-          self.use_e3sm_cloud_optics  = True 
+          self.use_e3sm_cloud_optics  = True
+          # When using separate gas optics module, include water vapor variability by sampling from sub-grid states and doing two passes? 
           self.include_qv_variability = True
           # Option for using TripleClouds-style solver where fluxes are computed in each sub-grid region (mp_ncol) and g-point,
           # then summed over the regions
           # The vertical overlap between regions is handled by a matrix (v_matrix) which is here predicted with a convolutional layer
           self.experimental_rad       = False   
-          self.do_mcica               = False 
+          # McICA-style sampling of sub-grid cloud states for each g-point
+          self.use_mcica               = cfg.use_mcica # False 
           if self.experimental_rad:
-            self.do_mcica=False
+            self.use_mcica=False
+          if self.use_e3sm_cloud_optics:
+            if (self.ng_lw != self.mp_ncol) or (self.ng_lw != self.mp_ncol):
+              print("Warning: use_e3sm_cloud_optics was true, and number of g-points did not equal number of sub-grid regions. For this to work, McICA needs to be ON")
+              self.use_mcica = True
+            if not self.use_mcica:
+              print("Warning: McICA was off, so the radiation treats cloud sub-grid variability deterministically by each g-point being associated with a specific sub-grid region")
+              print("This is a bit weird conceptually but has the advantage of keeping all gradients alive, has low computational cost, and seems to work!")
+
+          if not (self.use_existing_gas_optics_lw or self.use_existing_gas_optics_sw):
+            self.use_e3sm_cloud_optics = False
+
           print("use_e3sm_cld: {}, exp_rad {}, mcica: {}, include_qv_var: {}, updstates4rad {}".format(self.use_e3sm_cloud_optics, 
-                          self.experimental_rad, self.do_mcica, self.include_qv_variability, self.update_states_for_rad))
+                          self.experimental_rad, self.use_mcica, self.include_qv_variability, self.update_states_for_rad))
           
           self.ny_sw_optprops     = 3  # tau_abs, tau_sca, g
           self.ny_lw_optprops     = 2  # tau_abs, planck_fraction (Fraction of Planck source associated with each g-point)
@@ -639,7 +648,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
         #  ------------------- McICA style randomization of which cloud state each g-point sees -------------------
 
-        if self.do_mcica:
+        if self.use_mcica:
           # Three different options for McICA-inspired stochastic cloud sampling:
           #   1) Just shuffle the sub-grid cloud states along the hidden dimension (ncol_mp for cloud variables, ng for rad variables),
           #      requires  ncol_mp = ng_sw = ng_lw and doesn't account for area fractions
@@ -767,7 +776,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           else:
             tau_lw_cld = cldpath*self.relu(tau_lw_cld)# 0.01*self.relu(tau_lw_cld)
 
-          if not self.do_mcica and (self.mp_ncol != self.ng_lw): 
+          if not self.use_mcica and (self.mp_ncol != self.ng_lw): 
               tau_lw_cld = torch.repeat_interleave(tau_lw_cld, self.ng_lw//self.mp_ncol, dim=2)
 
           tau_lw_cld  = torch.cat((zeroes, tau_lw_cld),dim=0)
