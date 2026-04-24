@@ -1437,6 +1437,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
               rnn2out = rnn2out[:,self.ilev_crm:]
 
             out_sfc_rad = self.mlp_surface_output_rad(last_h_rad.squeeze())
+            out_sfc_rad = self.relu(out_sfc_rad)
             dT_rad = self.mlp_output_rad(last_rnn)
 
         out = self.mlp_output(rnn_mem)
