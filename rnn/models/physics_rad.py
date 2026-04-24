@@ -250,13 +250,15 @@ def calc_ref_trans_sw(mu0, od, ssa, asymmetry):
 
 
 # @torch.jit.script
+# @torch.compile(dynamic=False, backend="inductor")
+# @torch.compile(dynamic=False,mode="max-autotune-no-cudagraphs")
 @torch.compile(dynamic=False)
-def adding_ica_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
-                reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir):
+def adding_ica_sw_batchlast_opt(incoming_toa, albedo_surf_diffuse, albedo_surf_direct,
+                R, T, ref_dir, T_dir_diff, T_dir_dir):
         """
         Adding method for shortwave radiation
         Args are torch.Tensors:
-          incoming_toa[ncol], emissivity_surf_diffuse[ncol], emissivity_surf_diffuse[ncol],
+          incoming_toa[ncol], albedo_surf_diffuse[ncol], albedo_surf_diffuse[ncol],
           reflectance[nlev,ncol], transmittance[nlev,ncol], ref_dir[nlev,ncol], trans_dir_diff[nlev,ncol],
           trans_dir_dir[nlev,ncol]
         Here ncol is a batch dimension without loop dependencies (actually columns x spectral intervals),
@@ -265,16 +267,16 @@ def adding_ica_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivit
             tuple: (flux_up, flux_dn_diffuse, flux_dn_direct) each of shape [ncol, nlev+1]
         """
         
-        nlev, ncol = reflectance.shape
-        device = reflectance.device
+        nlev, ncol = R.shape
+        device = R.device
         
         # Set surface albedo
         albedo = torch.jit.annotate(List[Tensor], [])
-        albedo0 = emissivity_surf_diffuse
+        albedo0 = albedo_surf_diffuse
         albedo += [albedo0]
 
         albedodir = torch.jit.annotate(List[Tensor], [])
-        albedodir0 = emissivity_surf_direct
+        albedodir0 = albedo_surf_direct
         albedodir += [albedodir0]
 
         # Work up through the atmosphere and compute the albedo of the entire earth/atmosphere system below that half-level
@@ -283,12 +285,11 @@ def adding_ica_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivit
             # comparing ecRad Tripleclouds code to the McICA code, "source" variable  is like fluxdndir*albedodir
             # If we use albedodir instead (like in TripleClouds), we dont need to precompute fluxdndir in a separate loop, so just two vertical loops
             # Adapted from https://github.com/ecmwf-ifs/ecrad/blob/master/radiation/radiation_tripleclouds_sw.F90
-            albedodir0 = (ref_dir[jlev] +
-                                    (trans_dir_dir[jlev]*albedodir0 + trans_dir_diff[jlev]*albedo0) *
-                                    transmittance[jlev] / (1.0 - albedo0 * reflectance[jlev])) #* inv_denom)  
+            inv_denom = 1.0/(1.0 - albedo0 * R[jlev])
+            albedodir0 = ref_dir[jlev] + (T_dir_dir[jlev]*albedodir0 + T_dir_diff[jlev]*albedo0) *T[jlev]* inv_denom
             albedodir  += [albedodir0]  
             
-            albedo0 = (reflectance[jlev] + torch.square(transmittance[jlev]) * albedo0  / (1.0 - albedo0 * reflectance[jlev])) 
+            albedo0 = R[jlev] + torch.square(T[jlev]) * albedo0  * inv_denom #/ (1.0 - albedo0 * R[jlev])
             albedo  += [albedo0]
 
         albedo.reverse(); albedodir.reverse()
@@ -310,16 +311,15 @@ def adding_ica_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivit
         # Work back down through the atmosphere computing the fluxes at each half-level
         for jlev in range(nlev):  # 1 to nlev in Fortran indexing
 
-            # fluxdndiff = (transmittance[jlev]*fluxdndiff + fluxdndir 
-            #         * (transmittance[jlev]*albedodir[jlev + 1]*reflectance[jlev]  + trans_dir_diff[jlev] ) 
-            #         / (1.0-  reflectance[jlev]*albedo[jlev + 1])) 
+            # fluxdndiff = (T[jlev]*fluxdndiff + fluxdndir 
+            #         * (T[jlev]*albedodir[jlev + 1]*R[jlev]  + T_dir_diff[jlev] ) 
+            #         / (1.0-  R[jlev]*albedo[jlev + 1])) 
             
-            fluxdndiff = (transmittance[jlev]*fluxdndiff 
-                + fluxdndir * (transmittance[jlev]*albedodir[jlev+1]*reflectance[jlev] + trans_dir_diff[jlev])
-                ) / (1.0 - reflectance[jlev]*albedo[jlev+1])
+            fluxdndiff = (T[jlev]*fluxdndiff 
+                + fluxdndir * (T[jlev]*albedodir[jlev+1]*R[jlev] + T_dir_diff[jlev])) / (1.0 - R[jlev]*albedo[jlev+1])
 
-            # flux_dn_direct[jlev + 1] = fluxdndir * trans_dir_dir[jlev,:]
-            fluxdndir =  fluxdndir * trans_dir_dir[jlev,:]
+            # flux_dn_direct[jlev + 1] = fluxdndir * T_dir_dir[jlev,:]
+            fluxdndir =  fluxdndir * T_dir_dir[jlev,:]
             flux_dn_direct  += [fluxdndir]
             flux_dn_diffuse += [fluxdndiff]
 
@@ -339,8 +339,8 @@ def adding_ica_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivit
 @torch.jit.script
 def adding_ica_sw_inference(
     incoming_toa: Tensor,
-    emissivity_surf_diffuse: Tensor,
-    emissivity_surf_direct: Tensor,
+    albedo_surf_diffuse: Tensor,
+    albedo_surf_direct: Tensor,
     reflectance: Tensor,
     transmittance: Tensor,
     ref_dir: Tensor,
@@ -362,19 +362,18 @@ def adding_ica_sw_inference(
     albedodir = torch.empty(nlev + 1, ncol, dtype=reflectance.dtype,
                              device=reflectance.device)
 
-    albedo[0]    = emissivity_surf_diffuse
-    albedodir[0] = emissivity_surf_direct
+    albedo[0]    = albedo_surf_diffuse
+    albedodir[0] = albedo_surf_direct
 
-    alb0  = emissivity_surf_diffuse
-    adir0 = emissivity_surf_direct
+    alb0  = albedo_surf_diffuse
+    adir0 = albedo_surf_direct
 
     for k in range(nlev):
         jlev = nlev - 1 - k
         R  = reflectance[jlev]
         T  = transmittance[jlev]
         inv_denom = 1.0 / (1.0 - alb0 * R)
-        adir0 = ref_dir[jlev] + (trans_dir_dir[jlev] * adir0
-                + trans_dir_diff[jlev] * alb0) * T * inv_denom
+        adir0 = ref_dir[jlev] + (trans_dir_dir[jlev] * adir0 + trans_dir_diff[jlev] * alb0) * T * inv_denom
         alb0  = R + T * T * alb0 * inv_denom
         albedo   [k + 1] = alb0
         albedodir[k + 1] = adir0
@@ -416,31 +415,31 @@ def adding_ica_sw_inference(
     return flux_up, flux_dn_diffuse, flux_dn_direct
 
 def adding_ica_sw(
-    incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
+    incoming_toa, albedo_surf_diffuse, albedo_surf_direct,
     reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir
 ):
     if torch.is_grad_enabled():
         # print("calling normal adding!")
         return adding_ica_sw_batchlast_opt(
-            incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
+            incoming_toa, albedo_surf_diffuse, albedo_surf_direct,
             reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir
         )
     else:
         # print("calling inference adding!")
         return adding_ica_sw_inference(
-            incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
+            incoming_toa, albedo_surf_diffuse, albedo_surf_direct,
             reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir
         )
 
 @torch.compile(dynamic=False)
-def adding_tc_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivity_surf_direct,
+def adding_tc_sw_batchlast_opt(incoming_toa, albedo_surf_diffuse, albedo_surf_direct,
                 reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir, V, ncol_subgrid):
         """
         Adding method for shortwave radiation, experimental TripleClouds version
         Requires overlap matrix V
 
         Args are torch.Tensors:
-          incoming_toa[ncol], emissivity_surf_diffuse[ncol], emissivity_surf_diffuse[ncol],
+          incoming_toa[ncol], albedo_surf_diffuse[ncol], albedo_surf_diffuse[ncol],
           reflectance[nlev,ncol], transmittance[nlev,ncol], ref_dir[nlev,ncol], trans_dir_diff[nlev,ncol],
           trans_dir_dir[nlev,ncol], V[nlev,ncol]
 
@@ -453,11 +452,11 @@ def adding_tc_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivity
         
         # Set surface albedo
         albedo = torch.jit.annotate(List[Tensor], [])
-        albedo0 = emissivity_surf_diffuse
+        albedo0 = albedo_surf_diffuse
         albedo += [albedo0]
 
         albedodir = torch.jit.annotate(List[Tensor], [])
-        albedodir0 = emissivity_surf_direct
+        albedodir0 = albedo_surf_direct
         albedodir += [albedodir0]
 
         # Work up through the atmosphere and compute the albedo of the entire earth/atmosphere system below that half-level
@@ -542,9 +541,7 @@ def adding_tc_sw_batchlast_opt(incoming_toa, emissivity_surf_diffuse, emissivity
 
 # -------------------------------------------- SHORTWAVE FUNCTIONS --------------------------------------------
 
-
-
-def stratified_sample(p, G, shuffle=False):
+def stratified_sample(p: torch.Tensor, G: int) -> torch.Tensor:
     """
     Stratified sampling: assign G spectral points among N sub-grid states proportional to p
 
@@ -586,9 +583,9 @@ def stratified_sample(p, G, shuffle=False):
     # print("p 100, 40 inds", state_indices[100*40,:], "p", p[100*40,:])
 
     # --- Step 3: Shuffle spectral dimension ---
-    if shuffle:
-        idx = torch.randperm(G)
-        state_indices = state_indices[:, idx]
+    # if shuffle:
+    #     idx = torch.randperm(G)
+    #     state_indices = state_indices[:, idx]
     # --- Step 4: Gather x values ---
     # x_sampled = torch.gather(x_flat, dim=-1, state_indices)             # (B, G)
 

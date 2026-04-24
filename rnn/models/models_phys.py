@@ -196,7 +196,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # 
         # --------- Physical radiation options configured here ---------
         # 
-        self.update_states_for_rad  = False  
+        self.update_states_for_rad  = True  
         if self.use_physrad:
           # Update (latent/"sub-grid") variables for radiation after moist physics module ?
           self.update_states_for_rad  = True
@@ -229,7 +229,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           self.ny_lw_optprops     = 2  # tau_abs, planck_fraction (Fraction of Planck source associated with each g-point)
           # ^In the longwave, the radiative processes consist of absorption (gas + cloud) and emission (gas)
           # (cloud LW scattering ignored like in most climate models)
-          self.nx_sw_optprops     = 4 + 6 + self.nh_mem0 # 
+          self.nx_sw_optprops     = 4 + 3 + self.nh_mem0  + 2 
           self.nx_lw_optprops     = self.nx_sw_optprops
           self.reduce_sw_gas_optics = False
           self.reduce_lw_gas_optics = False
@@ -275,9 +275,9 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             print("Reduce LW: {} SW: {}".format(self.reduce_lw_gas_optics, self.reduce_sw_gas_optics))
 
             if not self.use_existing_gas_optics_sw:
-              self.mlp_sw_optprops    = nn.Linear(self.nx_sw_optprops, self.ny_sw_optprops*self.ng_sw)
-              # self.mlp_sw_optprops1    = nn.Linear(self.nx_sw_optprops, 2*self.ng_sw)
-              # self.mlp_sw_optprops2    = nn.Linear(2*self.ng_sw, self.ny_sw_optprops*self.ng_sw)
+              # self.mlp_sw_optprops    = nn.Linear(self.nx_sw_optprops, self.ny_sw_optprops*self.ng_sw)
+              self.mlp_sw_optprops1    = nn.Linear(self.nx_sw_optprops, 2*self.ng_sw)
+              self.mlp_sw_optprops2    = nn.Linear(2*self.ng_sw, self.ny_sw_optprops*self.ng_sw)
 
             if not self.use_existing_gas_optics_lw:
               self.mlp_lw_optprops    = nn.Linear(self.nx_lw_optprops, self.ny_lw_optprops*self.ng_lw)
@@ -669,7 +669,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
           # #  3) Rather than purely random assignment, deterministically partition g-points among states proportional to p, then shuffle.
           # # Same cost as McICA, zero bias, lower variance
-          indices = stratified_sample(p_flat, self.ng_lw, shuffle=False)
+          indices = stratified_sample(p_flat, self.ng_lw) #, shuffle=False)
           T_crm = torch.gather(T_crm_flat, dim=-1, index=indices).view(batch_size, self.nlev_crm, self.ng_lw)
           qn_crm = torch.gather(qn_crm_flat, dim=-1, index=indices).view(batch_size, self.nlev_crm, self.ng_lw)
           # print("p 100, 40", p_flat[100*40,:], "inds", indices[100*40,:])
@@ -821,9 +821,9 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             # print("shape xgas1", x_gas_1.shape, "xmin", self.gas_optics_model_sw1.xmin.shape)
             x_gas_1 = (x_gas_1- self.gas_optics_model_sw1.xmin) / (self.gas_optics_model_sw1.xmax - self.gas_optics_model_sw1.xmin)
             x_gas_2 = (x_gas_2- self.gas_optics_model_sw1.xmin) / (self.gas_optics_model_sw1.xmax - self.gas_optics_model_sw1.xmin)
-
-            tau_sw1     = self.gas_optics_model_sw1(x_gas_1, col_dry_1)
-            tau_sw_scat1= self.gas_optics_model_sw2(x_gas_1, col_dry_1)
+            # Use SW gas optics absorption NN : first pass
+            tau_sw1     = self.gas_optics_model_sw1(x_gas_1, col_dry_1) # Absorption optical depth
+            tau_sw_scat1= self.gas_optics_model_sw2(x_gas_1, col_dry_1) # Scattering optical depth
             tau_sw2     = self.gas_optics_model_sw1(x_gas_2, col_dry_2)
             tau_sw_scat2= self.gas_optics_model_sw2(x_gas_2, col_dry_2)
             mask          = torch.rand_like(tau_sw1) < 0.5
@@ -952,6 +952,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           g_sw_cld        = torch.cat((zeroes, g_sw_cld.squeeze()),dim=0)
 
       if not (self.use_existing_gas_optics_sw and self.use_existing_gas_optics_lw):
+      # if at least one is False 
+      
         # qv_before = torch.repeat_interleave(qv_before,self.mp_ncol,dim=2)
         #  zeroes_crm_toa = torch.zeros(batch_size, self.ilev_crm, self.mp_ncol, device=device)
         # dqv       = torch.cat((zeroes_crm_toa, 1200*(dqv_crm/self.yscale_lev[self.ilev_crm:,1:2])),dim=1)
@@ -959,10 +961,41 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         qv_new    = qv_new * 1.608079364 # (28.97 / 18.01528) # mol_weight_air / mol_weight_gas
         qv_new    = (torch.sqrt(torch.sqrt(qv_new))) / 0.497653
 
+        # if self.include_qv_variability:
+        #   vmr_h2o_crm = (torch.sqrt(torch.sqrt(vmr_h2o_crm)))
+        #   cldpath_liq = torch.sqrt(cldpath_liq)
+        #   cldpath_ice = torch.sqrt(cldpath_ice)
+        #   print("min max mean vmr h2o", vmr_h2o_crm.min().item(),vmr_h2o_crm.max().item(),vmr_h2o_crm.mean().item())
+        #   print("min max mean cldpath_liq", cldpath_liq.min().item(),cldpath_liq.max().item(),cldpath_liq.mean().item())
+
+        if not (self.use_existing_gas_optics_sw or self.use_existing_gas_optics_lw):
+        # if neither are True ( both are False), effective radiuses have not been computed yet
+          T_new1 = T_new[:,self.ilev_crm:].contiguous().view(-1) 
+          ice_eff_rad = reitab(T_new1)
+          ice_eff_rad = ice_eff_rad.view((batch_size,self.nlev_crm, 1))
+          icefrac   =  torch.repeat_interleave(inputs_aux[:,12:13],self.nlev_crm,dim=1)
+          landfrac  =  torch.repeat_interleave(inputs_aux[:,13:14],self.nlev_crm,dim=1)
+          snowh     =  torch.repeat_interleave(inputs_aux[:,15:16],self.nlev_crm,dim=1)
+          liq_eff_rad = reltab(T_new1, landfrac.view(-1), icefrac.view(-1), snowh.view(-1))
+          liq_eff_rad = liq_eff_rad.view((batch_size,self.nlev_crm, 1))
+          zer_1 = torch.zeros(batch_size, 10, 1, device=device)
+          ice_eff_rad = torch.cat((zer_1, ice_eff_rad),dim=1)
+          liq_eff_rad = torch.cat((zer_1, liq_eff_rad),dim=1)
+        else:
+          ice_eff_rad = torch.transpose(ice_eff_rad,0,1)
+          liq_eff_rad = torch.transpose(liq_eff_rad,0,1)
+        liq_eff_rad  = liq_eff_rad / 13.5
+        ice_eff_rad   = ice_eff_rad / 250.0
+        zer_1 = torch.zeros(batch_size, 10, 1, device=device)
+        ice_eff_rad = torch.cat((zer_1, ice_eff_rad),dim=1)
+        liq_eff_rad = torch.cat((zer_1, liq_eff_rad),dim=1)  
+
         mem  = torch.zeros(batch_size, nlev, self.nh_mem0, device=device)
         mem[:, self.ilev_crm:] = rnn_mem[:,:,0:self.nh_mem0] #[:,:,0:1]
         qn_new        = 1 - torch.exp(-qn_new * self.lbd_qn.unsqueeze(1))
-        inputs_rad = torch.cat((pressure, temp, qv_new, qn_new, inputs_main[:,:,6:9], inputs_main[:,:,12:15], mem),dim=2)
+        # inputs_rad = torch.cat((pressure, temp, qv_new, qn_new, inputs_main[:,:,6:9], inputs_main[:,:,12:15], mem),dim=2)
+        inputs_rad = torch.cat((pressure, temp, qv_new, qn_new, inputs_main[:,:,12:15], liq_eff_rad, ice_eff_rad, mem),dim=2)
+
         inputs_rad = torch.transpose(inputs_rad,0,1).contiguous()
 
       if not self.use_existing_gas_optics_lw:
@@ -1045,10 +1078,10 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
       # -------------------------- SHORTWAVE -----------------------------
       if not self.use_existing_gas_optics_sw:
-        sw_optprops = self.mlp_sw_optprops(inputs_rad)
-        # sw_optprops = self.mlp_sw_optprops1(inputs_rad)
-        # sw_optprops = self.softsign(sw_optprops)
-        # sw_optprops = self.mlp_sw_optprops2(sw_optprops)
+        # sw_optprops = self.mlp_sw_optprops(inputs_rad)
+        sw_optprops = self.mlp_sw_optprops1(inputs_rad)
+        sw_optprops = self.softsign(sw_optprops)
+        sw_optprops = self.mlp_sw_optprops2(sw_optprops)
 
         # (nlev, nb, ng*ny ) -->  (nlev, nb, ny, ng)
         sw_optprops = torch.reshape(sw_optprops,(self.nlev, batch_size, self.ny_sw_optprops, self.ng_sw))
@@ -1059,7 +1092,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
         # print("tau sha", tau_sw.shape, "coldry", col_dry.shape)
         tau_sw      = torch.pow(tau_sw.squeeze(), 8)
-        tau_sw      = tau_sw*(1e-24*col_dry)
+        tau_sw      = tau_sw*(1e-23*col_dry)
         tau_sw      = torch.clamp(tau_sw, min=1e-6, max=40.0) 
         # tau_sw_scat  = torch.pow(tau_sw_scat.squeeze(), 8)
         # tau_sw_scat  = tau_sw_scat*(1e-24*col_dry)
@@ -1149,8 +1182,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       iend_ir = int(round((80/112)*self.ng_sw)) # RRTMGP bands 1-9 (g-points 1-80) encompass 820-12850 cm-1 (near-ir), see data/rrtmgp-data-sw-g112-210809.nc
       iend_mix= int(round((89/112)*self.ng_sw)) # RRTMGP band 10 is in between UV/visible and near-IR, and bands 11-14 (89-112) are fully in visible range (> 14286 ! cm^-1)
 
-      emissivity_surf_dir_sw   = torch.ones(self.ng_sw, batch_size, device=device)
-      emissivity_surf_diff_sw  = torch.ones(self.ng_sw, batch_size, device=device)
+      albedo_surf_dir_sw   = torch.ones(self.ng_sw, batch_size, device=device)
+      albedo_surf_diff_sw  = torch.ones(self.ng_sw, batch_size, device=device)
       ng_ir  = iend_ir
       ng_mix = iend_mix - iend_ir
       ng_vis = self.ng_sw - iend_mix
@@ -1165,22 +1198,22 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       asdif1 = torch.repeat_interleave(asdif,ng_vis,dim=0)
       asdif2 = torch.repeat_interleave(asdif,ng_mix,dim=0)
 
-      emissivity_surf_dir_sw[0:iend_ir]           =  aldir1
-      emissivity_surf_dir_sw[iend_ir:iend_mix]    =  0.5*(aldir2 + asdir2)
-      emissivity_surf_dir_sw[iend_mix:]           =  asdir1
-      emissivity_surf_diff_sw[0:iend_ir]          =  aldif1
-      emissivity_surf_diff_sw[iend_ir:iend_mix]   =  0.5*(aldif2 + asdif2)
-      emissivity_surf_diff_sw[iend_mix:]          =  asdif1
+      albedo_surf_dir_sw[0:iend_ir]           =  aldir1
+      albedo_surf_dir_sw[iend_ir:iend_mix]    =  0.5*(aldir2 + asdir2)
+      albedo_surf_dir_sw[iend_mix:]           =  asdir1
+      albedo_surf_diff_sw[0:iend_ir]          =  aldif1
+      albedo_surf_diff_sw[iend_ir:iend_mix]   =  0.5*(aldif2 + asdif2)
+      albedo_surf_diff_sw[iend_mix:]          =  asdif1
 
-      # print("shape emis", emissivity_surf_diff_sw.shape, "ref_diff", ref_diff.shape)
-      emissivity_surf_dir_sw    = torch.transpose(emissivity_surf_dir_sw,0,1).contiguous()
-      emissivity_surf_diff_sw   = torch.transpose(emissivity_surf_diff_sw,0,1).contiguous()
+      # print("shape emis", albedo_surf_diff_sw.shape, "ref_diff", ref_diff.shape)
+      albedo_surf_dir_sw    = torch.transpose(albedo_surf_dir_sw,0,1).contiguous()
+      albedo_surf_diff_sw   = torch.transpose(albedo_surf_diff_sw,0,1).contiguous()
       if self.experimental_rad:
-         emissivity_surf_dir_sw   = torch.repeat_interleave(emissivity_surf_dir_sw.unsqueeze(2), self.mp_ncol, dim=2)
-         emissivity_surf_diff_sw  = torch.repeat_interleave(emissivity_surf_diff_sw.unsqueeze(2), self.mp_ncol, dim=2)
+         albedo_surf_dir_sw   = torch.repeat_interleave(albedo_surf_dir_sw.unsqueeze(2), self.mp_ncol, dim=2)
+         albedo_surf_diff_sw  = torch.repeat_interleave(albedo_surf_diff_sw.unsqueeze(2), self.mp_ncol, dim=2)
 
-      emissivity_surf_dir_sw    = emissivity_surf_dir_sw.view(-1)
-      emissivity_surf_diff_sw   = emissivity_surf_diff_sw.view(-1)
+      albedo_surf_dir_sw    = albedo_surf_dir_sw.view(-1)
+      albedo_surf_diff_sw   = albedo_surf_diff_sw.view(-1)
 
       # if self.experimental_rad:
       #   # xx = torch.transpose(rnn2out,1,2)
@@ -1201,15 +1234,15 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       #   v_mat       = v_mat.view(nlev+1, -1)
         
       #   flux_sw_up, flux_sw_dn_diffuse, flux_sw_dn_direct = adding_tc_sw_batchlast_opt(incoming_toa, 
-      #               emissivity_surf_diff_sw, emissivity_surf_dir_sw, ref_diff, 
+      #               albedo_surf_diff_sw, albedo_surf_dir_sw, ref_diff, 
       #               trans_diff, ref_dir, trans_dir_diff, trans_dir_dir, v_mat)
       #   # flux_sw_dn_diffuse = flux_sw_dn_diffuse*v_mat
       #   # flux_sw_dn_direct = flux_sw_dn_direct*v_mat
       # else:
       flux_sw_up, flux_sw_dn_diffuse, flux_sw_dn_direct = adding_ica_sw(
-                  incoming_toa, emissivity_surf_diff_sw, emissivity_surf_dir_sw, 
+                  incoming_toa, albedo_surf_diff_sw, albedo_surf_dir_sw, 
                   ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir)
-      
+            
       del ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir
 
       flux_sw_up = self.relu(flux_sw_up)
@@ -1227,7 +1260,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         flux_sw_up = torch.reshape(flux_sw_up, (nlev+1, batch_size, self.ng_sw))
         flux_sw_dn_diffuse = torch.reshape(flux_sw_dn_diffuse, (nlev+1, batch_size, self.ng_sw))
         flux_sw_dn_direct = torch.reshape(flux_sw_dn_direct, (nlev+1, batch_size, self.ng_sw))
-        
+                
       sw_dir_dn_mixband = torch.sum(flux_sw_dn_direct[-1,:,iend_ir:iend_mix],dim=1,keepdim=True)
       SOLL = torch.sum(flux_sw_dn_direct[-1,:,0:iend_ir],dim=1,keepdim=True) + 0.5*sw_dir_dn_mixband
       SOLS = torch.sum(flux_sw_dn_direct[-1,:,iend_mix:],dim=1,keepdim=True) + 0.5*sw_dir_dn_mixband

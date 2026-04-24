@@ -195,3 +195,37 @@ def ec_ice_optics_sw(rei:torch.Tensor, ng:int=4):
         g       = coeffs5 + re_um * coeffs6
     return k, ssa, g 
     
+
+# class slingo_style_general_liq_cloud_optics_sw:
+#     def __init__(self, ng:int=16):
+#         super(slingo_style_general_liq_cloud_optics_sw, self).__init__()
+#         self.ng = ng
+#         self.coeffs1 = nn.Parameter(torch.Tensor(ng))
+#         self.coeffs2 = nn.Parameter(torch.Tensor(ng))
+#         self.coeffs4 = nn.Parameter(torch.Tensor(ng))
+#         self.coeffs5 = nn.Parameter(torch.Tensor(ng))
+#         self.coeffs6 = nn.Parameter(torch.Tensor(ng))
+
+#         self.reset_parameters()
+
+#     def reset_parameters(self):
+#         nn.init.xavier_uniform_(self.weight)
+
+#     def forward(self, rel:torch.Tensor ):
+
+#         # return nn.functional.linear(input, self.weight.clamp(min=0.))
+
+#         # Adapted from https://github.com/NVlabs/E3SM/blob/main/components/eam/src/physics/rrtmgp/slingo.F90#L32
+#         # coeffs1 = torch.tensor([2.817e-02, 2.682e-02, 2.264e-02, 1.281e-02], dtype=rel.dtype, device=rel.device)  # A: extinction OD
+#         # coeffs2 = torch.tensor([1.305,     1.346,     1.454,     1.641    ], dtype=rel.dtype, device=rel.device)  # B: extinction OD
+#         # coeffs3 = torch.tensor([-5.62e-08, -6.94e-06, 4.64e-04,  0.201    ], dtype=rel.dtype, device=rel.device)  # C: single scat albedo
+#         # coeffs4 = torch.tensor([1.63e-07,  2.35e-05,  1.24e-03,  7.56e-03 ], dtype=rel.dtype, device=rel.device)  # D: single scat albedo
+#         # coeffs5 = torch.tensor([0.829,     0.794,     0.754,     0.826    ], dtype=rel.dtype, device=rel.device)  # E: asymmetry parameter
+#         # coeffs6 = torch.tensor([2.482e-03, 4.226e-03, 6.560e-03, 4.353e-03], dtype=rel.dtype, device=rel.device)  # F: asymmetry parameter
+
+#         re_um   = rel.clamp(4.2, 16.0)
+
+#         k       = (self.coeffs1.clamp(min=0.) + self.coeffs2.clamp(min=0.) / re_um)
+#         ssa     = (1.0 - self.coeffs3 - re_um * self.coeffs4).clamp(min=0.00001,max=0.999999)
+#         g       = (self.coeffs5.clamp(min=0.) + re_um * self.coeffs6.clamp(min=0.)).clamp(min=0.000001,max=0.999999)
+#         return k, ssa, g 
