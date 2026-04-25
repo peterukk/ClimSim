@@ -509,26 +509,25 @@ def main(cfg: DictConfig):
         cfg.use_lstm=False 
     print("Setting up RNN model using nx={}, nx_sfc={}, ny={}, ny_sfc={}".format(nx,nx_sfc,ny,ny_sfc))
 
-    if cfg.model_type in ["LSTM","GRU"]:
-        # from models import RNN_autoreg_torchscript
-        if cfg.autoregressive:
-            from models.models import RNN_autoreg
-            model = RNN_autoreg(cfg, coeffs, device)
-        else:
-          raise NotImplementedError("Non-autoregressive model not implemented")
+    if cfg.autoregressive:
 
-    # elif cfg.model_type=="physrad":
-    elif cfg.model_type=="physRNN": 
+      if cfg.model_type in ["LSTM","GRU"]:
+        from models.models import RNN_autoreg
+        model = RNN_autoreg(cfg, coeffs, device)
+  
+      # elif cfg.model_type=="physrad":
+      elif cfg.model_type=="physRNN": 
         
         # if cfg.use_physrad:
         # torch._functorch.config.donated_buffer=False
 
+        # Option 1: use full pretrained model + another MLP to reduce the number of g-points to desired
         ng_lw = 128
         ng_sw = 112 
-        # Uncomment below to change the last layer of the pre-trained gas optics models so we can directly have a smaller spectral resolution
+        # Option 2 - change the last layer of the pre-trained gas optics models so we can directly have a smaller spectral resolution
         # without a separate decoder. Doesn't seem to really work
-        # ng_lw = 16  
-        # ng_sw = 16
+        # ng_lw = cfg.ng_lw  
+        # ng_sw = cfg.ng_sw
         mlp_gasopt_model_lw, mlp_gasopt_model_sw, mlp_gasopt_model_sw2  = None,None,None
         if cfg.existing_gasopt_file_lw != "None" and cfg.use_physrad:
           print("Loading pre-existing longwave gas optics model from {}".format(cfg.existing_gasopt_file_lw))
@@ -551,6 +550,12 @@ def main(cfg: DictConfig):
                     gas_optics_model_lw = mlp_gasopt_model_lw,
                     gas_optics_model_sw1 = mlp_gasopt_model_sw,
                     gas_optics_model_sw2 = mlp_gasopt_model_sw2)
+      else:
+        raise NotImplementedError("Model type {} not implemented".format(cfg.model_type))
+
+    else:
+
+      raise NotImplementedError("Non-autoregressive model not implemented")
 
 
     # elif cfg.model_type=="CFC":
@@ -1071,14 +1076,14 @@ def main(cfg: DictConfig):
             labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
             # if True:
             if cfg.save_model:
-              if val_loss < best_val_loss or epoch in [5,11,19,39]:
+              if val_loss < best_val_loss or epoch in [5,11,19,39,59]:
                 if val_loss < best_val_loss:
                   SAVE_PATH       = "saved_models/" + MODEL_STR + "_BEST.pt"
                 else:
                   SAVE_PATH       = "saved_models/" + MODEL_STR + "_ep{}".format(epoch+1) + ".pt"
 
-                save_file_torch1 = "saved_models/" + MODEL_STR + "_script_gpu.pt"
-                save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
+                save_file_torch1 = SAVE_PATH.split(".pt")[0] + "_script_gpu.pt"
+                save_file_torch2 = SAVE_PATH.split(".pt")[0] + "_script_cpu.pt"
                 print("saving model to", SAVE_PATH)
                 # print("New best validation result obtained, saving model to", SAVE_PATH)
                 if is_stochastic:
