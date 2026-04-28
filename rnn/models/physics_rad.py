@@ -401,8 +401,7 @@ def adding_ica_sw_inference(
     for jlev in range(nlev):
         R     = reflectance[jlev]
         T     = transmittance[jlev]
-        # albedo below this level = slot (nlev - jlev)
-        below = nlev - jlev
+        below = nlev - (jlev + 1)
         alb1  = albedo   [below]
         adir1 = albedodir[below]
         inv_denom  = 1.0 / (1.0 - R * alb1)
