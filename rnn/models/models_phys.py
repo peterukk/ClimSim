@@ -885,13 +885,13 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             # ksca_sw_cld_ice = self.cloud_optics_sw_expand(ksca_sw_cld_ice0)
             # kscag_sw_cld_ice  = self.cloud_optics_sw_expand(kscag_sw_cld_ice0)
 
-            k_sw_cld_liq, ssa_sw_cld_liq, g_sw_cld_liq = slingo_liq_cloud_optics_sw(liq_eff_rad, self.ng_sw)
-            ksca_sw_cld_liq  = k_sw_cld_liq*ssa_sw_cld_liq
-            kscag_sw_cld_liq = ksca_sw_cld_liq*g_sw_cld_liq
+            k_sw_cld_liq, ksca_sw_cld_liq, kscag_sw_cld_liq = slingo_liq_cloud_optics_sw(liq_eff_rad, self.ng_sw)
+            ksca_sw_cld_liq  = k_sw_cld_liq*ksca_sw_cld_liq # ksca_sw_cld_liq is ssa before this line
+            kscag_sw_cld_liq = ksca_sw_cld_liq*kscag_sw_cld_liq # kscag_sw_cld_liq is g before this line
 
-            k_sw_cld_ice, ssa_sw_cld_ice, g_sw_cld_ice = ec_ice_optics_sw(ice_eff_rad, self.ng_sw)
-            ksca_sw_cld_ice  = k_sw_cld_ice*ssa_sw_cld_ice
-            kscag_sw_cld_ice = ksca_sw_cld_ice*g_sw_cld_ice
+            k_sw_cld_ice, ksca_sw_cld_ice, kscag_sw_cld_ice = ec_ice_optics_sw(ice_eff_rad, self.ng_sw)
+            ksca_sw_cld_ice  = k_sw_cld_ice*ksca_sw_cld_ice
+            kscag_sw_cld_ice = ksca_sw_cld_ice*kscag_sw_cld_ice
 
             # k_sw_cld_liq, ssa_sw_cld_liq, g_sw_cld_liq = k_sw_cld_liq0, ssa_sw_cld_liq0, g_sw_cld_liq0
             # print("k_sw_cld_liq min max mean", k_sw_cld_liq.min().item(), k_sw_cld_liq.max().item(), k_sw_cld_liq.mean().item())
@@ -932,7 +932,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             # if not pred_cld_ssa:
             tau_sw_scat_cld = torch.cat((zeroes, tau_sw_scat_cld),dim=0)
             tau_sw_cld      = torch.cat((zeroes, tau_sw_cld),dim=0)
-
+            del tau_sw_cld_ice, tau_sw_cld_liq, tau_sw_scat_cld_liq, tau_sw_scat_cld_ice, g_tau_scat_sw_cld_liq
+            del g_tau_scat_sw_cld_ice, g_tau_scat_sw_cld, k_sw_cld_liq, ksca_sw_cld_liq, k_sw_cld_ice, ksca_sw_cld_ice
             # tau_sw_cld = tau_sw_cld + tau_sw_scat_cld 
 
           else:
@@ -979,8 +980,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           liq_eff_rad = reltab(T_new1, landfrac.view(-1), icefrac.view(-1), snowh.view(-1))
           liq_eff_rad = liq_eff_rad.view((batch_size,self.nlev_crm, 1))
           zer_1 = torch.zeros(batch_size, 10, 1, device=device)
-          ice_eff_rad = torch.cat((zer_1, ice_eff_rad),dim=1)
-          liq_eff_rad = torch.cat((zer_1, liq_eff_rad),dim=1)
         else:
           ice_eff_rad = torch.transpose(ice_eff_rad,0,1)
           liq_eff_rad = torch.transpose(liq_eff_rad,0,1)
@@ -1407,10 +1406,14 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # h_sfc   = h_sfc*h_sfc_perturb
           last_h   = h_sfc_perturb
   
+        rnn2out = rnn2out.contiguous().view(batch_size * self.nlev_crm, self.nh_rnn2)
+
         if self.use_intermediate_mlp: 
             rnn_mem = self.mlp_latent(rnn2out)
         else:
             rnn_mem = rnn2out 
+        rnn_mem = rnn_mem.view(batch_size,self.nlev_crm, -1)
+        rnn2out = rnn2out.view(batch_size,self.nlev_crm, self.nh_rnn2)
 
         if not self.use_physrad: # Need to predict surface radiation variables with an MLP
             if self.separate_radiation:
