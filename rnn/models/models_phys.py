@@ -1406,14 +1406,10 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # h_sfc   = h_sfc*h_sfc_perturb
           last_h   = h_sfc_perturb
   
-        rnn2out = rnn2out.contiguous().view(batch_size * self.nlev_crm, self.nh_rnn2)
-
         if self.use_intermediate_mlp: 
             rnn_mem = self.mlp_latent(rnn2out)
         else:
             rnn_mem = rnn2out 
-        rnn_mem = rnn_mem.view(batch_size,self.nlev_crm, -1)
-        rnn2out = rnn2out.view(batch_size,self.nlev_crm, self.nh_rnn2)
 
         if not self.use_physrad: # Need to predict surface radiation variables with an MLP
             if self.separate_radiation:
