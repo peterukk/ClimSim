@@ -273,14 +273,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                 self.cloud_optics_sw2 = nn.Linear(2*self.ng_sw, 3*self.ng_sw)
 
             print("Reduce LW: {} SW: {}".format(self.reduce_lw_gas_optics, self.reduce_sw_gas_optics))
-
-            if not self.use_existing_gas_optics_sw:
-              # self.mlp_sw_optprops    = nn.Linear(self.nx_sw_optprops, self.ny_sw_optprops*self.ng_sw)
-              self.mlp_sw_optprops1    = nn.Linear(self.nx_sw_optprops, 2*self.ng_sw)
-              self.mlp_sw_optprops2    = nn.Linear(2*self.ng_sw, self.ny_sw_optprops*self.ng_sw)
-
-            if not self.use_existing_gas_optics_lw:
-              self.mlp_lw_optprops    = nn.Linear(self.nx_lw_optprops, self.ny_lw_optprops*self.ng_lw)
             
             if self.experimental_rad:
               self.conv_vmat = nn.Conv1d(self.mp_ncol, self.mp_ncol*self.mp_ncol, 2, stride=1)
@@ -288,11 +280,19 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             if not (self.use_existing_gas_optics_sw and (not self.reduce_sw_gas_optics)): 
               self.sw_solar_weights   = nn.Parameter(torch.randn(1, self.ng_sw))
           else:
-            print("Using physical radiation, but not existing gas optics models, instead a combined MLP for cloud+gas")
-            self.mlp_lw_optprops    = nn.Linear(self.nx_lw_optprops, self.ny_lw_optprops*self.ng_lw)
-            self.mlp_sw_optprops    = nn.Linear(self.nx_sw_optprops, self.ny_sw_optprops*self.ng_sw)
             from norm_coefficients import rrtmgp_sw_solar_source
             self.sw_solar_weights   = nn.Parameter(torch.randn(1, self.ng_sw))
+
+          if not self.use_existing_gas_optics_sw:
+            # self.mlp_sw_optprops    = nn.Linear(self.nx_sw_optprops, self.ny_sw_optprops*self.ng_sw)
+            self.mlp_sw_optprops1    = nn.Linear(self.nx_sw_optprops, 2*self.ng_sw)
+            self.mlp_sw_optprops2    = nn.Linear(2*self.ng_sw, self.ny_sw_optprops*self.ng_sw)   
+            print("Using physical radiation, but not existing SW gas optics, instead a combined MLP for cloud+gas")
+
+          if not self.use_existing_gas_optics_lw:
+            self.mlp_lw_optprops    = nn.Linear(self.nx_lw_optprops, self.ny_lw_optprops*self.ng_lw)
+            print("Using physical radiation, but not existing LW gas optics, instead a combined MLP for cloud+gas")
+
         else:
           if self.separate_radiation:
               # Rad inputs would in reality be the state variables (except winds) updated by the CRM, plus the gases:
