@@ -56,6 +56,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     use_existing_gas_optics_sw: Final[bool]
     reduce_lw_gas_optics: Final[bool]
     reduce_sw_gas_optics: Final[bool]
+    use_liq_frac_crm_mlp: Final[bool]
+
     def __init__(self, 
                 cfg: DictConfig, 
                 coeffs: dict, 
@@ -151,9 +153,10 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           self.mlp_qice_crm = nn.Linear(nx_decoder, self.mp_ncol)
           self.mlp_qliq_crm = nn.Linear(nx_decoder, self.mp_ncol)
 
-        # self.mlp_liq_frac_crm = nn.Linear(nx_decoder, self.mp_ncol)
+        self.use_liq_frac_crm_mlp = True
+        if self.use_liq_frac_crm_mlp:
+          self.mlp_liq_frac_crm = nn.Linear(nx_decoder, self.mp_ncol)
 
-        # self.mlp_prec_crm = nn.Linear(self.nh_rnn2, self.mp_ncol)
         self.mlp_subgrid_area_frac = nn.Linear(self.nh_rnn2, self.mp_ncol)
             
         if self.predict_liq_frac:
@@ -222,8 +225,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           if not (self.use_existing_gas_optics_lw or self.use_existing_gas_optics_sw):
             self.use_e3sm_cloud_optics = False
 
-          print("use_e3sm_cld: {}, exp_rad {}, mcica: {}, include_qv_var: {}, updstates4rad {}".format(self.use_e3sm_cloud_optics, 
-                          self.experimental_rad, self.use_mcica, self.include_qv_variability, self.update_states_for_rad))
+          print("use_e3sm_cld: {}, exp_rad {}, mcica: {}, include_qv_var: {}, updstates4rad {} liqfracmlp: {}".format(self.use_e3sm_cloud_optics, 
+                          self.experimental_rad, self.use_mcica, self.include_qv_variability, self.update_states_for_rad, self.use_liq_frac_crm_mlp))
           
           self.ny_sw_optprops     = 3  # tau_abs, tau_sca, g
           self.ny_lw_optprops     = 2  # tau_abs, planck_fraction (Fraction of Planck source associated with each g-point)
@@ -614,7 +617,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         return out_new, precc, precsc, rnn_mem, T_crm, qv_crm, qn_crm, area_frac, prec_negative
     
     def radiative_transfer(self, inputs_main, inputs_aux0, inputs_denorm, play, plev, delta_plev, rnn_mem, 
-                T_crm, qv_crm, qn_crm, T_new, qv_new, qn_new, area_frac):
+                T_crm, qv_crm, qn_crm, T_new, qv_new, qn_new, area_frac, rnn2out):
       
       
       batch_size, nlev, nx = inputs_main.shape 
@@ -676,9 +679,14 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           
 
         # This would be how things are done in the underlying CRM: temperature on CRM grid is used to diagnose cloud into liquid and ice
-        liq_frac_crm          = self.temperature_scaling(T_crm.transpose(0,1).squeeze())
+        if not self.use_liq_frac_crm_mlp:
+          liq_frac_crm          = self.temperature_scaling(T_crm.transpose(0,1).squeeze())
         # However it may be difficult to optimize T_crm - instead, predict liq_frac_crm with a NN?
-        # liq_frac_crm = self.sigmoid(self.mlp_liq_frac_crm(rnn2out)).transpose(0,1)
+        else:
+          liq_frac_crm = self.sigmoid(self.mlp_liq_frac_crm(rnn2out))
+          if self.use_mcica:
+            liq_frac_crm = torch.gather(liq_frac_crm.view(-1,self.mp_ncol), dim=-1, index=indices).view(batch_size, self.nlev_crm, self.ng_lw)
+          liq_frac_crm = liq_frac_crm.transpose(0,1).contiguous()
 
         cldpath_tot       = 1000*torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qn_crm,0,1).contiguous()
         cldpath_liq       = liq_frac_crm * cldpath_tot 
@@ -1488,7 +1496,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             qv  = self.relu(qv + dqv)
 
           dT_rad, out_sfc_rad = self.radiative_transfer(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
-                                      rnn_mem, T_crm, qv_crm, qn_crm, T, qv, qn, area_frac)
+                                      rnn_mem, T_crm, qv_crm, qn_crm, T, qv, qn, area_frac, rnn2out)
           dT_rad = dT_rad.unsqueeze(2)
 
         # print("dT_rad 2  min max", torch.min(dT_rad[:,:]).item(), torch.max(dT_rad[:,:]).item())
