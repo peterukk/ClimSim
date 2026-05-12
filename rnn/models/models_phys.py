@@ -57,6 +57,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     reduce_lw_gas_optics: Final[bool]
     reduce_sw_gas_optics: Final[bool]
     use_liq_frac_crm_mlp: Final[bool]
+    pred_subgrid_temp: Final[bool]
 
     def __init__(self, 
                 cfg: DictConfig, 
@@ -125,14 +126,21 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # Allow extra heating/cooling besides that from microphysics, vertical fluxes and radiation (if physrad=true)?
         self.allow_extra_heating  = False
         if not self.use_physrad:
-          self.allow_extra_heating = True 
+          self.allow_extra_heating = True
+        self.pred_subgrid_temp = False 
+        print("ice_sedimentation: {}, allow_extra_heating {}, pred_subgrid_temp: {}".format(self.ice_sedimentation, 
+                        self.allow_extra_heating, self.pred_subgrid_temp))
+        
         # 
         # -------------------------------------------------------------------------------------------------
         # ---- Linear layers predicting variables needed in moist physics module from RNN hidden state ----
         # --- Flux terms ---
         self.mlp_massflux   = nn.Linear(self.nh_rnn2, self.mp_ncol)
         # if self.do_heat_advection:
-        self.mlp_eddy_diff  = nn.Linear(self.nh_rnn2, self.mp_ncol)
+        if self.pred_subgrid_temp:
+          self.mlp_eddy_diff  = nn.Linear(self.nh_rnn2, self.mp_ncol)
+        else:
+          self.mlp_eddy_diff  = nn.Linear(self.nh_rnn2, 1)
 
         # --- Microphysical process rates ---
         self.mlp_evap_cond_vapor_crm  = nn.Linear(self.nh_rnn2, self.mp_ncol)
@@ -146,7 +154,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         nx_decoder = self.nh_rnn2
         self.mlp_qv_crm     = nn.Linear(nx_decoder, self.mp_ncol)
         self.mlp_qn_crm     = nn.Linear(nx_decoder, self.mp_ncol)
-        self.mlp_t_crm      = nn.Linear(nx_decoder, self.mp_ncol)
+        if self.pred_subgrid_temp:
+          self.mlp_t_crm      = nn.Linear(nx_decoder, self.mp_ncol)
         if self.use_mp_constraint:
           self.mlp_qice_crm = nn.Linear(nx_decoder, self.mp_ncol)
         else:
@@ -382,8 +391,9 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # latent_state =  rnn_mem # rnn_mem_prev 
         qv_crm    = self.softplus(self.mlp_qv_crm(latent_state)) 
         qn_crm    = self.softplus(self.mlp_qn_crm(latent_state))
-        # T_crm  = self.softplus(self.mlp_t_crm(latent_state))
-        deltaT    = self.mlp_t_crm(latent_state)
+        if self.pred_subgrid_temp:
+          # T_crm  = self.softplus(self.mlp_t_crm(latent_state))
+          deltaT    = self.mlp_t_crm(latent_state)
 
         #   1.2 Scale with GCM values 
         area_frac = self.softmax(self.mlp_subgrid_area_frac(rnn2out))
@@ -396,18 +406,21 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         scale = torch.where(qn_mean_old == 0, torch.ones_like(qn_mean_old), qn_gcm / qn_mean_old)
         qn_crm = qn_crm * scale
 
-        # T_mean_old = (T_crm * area_frac).sum(dim=-1, keepdim=True)
-        # scale = torch.where( #  rescale to enforce constraint exactly
-        #     T_mean_old == 0, torch.ones_like(T_mean_old), T_gcm / T_mean_old)
-        # T_crm = T_crm * scale
+        if self.pred_subgrid_temp:
+          # T_mean_old = (T_crm * area_frac).sum(dim=-1, keepdim=True)
+          # scale = torch.where( #  rescale to enforce constraint exactly
+          #     T_mean_old == 0, torch.ones_like(T_mean_old), T_gcm / T_mean_old)
+          # T_crm = T_crm * scale
 
-        # T_crm = T_crm + (T_gcm - T_mean_old)   # shift, don't scale?
-        deltaT = self.mlp_t_crm(latent_state)
-        deltaT = deltaT - (deltaT * area_frac).sum(dim=-1, keepdim=True) # enforce zero mean
-        T_crm = T_gcm + deltaT                             # add back grid mean
-        # print("min max T crm", T_crm.min().item(), T_crm.max().item(), "mean", T_crm.mean().item())
-        # print("min max T crm -1", T_crm[100,-1,:].min().item(), T_crm[100,-1,:].max().item())
-        # print("min max T gcm", T_gcm.min().item(), T_gcm.max().item(), " ean", T_gcm.mean().item())
+          # T_crm = T_crm + (T_gcm - T_mean_old)   # shift, don't scale?
+          deltaT = self.mlp_t_crm(latent_state)
+          deltaT = deltaT - (deltaT * area_frac).sum(dim=-1, keepdim=True) # enforce zero mean
+          T_crm = T_gcm + deltaT                             # add back grid mean
+          # print("min max T crm", T_crm.min().item(), T_crm.max().item(), "mean", T_crm.mean().item())
+          # print("min max T crm -1", T_crm[100,-1,:].min().item(), T_crm[100,-1,:].max().item())
+          # print("min max T gcm", T_gcm.min().item(), T_gcm.max().item(), " ean", T_gcm.mean().item())
+        else:
+          T_crm = T_gcm 
 
         if not self.use_mp_constraint:
           ## liq_frac_crm_old = self.temperature_scaling(T_crm)
@@ -433,7 +446,11 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         preslay_diff0 = play[:,self.ilev_crm:] - play[:,self.ilev_crm-1:-1]
         flux_net_H = eddy_diff*(self.cp/self.g)*T_crm*preslay_diff0 #  cp/g · T · Δp 
         flux_net_H[:,-1] = -self.relu(flux_net_H[:,-1]) # net downward flux at sfc must be upwards or zero
-        flux_net_H = torch.cat((zeroes_crm,flux_net_H),dim=1)
+        if self.pred_subgrid_temp:
+          zer = zeroes_crm
+        else:
+          zer = torch.zeros(batch_size, 1, 1, device=inputs_denorm.device)
+        flux_net_H = torch.cat((zer,flux_net_H),dim=1)
         flux_t_dp = (scaling_factor/self.cp)*( (flux_net_H[:,1:] - flux_net_H[:,0:-1]) / pres_diff) 
         del flux_net_H, eddy_diff
 
@@ -530,12 +547,17 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # ...and condensation - evaporation. Because we have both ice and liquid, use the grid-scale mean liquid/ice fraction
         # to compute latent heat release. This is an approximation because it ignores sub-grid variability in liquid fraction,
         # but should not matter too much for the purposes of latent heat from phase changes as Ls and Lv are quite similar
-        # if self.use_mp_constraint:
-        temp = T_gcm.squeeze() + (torch.sum(area_frac*dT_crm, 2)/self.yscale_lev[self.ilev_crm:,0]) * 1200
-        liq_frac    = torch.unsqueeze(self.temperature_scaling(temp),2); ice_frac = 1 - liq_frac
-        # else:
-        #   liq_frac = liq_frac_crm_old; ice_frac = 1 - liq_frac 
-        net_condensation_crm = (1/self.cp)*((liq_frac*self.Lv + ice_frac*self.Ls)*dq_cond_evap_vapor - self.Lv*dqv_evap_prec)
+        if self.pred_subgrid_temp:
+          temp = T_gcm.squeeze() + (torch.sum(area_frac*dT_crm, 2)/self.yscale_lev[self.ilev_crm:,0]) * 1200
+          liq_frac    = torch.unsqueeze(self.temperature_scaling(temp),2); ice_frac = 1 - liq_frac
+          net_condensation_crm = (1/self.cp)*((liq_frac*self.Lv + ice_frac*self.Ls)*dq_cond_evap_vapor - self.Lv*dqv_evap_prec)
+        else:
+          temp = T_gcm.squeeze() + dT_crm.squeeze()/self.yscale_lev[self.ilev_crm:,0] * 1200
+          liq_frac    = torch.unsqueeze(self.temperature_scaling(temp),2); ice_frac = 1 - liq_frac
+          dq_cond_evap_vapor_s = torch.sum(area_frac*dq_cond_evap_vapor, 2, keepdim=True)
+          dqv_evap_prec_s      = torch.sum(area_frac*dqv_evap_prec, 2, keepdim=True)
+          net_condensation_crm = (1/self.cp)*((liq_frac*self.Lv + ice_frac*self.Ls)*dq_cond_evap_vapor_s - self.Lv*dqv_evap_prec_s)
+
         net_condensation_crm = (net_condensation_crm/self.yscale_lev[self.ilev_crm:,1:2]) * self.yscale_lev[self.ilev_crm:,0:1]
 
         dT_crm = dT_crm + net_condensation_crm 
@@ -663,7 +685,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           #  For a given sample, a low-p cloud state may not selected at all, but because we do random draws we will occasionally
           #  sample also low-p states and the estimate will be unbiased (but noisy) 
           p_flat = area_frac.view(-1, self.mp_ncol)
-          T_crm_flat = T_crm.view(-1, self.mp_ncol)
+          if self.pred_subgrid_temp and not self.use_liq_frac_crm_mlp:
+            T_crm_flat = T_crm.view(-1, self.mp_ncol)
           qn_crm_flat = qn_crm.view(-1, self.mp_ncol)
 
           # indices = torch.multinomial(p_flat, num_samples=self.ng_sw, replacement=True)
@@ -673,7 +696,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # #  3) Rather than purely random assignment, deterministically partition g-points among states proportional to p, then shuffle.
           # # Same cost as McICA, zero bias, lower variance
           indices = stratified_sample(p_flat, self.ng_lw) #, shuffle=False)
-          T_crm = torch.gather(T_crm_flat, dim=-1, index=indices).view(batch_size, self.nlev_crm, self.ng_lw)
+          if self.pred_subgrid_temp and not self.use_liq_frac_crm_mlp:
+            T_crm = torch.gather(T_crm_flat, dim=-1, index=indices).view(batch_size, self.nlev_crm, self.ng_lw)
           qn_crm = torch.gather(qn_crm_flat, dim=-1, index=indices).view(batch_size, self.nlev_crm, self.ng_lw)
           # print("p 100, 40", p_flat[100*40,:], "inds", indices[100*40,:])
           
