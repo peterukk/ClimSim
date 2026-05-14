@@ -182,7 +182,7 @@ def relative_to_specific_humidity(rh, temp, pressure):
     return specific_humidity
     
 
-def specific_to_relative_humidity_excess(sh, temp, pressure):#, return_excess=False):
+def specific_to_relative_humidity(sh, temp, pressure, return_excess=False):
     """
     Convert specific humidity to relative humidity using PyTorch tensors.
     
@@ -232,23 +232,19 @@ def specific_to_relative_humidity_excess(sh, temp, pressure):#, return_excess=Fa
     # Solving for e: e = (q * p) / (epsilon + q * (1 - epsilon))
     e_actual = (sh * pressure) / (epsilon + sh * (1 - epsilon))
     
-    # Calculate relative humidity (unclamped)
-    rh = e_actual / e_sat
-    
-    # if return_excess:
-    # Calculate saturation specific humidity
-    # q_sat = (epsilon * e_sat) / (p - e_sat * (1 - epsilon))
-    sh_sat = (epsilon * e_sat) / (pressure - e_sat * (1 - epsilon))
-    
-    # Excess is the amount above saturation (0 if not supersaturated)
-    excess = torch.where(sh > sh_sat, sh - sh_sat, torch.zeros_like(sh))
-
-    rh = torch.clamp(rh, 0.0, 1.0)
-    return rh, excess
-    # else:
-    #     # Return clamped relative humidity
-    #     rh = torch.clamp(rh, 0.0, 1.0)
-    #     return rh
+    if return_excess:
+      # Calculate saturation specific humidity
+      # q_sat = (epsilon * e_sat) / (p - e_sat * (1 - epsilon))
+      sh_sat = (epsilon * e_sat) / (pressure - e_sat * (1 - epsilon))
+      
+      # Excess is the amount above saturation (0 if not supersaturated)
+      excess = torch.where(sh > sh_sat, sh - sh_sat, torch.zeros_like(sh))
+      return excess
+    else:
+      # Calculate relative humidity (unclamped)
+      rh = e_actual / e_sat
+      rh = torch.clamp(rh, 0.0, 1.0)
+      return rh
 
 class train_or_eval_one_epoch:
     def __init__(self, dataloader, 
@@ -535,10 +531,10 @@ class train_or_eval_one_epoch:
                         # if self.cfg.model_type=="physrad":
                         #   if self.model.track_explicit_subgrid_states and (j%100==0):#j==0:
                         #   # if self.model.track_explicit_subgrid_states and j==0:
-                        #     T_crm = torch.repeat_interleave(x_lay_raw1[:,self.model.ilev_crm:,0:1],repeats=self.model.mp_ncol,dim=-1)
+                        #     T_crm = torch.repeat_interleave(x_lay_raw1[:,self.model.ilev_crm:,0:1],repeats=self.model.nreg,dim=-1)
                         #     qn_crm = x_lay_raw1[:,self.model.ilev_crm:,2:3] + x_lay_raw1[:,self.model.ilev_crm:,3:4]
-                        #     qn_crm = torch.repeat_interleave(qn_crm,repeats=self.model.mp_ncol,dim=-1)
-                        #     qv_crm = torch.repeat_interleave(x_lay_raw1[:,self.model.ilev_crm:,-1:],repeats=self.model.mp_ncol,dim=-1)
+                        #     qn_crm = torch.repeat_interleave(qn_crm,repeats=self.model.nreg,dim=-1)
+                        #     qv_crm = torch.repeat_interleave(x_lay_raw1[:,self.model.ilev_crm:,-1:],repeats=self.model.nreg,dim=-1)
                         #     if j==0:
                         #       rnn_mem = torch.stack((rnn_mem, T_crm, qv_crm, qn_crm),dim=0)
                         #     else:

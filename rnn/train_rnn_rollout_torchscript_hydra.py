@@ -736,7 +736,7 @@ def main(cfg: DictConfig):
     inpstr = "v5" if cfg.v4_to_v5_inputs else "v4"
     physrad_str = "physRad-{}".format(cfg.ng_lw) if cfg.use_physrad else "MLRad"
     MODEL_STR =  '{}_{}_nreg{}_lr{}.neur{}-{}_x{}_mp{}_num{}'.format(cfg.model_type, physrad_str,
-                                                                     cfg.mp_ncol, cfg.lr, 
+                                                                     cfg.nreg, cfg.lr, 
                                                                      cfg.nneur[0], cfg.nneur[1], 
                                                                      inpstr, cfg.mp_mode,
                                                                      conf["model_num"] )

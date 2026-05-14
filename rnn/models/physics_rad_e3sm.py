@@ -125,7 +125,6 @@ def slingo_liq_cloud_optics_sw(rel:torch.Tensor, ng:int=4):
         i_lim6 = int(round((89/112)*ng))
 
         x = torch.stack([coeffs1, coeffs2, coeffs3, coeffs4, coeffs5, coeffs6])  
-        # x = torch.stack([coeffs6, coeffs5, coeffs4, coeffs3, coeffs2, coeffs1])  
         y = torch.empty(6, ng, dtype=rel.dtype, device=rel.device)
 
         # y[:, 0:i_lim1]      = x[:, 3:4]
@@ -170,16 +169,8 @@ def ec_ice_optics_sw(rei:torch.Tensor, ng:int=4):
         i_lim6 = int(round((89/112)*ng))
 
         x = torch.stack([coeffs1, coeffs2, coeffs3, coeffs4, coeffs5, coeffs6])  
-        # x = torch.stack([coeffs6, coeffs5, coeffs4, coeffs3, coeffs2, coeffs1])  
         y = torch.empty(6, ng, dtype=rei.dtype, device=rei.device)
 
-        # y[:, 0:i_lim1]      = x[:, 3:4]
-        # y[:, i_lim1:i_lim2] = 0.5 * (x[:, 2:3] + x[:, 3:4])
-        # y[:, i_lim2:i_lim3] = x[:, 2:3]
-        # y[:, i_lim3:i_lim4] = 0.5 * (x[:, 1:2] + x[:, 2:3])
-        # y[:, i_lim4:i_lim5] = x[:, 1:2]
-        # y[:, i_lim5:i_lim6] = 0.5 * (x[:, 0:1] + x[:, 1:2])
-        # y[:, i_lim6:]       = x[:, 0:1]
         y[:, 0:i_lim2]      = x[:, 3:4]   # band 4
         y[:, i_lim2:i_lim4] = x[:, 2:3]   # band 3
         y[:, i_lim4:i_lim5] = x[:, 1:2]   # band 2

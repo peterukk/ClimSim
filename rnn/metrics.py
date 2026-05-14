@@ -237,43 +237,6 @@ def get_energy_metric(hyai, hybi, device):
         return energy_mse 
     
     return em
-
-# def get_energy_metric(hyai, hybi):
-#     def em(yto, ypo, sp, timesteps):
-#         #  y: (batch*timesteps, lev, ny)
-#         cp = torch.tensor(1004.0)
-#         Lv = torch.tensor(2.5104e6)
-#         Lf = torch.tensor(3.34e5)
-#         one_over_grav = torch.tensor(0.1020408163) # 1/9.8
-        
-#         thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
-#                              + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
-    
-#         dT_pred = ypo[:,:,0]
-#         dT_true = yto[:,:,0]
-
-#         dq_pred = ypo[:,:,1] 
-#         dq_true = yto[:,:,1]
-        
-#         dql_pred = ypo[:,:,2] 
-#         dql_true = yto[:,:,2] 
-            
-#         energy_pred = torch.sum(thick*(dq_pred*Lv + dT_pred*cp + dql_pred*Lf),1)
-#         energy_true = torch.sum(thick*(dq_true*Lv + dT_true*cp + dql_true*Lf),1)
-#         # energy_pred = torch.sum(thick*(dq_pred*Lv + dT_pred*cp),1)
-#         # energy_true = torch.sum(thick*(dq_true*Lv + dT_true*cp),1)
-#         # (batch)
-        
-#         energy_pred = torch.reshape(energy_pred,(timesteps, -1))
-#         energy_pred = torch.mean(energy_pred,dim=0)
-        
-#         energy_true = torch.reshape(energy_true,(timesteps, -1))
-#         energy_true = torch.mean(energy_true,dim=0)
-
-#         energy_mse=torch.mean(torch.square(energy_pred - energy_true))
-#         return energy_mse 
-    
-#     return em
     
 def get_water_conservation(hyai, hybi, device):
     hyai = torch.from_numpy(hyai).to(device, torch.float32)
@@ -351,33 +314,8 @@ def get_water_conservation(hyai, hybi, device):
             return diff 
     return wc
 
-# def get_dprec_ddlwp(hyai, hybi):
-#     def metric(pred_lev, pred_sfc, true_lev, true_sfc, sp):
-#         # precip = (pred_sfc[:,2] + pred_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
-#         precip_pred = (pred_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
-#         precip_true = (true_sfc[:,3]) * 1000.0 # density of water. m s-1 * 1000 kg m-3 = kg m-2 s-1 
 
-#         one_over_grav = torch.tensor(0.1020408163) # 1/9.8
-#         thick= one_over_grav*(sp * (hybi[1:61].view(1,-1)-hybi[0:60].view(1,-1)) 
-#             + torch.tensor(100000)*(hyai[1:61].view(1,-1)-hyai[0:60].view(1,-1)))
-        
-#         water_pred = pred_lev[:,:,1] + pred_lev[:,:,2] +  pred_lev[:,:,3]
-#         lwp_pred = torch.sum(thick*(water_pred),1)
-        
-#         water_true = true_lev[:,:,1] + true_lev[:,:,2] +  true_lev[:,:,3]
-#         lwp_true = torch.sum(thick*(water_true),1)
-        
-#         dprec_dlwp_pred = precip_pred / lwp_pred
-#         dprec_dlwp_pred = torch.sqrt(torch.sqrt(torch.sqrt(dprec_dlwp_pred)))
-#         dprec_dlwp_true = precip_true / lwp_true
-#         dprec_dlwp_true = torch.sqrt(torch.sqrt(torch.sqrt(dprec_dlwp_true)))
-        
-#         diff = torch.nanmean(torch.abs(dprec_dlwp_true - dprec_dlwp_pred))
-
-#         return diff 
-#     return metric
-
-def specific_to_relative_humidity_torch_cc(sh, temp, pressure):#, return_q_excess=False):
+def specific_to_relative_humidity_torch_cc(sh:torch.Tensor, temp:torch.Tensor, pressure:torch.Tensor, return_excess:bool=False):
     """
     Convert specific humidity to relative humidity using PyTorch tensors.
     
@@ -385,14 +323,19 @@ def specific_to_relative_humidity_torch_cc(sh, temp, pressure):#, return_q_exces
         sh (torch.Tensor): Specific humidity (kg water vapor / kg total air)
         temp (torch.Tensor): Temperature in Kelvin
         pressure (torch.Tensor): Pressure in Pa (Pascals)
+        return_excess (bool): If True, return excess humidity instead of clamped RH
     
     Returns:
-        torch.Tensor: Relative humidity as a fraction (0-1)
+        torch.Tensor: 
+            If return_excess=False: Relative humidity as a fraction (0-1)
+            If return_excess=True: Excess specific humidity (kg/kg) when supersaturated,
+                                   0 when RH <= 1.0
     
     Notes:
         - Uses Clausius-Clapeyron relation for saturation vapor pressure
         - Latent heat of vaporization varies linearly with temperature
         - All calculations performed in Kelvin
+        - Excess humidity represents water that would condense out
     """
     
     # Constants
@@ -422,23 +365,20 @@ def specific_to_relative_humidity_torch_cc(sh, temp, pressure):#, return_q_exces
     # Solving for e: e = (q * p) / (epsilon + q * (1 - epsilon))
     e_actual = (sh * pressure) / (epsilon + sh * (1 - epsilon))
     
-    # Calculate relative humidity
-    rh = e_actual / e_sat
-
-    # if return_q_excess:
-    #   rh_excess = F.relu(rh - 1.0)
-    #   # Calculate actual vapor pressure
-    #   e_actual_excess = rh_excess * e_sat
-    #   # Calculate specific humidity
-    #   # q = (epsilon * e) / (p - e * (1 - epsilon))
-    #   specific_humidity_excess = (epsilon * e_actual_excess) / (pressure - e_actual_excess * (1 - epsilon))
-    #   return rh, specific_humidity_excess 
-    # else:
-      # print("max rh", rh.max().item())
+    if return_excess:
+      # Calculate saturation specific humidity
+      # q_sat = (epsilon * e_sat) / (p - e_sat * (1 - epsilon))
+      sh_sat = (epsilon * e_sat) / (pressure - e_sat * (1 - epsilon))
       
-      # Clamp to [0, 1] to handle numerical issues
+      # Excess is the amount above saturation (0 if not supersaturated)
+      excess = torch.where(sh > sh_sat, sh - sh_sat, torch.zeros_like(sh))
+      return excess
+    else:
+      # Calculate relative humidity
+      rh = e_actual / e_sat
       # rh = torch.clamp(rh, 0.0, 1.0)
-    return rh
+      return rh
+
 
 # --- PyTorch implementations ---
 def torch_polyval(coeffs, x):
@@ -510,15 +450,8 @@ def get_rh_loss(hyam, hybm,device):
 
         rh_new      = specific_to_relative_humidity_torch_cc(qv_new, T_new, pres)
         rh_new_pred = specific_to_relative_humidity_torch_cc(qv_new_pred, T_new_pred, pres)
-
         # rh_new2      = specific_to_relative_humidity_torch(qv_new, T_new, pres)
         # rh_new_pred2 = specific_to_relative_humidity_torch(qv_new_pred, T_new_pred, pres)
-
-        # print("min max mean dqv new-true", torch.min(true_lev[:,:,1:2]*1200).item(),  torch.max(true_lev[:,:,1:2]*1200).item(), torch.mean(true_lev[:,:,1:2]*1200).item())
-        # print("min max mean dqv new-pred", torch.min(pred_lev[:,:,1:2]*1200).item(),  torch.max(pred_lev[:,:,1:2]*1200).item(), torch.mean(pred_lev[:,:,1:2]*1200).item())
-        # # print("min max mean qv old", torch.min(qv_before).item(),  torch.max(qv_before).item(), torch.mean(qv_before).item())
-        # print("min max mean qv new-true", torch.min(qv_new).item(),  torch.max(qv_new).item(), torch.mean(qv_new).item())
-        # print("min max mean qv new-pred", torch.min(qv_new_pred).item(),  torch.max(qv_new_pred).item(), torch.mean(qv_new_pred).item())
 
         # qliq_before       = x_denorm[:,:,2:3]
         # qliq_new          = qliq_before +  true_lev[:,:,2:3]*1200
@@ -536,20 +469,11 @@ def get_rh_loss(hyam, hybm,device):
         # diff = torch.nanmean(torch.abs(rh_new - rh_new_pred))
         diff = torch.mean(torch.square(rh_new_pred- rh_new))
 
+        # rh_excess =  F.relu(rh_new_pred - 1.0)
+        # diff = diff + 5*torch.mean(torch.square(rh_excess))
+
         return diff 
     return metric
-# def loss_con(y_true_norm, y_pred_norm, y_true, y_pred, sp, _lambda):
-
-#     energy = energy_metric(y_true, y_pred, sp, hyai,hybi)
-#     #mse = torch.mean(torch.square(y_pred- y_true))
-#     mse = my_mse_flatten(y_true_norm, y_pred_norm)
-#     loss = mse + _lambda*energy
-#     return loss, energy, mse
-
-# def get_loss_con(hyai, hybi, _lambda, denorm_func):
-#     def hybrid_loss(y_true_norm, y_pred_norm, y_true, y_pred, sp):
-#         return loss_con(y_true_norm, y_pred_norm, y_true, y_pred, sp, _lambda)
-#     return hybrid_loss
 
 def my_hybrid_loss(mse, energy, _lambda):
     loss = mse + _lambda*energy

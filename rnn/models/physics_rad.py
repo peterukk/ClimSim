@@ -166,14 +166,9 @@ def calc_ref_trans_sw(mu0, od, ssa, asymmetry):
     # ------------------------------------------------------------------ #
     # Two-stream gamma coefficients
     # ------------------------------------------------------------------ #
-    # factor  = 0.75 * asymmetry
-    # gamma1  = 2.0  - ssa * (1.25 + factor)
-    # gamma2  = ssa  * (0.75 - factor)
-    # gamma3  = 0.5  - mu0 * factor
     gamma1 = (8 - ssa*(5 + 3*asymmetry)) * 0.25
     gamma2 = 3*(ssa*(1 - asymmetry)) * 0.25
     gamma3 = (2 - 3*mu0*asymmetry) * 0.25
-
     gamma4  = 1.0  - gamma3
 
     # alpha1 / alpha2  (Eqs. 16-17)
@@ -184,7 +179,7 @@ def calc_ref_trans_sw(mu0, od, ssa, asymmetry):
     # Diffuse reflectance / transmittance  (Eqs. 25-26)
     # ------------------------------------------------------------------ #
     # k_exponent  (Eq. 18) — clamped for numerical safety
-    k = torch.sqrt(torch.clamp((gamma1 - gamma2) * (gamma1 + gamma2), min=1.0e-4))
+    k = torch.sqrt(torch.clamp((gamma1 - gamma2) * (gamma1 + gamma2), min=1.0e-4)) # 1e-4 TUNED FOR SINGLE PRECISION!
 
     exponential   = torch.exp(-k * od)
     exponential2  = exponential ** 2
@@ -256,18 +251,21 @@ def calc_ref_trans_sw(mu0, od, ssa, asymmetry):
 def adding_ica_sw_batchlast_opt(incoming_toa, albedo_surf_diffuse, albedo_surf_direct,
                 R, T, ref_dir, T_dir_diff, T_dir_dir):
         """
-        Adding method for shortwave radiation
+        Adding method for shortwave radiation. 
+        Adapted from ecRad-TripleClouds to use just two vertical loops instead of three as in RTE. 
         Args are torch.Tensors:
-          incoming_toa[ncol], albedo_surf_diffuse[ncol], albedo_surf_diffuse[ncol],
-          reflectance[nlev,ncol], transmittance[nlev,ncol], ref_dir[nlev,ncol], trans_dir_diff[nlev,ncol],
-          trans_dir_dir[nlev,ncol]
-        Here ncol is a batch dimension without loop dependencies (actually columns x spectral intervals),
-        nlev is the number of vertical levels (has loop dependencies)
+          incoming_toa[nbatch], albedo_surf_diffuse[nbatch], albedo_surf_direct[nbatch],
+          reflectance[nlev,nbatch], transmittance[nlev,nbatch], ref_dir[nlev,nbatch], trans_dir_diff[nlev,nbatch],
+          trans_dir_dir[nlev,nbatch]
+        Here nlev is the contiguous dimension in memory and nbatch (=ng*ncol) is a batch dimension without loop dependencies, 
+            where spectral (ng) and column (ncol) dimensions should have been collapsed before calling this function. 
+        This should be optimal for GPU; for CPU it *may* be better to have (ng,nlev,ncol) (in Python row major notation)
+            where SIMD vectorization is used for the innermost ng and multithreading is used for outermost ncol. 
         Returns:
-            tuple: (flux_up, flux_dn_diffuse, flux_dn_direct) each of shape [ncol, nlev+1]
+            tuple: (flux_up, flux_dn_diffuse, flux_dn_direct) each of shape [nbatch, nlev+1]
         """
         
-        nlev, ncol = R.shape
+        nlev, nbatch = R.shape
         device = R.device
         
         # Set surface albedo
@@ -292,6 +290,7 @@ def adding_ica_sw_batchlast_opt(incoming_toa, albedo_surf_diffuse, albedo_surf_d
             albedo0 = R[jlev] + torch.square(T[jlev]) * albedo0  * inv_denom #/ (1.0 - albedo0 * R[jlev])
             albedo  += [albedo0]
 
+        # Reverse arrays because next loop will go from top-of-atmosphere to surface
         albedo.reverse(); albedodir.reverse()
         
         # At top-of-atmosphere, all upwelling radiation is due to scattering by the direct beam below that level
@@ -311,32 +310,26 @@ def adding_ica_sw_batchlast_opt(incoming_toa, albedo_surf_diffuse, albedo_surf_d
         # Work back down through the atmosphere computing the fluxes at each half-level
         for jlev in range(nlev):  # 1 to nlev in Fortran indexing
 
-            # fluxdndiff = (T[jlev]*fluxdndiff + fluxdndir 
-            #         * (T[jlev]*albedodir[jlev + 1]*R[jlev]  + T_dir_diff[jlev] ) 
-            #         / (1.0-  R[jlev]*albedo[jlev + 1])) 
-            
             fluxdndiff = (T[jlev]*fluxdndiff 
                 + fluxdndir * (T[jlev]*albedodir[jlev+1]*R[jlev] + T_dir_diff[jlev])) / (1.0 - R[jlev]*albedo[jlev+1])
 
-            # flux_dn_direct[jlev + 1] = fluxdndir * T_dir_dir[jlev,:]
             fluxdndir =  fluxdndir * T_dir_dir[jlev,:]
+            # Apply cosine correction to direct flux..NOT HERE, already done to TOA incoming flux
+            # flux_dn_direct = fluxdndir * cos_sza
             flux_dn_direct  += [fluxdndir]
             flux_dn_diffuse += [fluxdndiff]
 
-            # flux_up[jlev+1] =  fluxdndir*albedodir[jlev+1] + fluxdndiff* albedo[jlev + 1]
             fluxup = fluxdndir*albedodir[jlev+1] + fluxdndiff* albedo[jlev + 1]
             flux_up += [fluxup]       
-            # Apply cosine correction to direct flux
-            # flux_dn_direct[:, jlev] = fluxdndir * cos_sza
         
         flux_dn_direct  = torch.stack(flux_dn_direct)
         flux_dn_diffuse = torch.stack(flux_dn_diffuse)
         flux_up = torch.stack(flux_up)
 
-
         return flux_up, flux_dn_diffuse, flux_dn_direct
 
-@torch.jit.script
+# @torch.jit.script
+@torch.compile(dynamic=False)
 def adding_ica_sw_inference(
     incoming_toa: Tensor,
     albedo_surf_diffuse: Tensor,
@@ -348,7 +341,7 @@ def adding_ica_sw_inference(
     trans_dir_dir: Tensor,
 ) -> Tuple[Tensor, Tensor, Tensor]:
 
-    nlev, ncol = reflectance.shape
+    nlev, nbatch = reflectance.shape
 
     # --- Upward sweep ---
     # Only keep current-level scalars; no list accumulation needed.
@@ -357,9 +350,9 @@ def adding_ica_sw_inference(
     # We CAN avoid the Python list + reverse + stack overhead by writing
     # directly into pre-allocated tensors — safe here because autograd
     # is not running, so no version counter issues.
-    albedo    = torch.empty(nlev + 1, ncol, dtype=reflectance.dtype,
+    albedo    = torch.empty(nlev + 1, nbatch, dtype=reflectance.dtype,
                              device=reflectance.device)
-    albedodir = torch.empty(nlev + 1, ncol, dtype=reflectance.dtype,
+    albedodir = torch.empty(nlev + 1, nbatch, dtype=reflectance.dtype,
                              device=reflectance.device)
 
     albedo[0]    = albedo_surf_diffuse
@@ -383,15 +376,15 @@ def adding_ica_sw_inference(
     # (same indexing as the fixed Triton kernel)
 
     # --- Downward sweep ---
-    flux_up         = torch.empty(nlev + 1, ncol, dtype=reflectance.dtype,
+    flux_up         = torch.empty(nlev + 1, nbatch, dtype=reflectance.dtype,
                                    device=reflectance.device)
-    flux_dn_diffuse = torch.empty(nlev + 1, ncol, dtype=reflectance.dtype,
+    flux_dn_diffuse = torch.empty(nlev + 1, nbatch, dtype=reflectance.dtype,
                                    device=reflectance.device)
-    flux_dn_direct  = torch.empty(nlev + 1, ncol, dtype=reflectance.dtype,
+    flux_dn_direct  = torch.empty(nlev + 1, nbatch, dtype=reflectance.dtype,
                                    device=reflectance.device)
 
     fluxdndir  = incoming_toa
-    fluxdndiff = torch.zeros(ncol, dtype=reflectance.dtype,
+    fluxdndiff = torch.zeros(nbatch, dtype=reflectance.dtype,
                               device=reflectance.device)
 
     flux_up        [0] = incoming_toa * albedodir[nlev]   # TOA = slot nlev
@@ -432,21 +425,21 @@ def adding_ica_sw(
 
 @torch.compile(dynamic=False)
 def adding_tc_sw_batchlast_opt(incoming_toa, albedo_surf_diffuse, albedo_surf_direct,
-                reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir, V, ncol_subgrid):
+                reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir, V, nreg):
         """
         Adding method for shortwave radiation, experimental TripleClouds version
         Requires overlap matrix V
 
         Args are torch.Tensors:
-          incoming_toa[ncol], albedo_surf_diffuse[ncol], albedo_surf_diffuse[ncol],
-          reflectance[nlev,ncol], transmittance[nlev,ncol], ref_dir[nlev,ncol], trans_dir_diff[nlev,ncol],
-          trans_dir_dir[nlev,ncol], V[nlev,ncol]
+          incoming_toa[nbatch], albedo_surf_diffuse[nbatch], albedo_surf_diffuse[nbatch],
+          reflectance[nlev,nbatch], transmittance[nlev,nbatch], ref_dir[nlev,nbatch], trans_dir_diff[nlev,nbatch],
+          trans_dir_dir[nlev,nbatch], V[nlev,nbatch]
 
         Returns:
-            tuple: (flux_up, flux_dn_diffuse, flux_dn_direct) each of shape [ncol, nlev+1]
+            tuple: (flux_up, flux_dn_diffuse, flux_dn_direct) each of shape [nbatch, nlev+1]
         """
         
-        nlev, ncol = reflectance.shape
+        nlev, nbatch = reflectance.shape
         device = reflectance.device
         
         # Set surface albedo
@@ -468,8 +461,8 @@ def adding_tc_sw_batchlast_opt(incoming_toa, albedo_surf_diffuse, albedo_surf_di
                                     (trans_dir_dir[jlev]*albedodir0 + trans_dir_diff[jlev]*albedo0) *
                                     transmittance[jlev] / (1.0 - albedo0 * reflectance[jlev])) #*V[jlev] #* inv_denom)  
             
-            albedodir0 = albedodir0.view(-1,ncol_subgrid)
-            Vmat = V[jlev].view(-1,ncol_subgrid,ncol_subgrid)
+            albedodir0 = albedodir0.view(-1,nreg)
+            Vmat = V[jlev].view(-1,nreg,nreg)
             # for nreg=3:
             # A[:,1] =  A[:,1]*V[:,1,1] + A[:,2]*V[:,2,1] + A[:,3]*V[:,3,1]
             # A[:,2] =  A[:,1]*V[:,1,2] + A[:,2]*V[:,2,2] + A[:,3]*V[:,3,2]
@@ -479,7 +472,7 @@ def adding_tc_sw_batchlast_opt(incoming_toa, albedo_surf_diffuse, albedo_surf_di
             albedodir  += [albedodir0]  
             
             albedo0 = (reflectance[jlev] + torch.square(transmittance[jlev]) * albedo0  / (1.0 - albedo0 * reflectance[jlev])) #*V[jlev]
-            albedo0 = albedo0.view(-1,ncol_subgrid)
+            albedo0 = albedo0.view(-1,nreg)
             albedo0 = torch.bmm(albedo0.unsqueeze(1), Vmat).squeeze(1)
             albedo0 = albedo0.view(-1)
 

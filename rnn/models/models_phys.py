@@ -15,7 +15,7 @@ from .physics_rad import outgoing_lw, reftrans_lw, lw_solver_noscat_batchlast
 from .physics_rad import calc_ref_trans_sw, adding_ica_sw_batchlast_opt, adding_ica_sw, adding_tc_sw_batchlast_opt
 from .physics_rad import stratified_sample, interpolate_tlev_batchfirst, interpolate_tlev_batchlast
 from .physics_rad_e3sm import reitab, reltab, slingo_liq_cloud_optics_sw, ec_ice_optics_sw
-from metrics import specific_to_relative_humidity_torch_cc, specific_to_relative_humidity_torch
+from metrics import specific_to_relative_humidity_torch_cc
 import numpy as np 
 from typing import Final 
 import time
@@ -24,7 +24,7 @@ from omegaconf import DictConfig, OmegaConf
 class physical_RNN_autoreg(Base_RNN_autoreg):
     """
     Physics-informed version of the BiRNN
-    Predicts vertical fluxes and microphysical process rates, conserving moisture
+    Predicts vertical fluxes and microphysical process rates (conserving moisture) for "sub-grid regions" (nreg)
     Precipitation that hasn't yet fallen to the surface can be stored as a scalar to the next time step
     Optionally, can be combined with physical equations for radiative transfer (use_physrad)
     """
@@ -32,33 +32,34 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     use_intermediate_mlp: Final[bool]
     add_pres: Final[bool]
     add_stochastic_layer: Final[bool]
+    use_ensemble: Final[bool]
     use_lstm: Final[bool]
     output_prune: Final[bool]
     predict_liq_frac: Final[bool] # Predict fraction of cloud that is liquid 
     predict_total_water: Final[bool] # Predict total water tendency, fraction of total water that is cloud, and liq_frac 
-    use_mp_constraint: Final[bool]
+    use_mp_constraint: Final[bool] # see train_rnn_rollout_torchscript_hydra.py
     mp_mode: Final[int]
-    use_ensemble: Final[bool]
-    # --- Options for physics-based moist physics ---
-    return_neg_precip: Final[bool]
-    store_precip: Final[bool]
-    ice_sedimentation: Final[bool]
-    allow_extra_heating: Final[bool]
-    separate_radiation: Final[bool] # If physrad is False, we can still try to separate radiation (separate NN and vertical grid)
+    # --- Options for physics-based moist physics based on predicting fluxes and microphysics process rates ---
+    return_neg_precip: Final[bool] # Here precip is (semi-)diagnosed and can have negative values - we can penalize this with a loss 
+    store_precip: Final[bool] # In the semi-prognostic method, precip that hasn't yet reached the surface can be stored to the next t-step
+    ice_sedimentation: Final[bool] 
+    allow_extra_heating: Final[bool] # Allow extra (predicted) dT besides latent heating from microphysics and radiative heating/cooling?
+    condense_supersaturated_water: Final[bool] # Remove supersatured water and put it into cloud water
+    use_clear_sky_region: Final[bool] # Force one of the "regions" (latent/sub-grid dim) to be clear-sky, as in the TripleClouds radiation scheme
+    separate_radiation: Final[bool] # If physrad is False, we can still try to separate radiation (use separate BiGRU and vertical grid)
     # --- Options for physical radiation ---
-    use_physrad: Final[bool]
-    experimental_rad: Final[bool]
-    use_mcica: Final[bool]
-    include_qv_variability: Final[bool]
-    update_states_for_rad: Final[bool]
+    use_physrad: Final[bool] # Turn on physical radiation
+    experimental_rad: Final[bool] # Use the TripleClouds method (Shonk&Hogan 2010) for sub-grid clouds in radiation - experimental and perhaps buggy!
+    use_mcica: Final[bool] # Alternative should be McICA...but here both can be turned off, which weirdly conflates the spectral and sub-grid region dimensions
+    include_qv_variability: Final[bool] # Account for sub-grid variability of water vapor for SW by doing two passes with the SW gas optics
+    update_states_for_rad: Final[bool] # 
     use_e3sm_cloud_optics: Final[bool] 
-    use_existing_gas_optics_lw: Final[bool]
-    use_existing_gas_optics_sw: Final[bool]
-    reduce_lw_gas_optics: Final[bool]
+    use_existing_gas_optics_lw: Final[bool] # Use existing RRTMGP-NN-LW
+    use_existing_gas_optics_sw: Final[bool] # Use existing RRTMGP-NN-SW
+    reduce_lw_gas_optics: Final[bool] # ...which may be combined with another MLP to shrink the spectral dim to e.g. 16 (otherwise expensive)
     reduce_sw_gas_optics: Final[bool]
-    use_liq_frac_crm_mlp: Final[bool]
+    use_liq_frac_crm_mlp: Final[bool] 
     pred_subgrid_temp: Final[bool]
-    use_clear_sky_region: Final[bool]
 
     def __init__(self, 
                 cfg: DictConfig, 
@@ -102,7 +103,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # --------- Moist physics options configured in cfg ---------
         # 
         # Number of sub-grid regions
-        self.mp_ncol = cfg.mp_ncol
+        self.nreg = cfg.nreg
         # -----------------------------------------------------------
         # 
         # --------- Moist physics options configured here ---------
@@ -129,50 +130,51 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         if not self.use_physrad:
           self.allow_extra_heating = True
         self.pred_subgrid_temp = False 
-        self.use_clear_sky_region = False
-        print("ice_sedimentation: {}, allow_extra_heating {}, pred_subgrid_temp: {}, use_clearskyregion: {}".format(self.ice_sedimentation, 
-                        self.allow_extra_heating, self.pred_subgrid_temp, self.use_clear_sky_region))
+        self.use_clear_sky_region = True
+        self.condense_supersaturated_water = True
+        print("ice_sedimentation: {}, allow_extra_heating {}, pred_subgrid_temp: {}, use_clearskyreg: {}, condense_supersat: {}".format(self.ice_sedimentation, 
+                        self.allow_extra_heating, self.pred_subgrid_temp, self.use_clear_sky_region, self.condense_supersaturated_water))
         if self.use_clear_sky_region:
-          num_reg_cld  = self.mp_ncol -1 
+          num_reg_cld  = self.nreg -1 
         else:
-          num_reg_cld = self.mp_ncol    
+          num_reg_cld = self.nreg    
         # 
         # -------------------------------------------------------------------------------------------------
         # ---- Linear layers predicting variables needed in moist physics module from RNN hidden state ----
         # --- Flux terms ---
-        self.mlp_massflux   = nn.Linear(self.nh_rnn2, self.mp_ncol)
+        self.mlp_massflux   = nn.Linear(self.nh_rnn2, self.nreg)
         # if self.do_heat_advection:
         if self.pred_subgrid_temp:
-          self.mlp_eddy_diff  = nn.Linear(self.nh_rnn2, self.mp_ncol)
+          self.mlp_eddy_diff  = nn.Linear(self.nh_rnn2, self.nreg)
         else:
           self.mlp_eddy_diff  = nn.Linear(self.nh_rnn2, 1)
 
         # --- Microphysical process rates ---
         self.mlp_evap_cond_vapor_crm  = nn.Linear(self.nh_rnn2, num_reg_cld)
-        self.mlp_evap_prec_crm        = nn.Linear(self.nh_rnn2, self.mp_ncol)
-        self.mlp_mp_aa_crm            = nn.Linear(self.nh_rnn2, self.mp_ncol)
+        self.mlp_evap_prec_crm        = nn.Linear(self.nh_rnn2, self.nreg)
+        self.mlp_mp_aa_crm            = nn.Linear(self.nh_rnn2, self.nreg)
         if self.ice_sedimentation:
-          self.mlp_sed_qn_crm         = nn.Linear(self.nh_rnn2, self.mp_ncol)        
+          self.mlp_sed_qn_crm         = nn.Linear(self.nh_rnn2, self.nreg)        
         
         # --- Decoders for "downscaling" grid mean values to sub-grid values ---
         # nx_decoder = self.nh_mem0 
         nx_decoder = self.nh_rnn2
-        self.mlp_qv_crm     = nn.Linear(nx_decoder, self.mp_ncol)
+        self.mlp_qv_crm     = nn.Linear(nx_decoder, self.nreg)
         self.mlp_qn_crm     = nn.Linear(nx_decoder, num_reg_cld)
 
         if self.pred_subgrid_temp:
-          self.mlp_t_crm      = nn.Linear(nx_decoder, self.mp_ncol)
+          self.mlp_t_crm      = nn.Linear(nx_decoder, self.nreg)
         if self.use_mp_constraint:
-          self.mlp_qice_crm = nn.Linear(nx_decoder, self.mp_ncol)
+          self.mlp_qice_crm = nn.Linear(nx_decoder, self.nreg)
         else:
-          self.mlp_qice_crm = nn.Linear(nx_decoder, self.mp_ncol)
-          self.mlp_qliq_crm = nn.Linear(nx_decoder, self.mp_ncol)
+          self.mlp_qice_crm = nn.Linear(nx_decoder, self.nreg)
+          self.mlp_qliq_crm = nn.Linear(nx_decoder, self.nreg)
 
         self.use_liq_frac_crm_mlp = True
         if self.use_liq_frac_crm_mlp:
-          self.mlp_liq_frac_crm = nn.Linear(nx_decoder, self.mp_ncol)
+          self.mlp_liq_frac_crm = nn.Linear(nx_decoder, self.nreg)
 
-        self.mlp_subgrid_area_frac = nn.Linear(self.nh_rnn2, self.mp_ncol)
+        self.mlp_subgrid_area_frac = nn.Linear(self.nh_rnn2, self.nreg)
             
         if self.predict_liq_frac:
           self.mlp_predfrac = nn.Linear(self.nh_mem, 1)
@@ -221,7 +223,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           self.use_e3sm_cloud_optics  = True
           # When using separate gas optics module, include water vapor variability by sampling from sub-grid states and doing two passes? 
           self.include_qv_variability = True
-          # Option for using TripleClouds-style solver where fluxes are computed in each sub-grid region (mp_ncol) and g-point,
+          # Option for using TripleClouds-style solver where fluxes are computed in each sub-grid region (nreg) and g-point,
           # then summed over the regions
           # The vertical overlap between regions is handled by a matrix (v_matrix) which is here predicted with a convolutional layer
           self.experimental_rad       = False   
@@ -230,7 +232,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           if self.experimental_rad:
             self.use_mcica=False
           if self.use_e3sm_cloud_optics:
-            if (self.ng_lw != self.mp_ncol) or (self.ng_lw != self.mp_ncol):
+            if (self.ng_lw != self.nreg) or (self.ng_lw != self.nreg):
               print("Warning: use_e3sm_cloud_optics was true, and number of g-points did not equal number of sub-grid regions. For this to work, McICA needs to be ON")
               self.use_mcica = True
             if not self.use_mcica:
@@ -265,7 +267,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
               if self.use_e3sm_cloud_optics:
                 print("For LW cloud optics, using the (simple) cloud optics scheme from E3SM and not neural networks!")
               else:
-                self.cloud_optics_lw = nn.Linear(2 + self.mp_ncol, self.ng_lw)
+                self.cloud_optics_lw = nn.Linear(2 + self.nreg, self.ng_lw)
 
             if self.use_existing_gas_optics_sw:
               if self.gas_optics_model_sw1.ng !=  self.ng_sw:
@@ -286,14 +288,14 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                 print("For SW cloud optics, using the simple E3SM cloud optics scheme")
                 # self.cloud_optics_sw_expand = PositiveLinear(4, self.ng_sw) # nn.Identity()# for debugging
               else:
-                # self.cloud_optics_sw = nn.Linear(2*self.mp_ncol+self.nh_mem +2, 3*self.ng_sw)
-                self.cloud_optics_sw = nn.Linear(2 + self.mp_ncol, 2*self.ng_sw)
+                # self.cloud_optics_sw = nn.Linear(2*self.nreg+self.nh_mem +2, 3*self.ng_sw)
+                self.cloud_optics_sw = nn.Linear(2 + self.nreg, 2*self.ng_sw)
                 self.cloud_optics_sw2 = nn.Linear(2*self.ng_sw, 3*self.ng_sw)
 
             print("Reduce LW: {} SW: {}".format(self.reduce_lw_gas_optics, self.reduce_sw_gas_optics))
             
             if self.experimental_rad:
-              self.conv_vmat = nn.Conv1d(self.mp_ncol, self.mp_ncol*self.mp_ncol, 2, stride=1)
+              self.conv_vmat = nn.Conv1d(self.nreg, self.nreg*self.nreg, 2, stride=1)
 
           if not (self.use_existing_gas_optics_sw and (not self.reduce_sw_gas_optics)): 
             # self.sw_solar_weights   = nn.Parameter(torch.randn(1, self.ng_sw))
@@ -413,12 +415,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         qn_crm = qn_crm * scale
 
         if self.pred_subgrid_temp:
-          # T_mean_old = (T_crm * area_frac).sum(dim=-1, keepdim=True)
-          # scale = torch.where( #  rescale to enforce constraint exactly
-          #     T_mean_old == 0, torch.ones_like(T_mean_old), T_gcm / T_mean_old)
-          # T_crm = T_crm * scale
-
-          # T_crm = T_crm + (T_gcm - T_mean_old)   # shift, don't scale?
+          # shift, don't scale?
           deltaT = self.mlp_t_crm(latent_state)
           deltaT = deltaT - (deltaT * area_frac).sum(dim=-1, keepdim=True) # enforce zero mean
           T_crm = T_gcm + deltaT                             # add back grid mean
@@ -429,10 +426,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           T_crm = T_gcm 
 
         if not self.use_mp_constraint:
-          ## liq_frac_crm_old = self.temperature_scaling(T_crm)
-          # liq_frac_crm_old = self.sigmoid(self.mlp_liq_frac_crm(latent_state)) 
-          # liq_frac_crm_old = torch.clamp(self.mlp_liq_frac_crm(latent_state), min=0.0, max=1.0)
-          # qliq_crm = qn_crm * liq_frac_crm_old; qice_crm = qn_crm * (1-liq_frac_crm_old)
           qliq_crm = self.softplus(self.mlp_qliq_crm(latent_state)) 
           qice_crm = self.softplus(self.mlp_qice_crm(latent_state)) 
 
@@ -448,12 +441,12 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         flux1     = self.mlp_massflux(rnn2out)
         eddy_diff = self.mlp_eddy_diff(rnn2out)
 
-        zeroes_crm_singlelevel = torch.zeros(batch_size, 1, self.mp_ncol, device=inputs_denorm.device)
+        zeroes_single_level = torch.zeros(batch_size, 1, self.nreg, device=inputs_denorm.device)
         preslay_diff0 = play[:,self.ilev_crm:] - play[:,self.ilev_crm-1:-1]
         flux_net_H = eddy_diff*(self.cp/self.g)*T_crm*preslay_diff0 #  cp/g · T · Δp 
         flux_net_H[:,-1] = -self.relu(flux_net_H[:,-1]) # net downward flux at sfc must be upwards or zero
         if self.pred_subgrid_temp:
-          zer = zeroes_crm
+          zer = zeroes_single_level
         else:
           zer = torch.zeros(batch_size, 1, 1, device=inputs_denorm.device)
         flux_net_H = torch.cat((zer,flux_net_H),dim=1)
@@ -475,15 +468,14 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           sed = sed*self.g*qice_crm*torch.reshape(self.yscale_lev[self.ilev_crm:,2],(1,-1,1))
           # sedimentation = torch.mean( sed[:,-1], 1)
           sedimentation = torch.sum( area_frac[:,-1]*sed[:,-1], 1)
-          sed = torch.cat((zeroes_crm_singlelevel,sed),dim=1)
+          sed = torch.cat((zeroes_single_level,sed),dim=1)
           sed_qn_dp = scaling_factor*( (sed[:,1:] - sed[:,0:-1]) / pres_diff) 
           # del qice_crm
         else:
           sedimentation = 0
 
-
-        flux_net_qv = torch.cat((zeroes_crm_singlelevel,flux_net_qv[:,0:-1], zeroes_crm_singlelevel),dim=1)
-        flux_net_qn = torch.cat((zeroes_crm_singlelevel,flux_net_qn[:,0:-1], zeroes_crm_singlelevel),dim=1)
+        flux_net_qv = torch.cat((zeroes_single_level,flux_net_qv[:,0:-1], zeroes_single_level),dim=1)
+        flux_net_qn = torch.cat((zeroes_single_level,flux_net_qn[:,0:-1], zeroes_single_level),dim=1)
 
         flux_qv_dp = scaling_factor*( (flux_net_qv[:,1:] - flux_net_qv[:,0:-1]) / pres_diff) 
         flux_qn_dp = scaling_factor*( (flux_net_qn[:,1:] - flux_net_qn[:,0:-1]) / pres_diff) 
@@ -519,9 +511,11 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         #   3.2: Clamp values to enforce positivity of state variables 
         # first ensure positive qn by clamping dq_cond_evap_vapor
         if self.ice_sedimentation:
-            minval = -(self.yscale_lev[self.ilev_crm:,2:3]*qn_crm/1200) - flux_qn_dp + dqn_aa - sed_qn_dp
+            ice_sed_term = sed_qn_dp
         else:
-            minval = -(self.yscale_lev[self.ilev_crm:,2:3]*qn_crm/1200) - flux_qn_dp + dqn_aa
+            ice_sed_term = 0 
+            
+        minval = -(self.yscale_lev[self.ilev_crm:,2:3]*qn_crm/1200) - flux_qn_dp + dqn_aa - ice_sed_term
         dq_cond_evap_vapor = torch.clamp(dq_cond_evap_vapor, min=minval)
 
         # then ensure positive qv by clamping dqv_evap_prec
@@ -567,7 +561,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           net_condensation_crm = (1/self.cp)*((liq_frac*self.Lv + ice_frac*self.Ls)*dq_cond_evap_vapor_s - self.Lv*dqv_evap_prec_s)
         # undo humidity-scaling (terms like dq_cond_evap have this) and apply temperature-scaling to get heating
         net_condensation_crm = (net_condensation_crm/self.yscale_lev[self.ilev_crm:,1:2]) * self.yscale_lev[self.ilev_crm:,0:1]
-
+        # print("mean max cond crm", net_condensation_crm.abs().mean().item(), net_condensation_crm.abs().max().item())
+        # print("mean max dT crm 1", dT_crm.abs().mean().item(), dT_crm.abs().max().item())
         dT_crm = dT_crm + net_condensation_crm 
 
         # Heating tendency may have other contributions if allow_extra_heating is on
@@ -601,6 +596,20 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         #                              precipitation  source,       sink    (signs already reversed w.r.t. above)
         d_precip_sourcesink    = torch.sum(area_frac*(dqn_aa      - dqv_evap_prec),2)
         # This *should* be positive to avoid negative precipitation!
+
+        if self.condense_supersaturated_water and self.use_mp_constraint:
+            qv_new = self.relu(qv_gcm + 1200*out_new[:,self.ilev_crm:,1:2]/self.yscale_lev[self.ilev_crm:,1:2])
+            temp = self.relu(T_gcm + 1200*out_new[:,self.ilev_crm:,0:1]/self.yscale_lev[self.ilev_crm:,0:1])
+            qv_excess = (1/1200) * specific_to_relative_humidity_torch_cc(qv_new, temp, play[:,self.ilev_crm:], return_excess=True)
+            # print("mean max qv ex", qv_excess.mean().item(), qv_excess.max().item())
+            out_new[:,self.ilev_crm:,1:2] = out_new[:,self.ilev_crm:,1:2] -  qv_excess*self.yscale_lev[self.ilev_crm:,1:2]
+            out_new[:,self.ilev_crm:,2:3] = out_new[:,self.ilev_crm:,2:3] +  qv_excess*self.yscale_lev[self.ilev_crm:,2:3] 
+            net_condensation =  (1/self.cp)*((liq_frac*self.Lv + ice_frac*self.Ls)*qv_excess)
+            net_condensation = net_condensation* self.yscale_lev[self.ilev_crm:,0:1]
+            # print("mean max dT", out_new[:,self.ilev_crm:,0:1].mean().item(), out_new[:,self.ilev_crm:,0:1].max().item())
+            # print("mean max cond", net_condensation.mean().item(), net_condensation.max().item())
+
+            # out_new[:,self.ilev_crm:,0:1]  = out_new[:,self.ilev_crm:,0:1]  + net_condensation
 
         # --------------- 5. Precipitation -------------------
         water_new = torch.sum((self.one_over_g*pres_diff.squeeze()*d_precip_sourcesink),1)  
@@ -685,7 +694,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           #   1) Just shuffle the sub-grid cloud states along the hidden dimension (ncol_mp for cloud variables, ng for rad variables),
           #      requires  ncol_mp = ng_sw = ng_lw and doesn't account for area fractions
           # oops, code below uses same permutation for each sample, we don't want that!
-          # idx               = torch.randperm(self.mp_ncol) 
+          # idx               = torch.randperm(self.nreg) 
           # qn_crm            = qn_crm[:,:,idx]
           # T_crm             = T_crm[:,:,idx]
           #   2) True McICA? Sample from sub-grid states according to their probability p (area_frac) until we have ng samples (g-points)
@@ -698,9 +707,9 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             qn_crm = qn_crm[:,:,1:]
             if self.pred_subgrid_temp and not self.use_liq_frac_crm_mlp:
               T_crm = T_crm[:,:,1:]
-            nreg = self.mp_ncol - 1 
+            nreg = self.nreg - 1 
           else:
-            nreg = self.mp_ncol
+            nreg = self.nreg
             p_flat = area_frac 
 
           p_flat = p_flat.view(-1, nreg)
@@ -728,7 +737,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         else:
           liq_frac_crm = self.sigmoid(self.mlp_liq_frac_crm(rnn2out))
           if self.use_mcica:
-            liq_frac_crm = torch.gather(liq_frac_crm.view(-1,self.mp_ncol), dim=-1, index=indices).view(batch_size, self.nlev_crm, self.ng_lw)
+            liq_frac_crm = torch.gather(liq_frac_crm.view(-1,self.nreg), dim=-1, index=indices).view(batch_size, self.nlev_crm, self.ng_lw)
           liq_frac_crm = liq_frac_crm.transpose(0,1).contiguous()
 
         cldpath_tot       = 1000*torch.transpose((delta_plev[:,self.ilev_crm:]/self.g)*qn_crm,0,1).contiguous()
@@ -818,8 +827,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           else:
             tau_lw_cld = cldpath*self.relu(tau_lw_cld)# 0.01*self.relu(tau_lw_cld)
 
-          if not self.use_mcica and (self.mp_ncol != self.ng_lw): 
-              tau_lw_cld = torch.repeat_interleave(tau_lw_cld, self.ng_lw//self.mp_ncol, dim=2)
+          if not self.use_mcica and (self.nreg != self.ng_lw): 
+              tau_lw_cld = torch.repeat_interleave(tau_lw_cld, self.ng_lw//self.nreg, dim=2)
 
           tau_lw_cld  = torch.cat((zeroes, tau_lw_cld),dim=0)
           tau_lw      = tau_lw + tau_lw_cld # shape is (nlev, ncol, ng)
@@ -894,8 +903,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           tau_sw  = tau_sw + tau_sw_scat
 
           if self.experimental_rad:
-              tau_sw       = torch.repeat_interleave(tau_sw.unsqueeze(3),self.mp_ncol,dim=3)
-              tau_sw_scat  = torch.repeat_interleave(tau_sw_scat.unsqueeze(3),self.mp_ncol,dim=3)
+              tau_sw       = torch.repeat_interleave(tau_sw.unsqueeze(3),self.nreg,dim=3)
+              tau_sw_scat  = torch.repeat_interleave(tau_sw_scat.unsqueeze(3),self.nreg,dim=3)
           # print("tau_sw min max mean", tau_sw.min().item(), tau_sw.max().item(), tau_sw.mean().item())
 
           if not self.use_e3sm_cloud_optics: 
@@ -903,17 +912,15 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             sw_optprops = self.cloud_optics_sw2(sw_optprops) 
 
           if self.experimental_rad:
-              zeroes = torch.zeros(10, batch_size, self.ng_sw, self.mp_ncol, device=device)
+              zeroes = torch.zeros(10, batch_size, self.ng_sw, self.nreg, device=device)
           else:
               if not self.ng_sw==self.ng_lw:
                 # if self.experimental_rad: 
-                #   zeroes = torch.zeros(10, batch_size, self.ng_sw, self.mp_ncol, device=device)
+                #   zeroes = torch.zeros(10, batch_size, self.ng_sw, self.nreg, device=device)
                 # else:
                 zeroes = torch.zeros(10, batch_size, self.ng_sw, device=device)
             
           if self.use_e3sm_cloud_optics:
-            pred_cld_ssa = False 
-            # ^Still predicting ssa as an intermediate step but computing scattering od from these for easier combining of liq+ice
             # k_sw_cld_liq0, ssa_sw_cld_liq0, g_sw_cld_liq0 = slingo_liq_cloud_optics_sw(liq_eff_rad)
             # ksca_sw_cld_liq0  = k_sw_cld_liq0*ssa_sw_cld_liq0
             # kscag_sw_cld_liq0 = ksca_sw_cld_liq0*g_sw_cld_liq0
@@ -944,12 +951,12 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             if self.experimental_rad: 
                 cldpath_liq = torch.repeat_interleave(cldpath_liq.unsqueeze(2), self.ng_sw,dim=2)
                 cldpath_ice = torch.repeat_interleave(cldpath_ice.unsqueeze(2), self.ng_sw,dim=2)
-                k_sw_cld_liq = torch.repeat_interleave(k_sw_cld_liq.unsqueeze(3), self.mp_ncol,dim=3)
-                k_sw_cld_ice = torch.repeat_interleave(k_sw_cld_ice.unsqueeze(3), self.mp_ncol,dim=3)
-                ksca_sw_cld_liq = torch.repeat_interleave(ksca_sw_cld_liq.unsqueeze(3), self.mp_ncol,dim=3)
-                ksca_sw_cld_ice = torch.repeat_interleave(ksca_sw_cld_ice.unsqueeze(3), self.mp_ncol,dim=3)
-                kscag_sw_cld_liq = torch.repeat_interleave(kscag_sw_cld_liq.unsqueeze(3), self.mp_ncol,dim=3)
-                kscag_sw_cld_ice = torch.repeat_interleave(kscag_sw_cld_ice.unsqueeze(3), self.mp_ncol,dim=3)
+                k_sw_cld_liq = torch.repeat_interleave(k_sw_cld_liq.unsqueeze(3), self.nreg,dim=3)
+                k_sw_cld_ice = torch.repeat_interleave(k_sw_cld_ice.unsqueeze(3), self.nreg,dim=3)
+                ksca_sw_cld_liq = torch.repeat_interleave(ksca_sw_cld_liq.unsqueeze(3), self.nreg,dim=3)
+                ksca_sw_cld_ice = torch.repeat_interleave(ksca_sw_cld_ice.unsqueeze(3), self.nreg,dim=3)
+                kscag_sw_cld_liq = torch.repeat_interleave(kscag_sw_cld_liq.unsqueeze(3), self.nreg,dim=3)
+                kscag_sw_cld_ice = torch.repeat_interleave(kscag_sw_cld_ice.unsqueeze(3), self.nreg,dim=3)
 
             cldeps = 1e-7
             # optical depth (dimensionless) = cldpath (1000 kg/m2) *  k (m2/g) =  (kg/m2) *  k (1000 g/kg m2/g)
@@ -972,24 +979,19 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             # print("max mean tau_sw_cld*ssa", tau_sw_scat_cld.max().item(), tau_sw_scat_cld.min().item(), tau_sw_scat_cld.mean().item())
             # print("max mean tau_sw_cld*ssa*g", g_tau_scat_sw_cld.max().item(), g_tau_scat_sw_cld.min().item(),g_tau_scat_sw_cld.mean().item())
 
-            # if not pred_cld_ssa:
             tau_sw_scat_cld = torch.cat((zeroes, tau_sw_scat_cld),dim=0)
             tau_sw_cld      = torch.cat((zeroes, tau_sw_cld),dim=0)
             del tau_sw_cld_ice, tau_sw_cld_liq, tau_sw_scat_cld_liq, tau_sw_scat_cld_ice, g_tau_scat_sw_cld_liq
             del g_tau_scat_sw_cld_ice, g_tau_scat_sw_cld, k_sw_cld_liq, ksca_sw_cld_liq, k_sw_cld_ice, ksca_sw_cld_ice
             # tau_sw_cld = tau_sw_cld + tau_sw_scat_cld 
 
-          else:
-            # pred_cld_ssa = True 
-            # if pred_cld_ssa:
+          else: # if we're not using E3SM cloud optics, we predict cloud single-scattering albedo and asymmetry factor directly
             tau_sw_cld, ssa_sw_cld, g_sw_cld = sw_optprops.chunk(3,2 )
             # print("shape args", tau_sw_cld_liq.shape, tau_sw_cld_ice.shape, ssa_sw_cld.shape, g_sw_cld.shape)
             ssa_sw_cld        = self.sigmoid(ssa_sw_cld.squeeze())
             tau_sw_cld      = torch.cat((zeroes, tau_sw_cld),dim=0)
             tau_sw_cld      = cldpath*self.relu(tau_sw_cld.squeeze()) # / 1000
             g_sw_cld        = self.sigmoid(g_sw_cld.squeeze())
-            
-            # if pred_cld_ssa:
             ssa_sw_cld      = torch.cat((zeroes, ssa_sw_cld),dim=0)
             tau_sw_scat_cld = ssa_sw_cld * tau_sw_cld
 
@@ -998,8 +1000,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       if not (self.use_existing_gas_optics_sw and self.use_existing_gas_optics_lw):
       # if at least one is False 
       
-        # qv_before = torch.repeat_interleave(qv_before,self.mp_ncol,dim=2)
-        #  zeroes_crm_toa = torch.zeros(batch_size, self.ilev_crm, self.mp_ncol, device=device)
+        # qv_before = torch.repeat_interleave(qv_before,self.nreg,dim=2)
+        #  zeroes_crm_toa = torch.zeros(batch_size, self.ilev_crm, self.nreg, device=device)
         # dqv       = torch.cat((zeroes_crm_toa, 1200*(dqv_crm/self.yscale_lev[self.ilev_crm:,1:2])),dim=1)
         # qv_new    = qv_before + self.relu(dqv)
         qv_new    = qv_new * 1.608079364 # (28.97 / 18.01528) # mol_weight_air / mol_weight_gas
@@ -1127,7 +1129,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
         # (nlev, nb, ng*ny ) -->  (nlev, nb, ny, ng)
         sw_optprops = torch.reshape(sw_optprops,(self.nlev, batch_size, self.ny_sw_optprops, self.ng_sw))
-        # tau_sw, tau_sw_scat, g_sw = sw_optprops.chunk(3,2 )
         tau_sw, ssa_sw, g_sw = sw_optprops.chunk(3,2 )
         g_sw        = self.sigmoid(g_sw.squeeze())
         ssa_sw      = self.sigmoid(ssa_sw.squeeze())
@@ -1136,9 +1137,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         tau_sw      = torch.pow(tau_sw.squeeze(), 8)
         tau_sw      = tau_sw*(1e-23*col_dry)
         tau_sw      = torch.clamp(tau_sw, min=1e-6, max=40.0) 
-        # tau_sw_scat  = torch.pow(tau_sw_scat.squeeze(), 8)
-        # tau_sw_scat  = tau_sw_scat*(1e-24*col_dry)
-        # tau_sw_scat  = torch.clamp(tau_sw_scat, min=1e-6, max=40.0) 
         del sw_optprops
       else:
 
@@ -1170,7 +1168,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       # (ncol) -> (nlev, ncol) -> (nlev,ng*ncol)
       mu0_rep = torch.repeat_interleave(torch.repeat_interleave(mu0.reshape((1,-1,1)), self.nlev, dim=0),self.ng_sw,dim=2)
       if self.experimental_rad:
-         mu0_rep = torch.repeat_interleave(mu0_rep.unsqueeze(3), self.mp_ncol, dim=3)
+         mu0_rep = torch.repeat_interleave(mu0_rep.unsqueeze(3), self.nreg, dim=3)
 
       # print("mu0 min max", torch.min(mu0).item(), torch.max(mu0).item())
       # print("tau_sw min max", torch.min(tau_sw).item(), torch.max(tau_sw).item())
@@ -1204,7 +1202,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       # print("inctoa shape", incoming_toa.shape, "spectral SUM mean", incoming_toa.sum(dim=-1).mean(), "SUM max",  incoming_toa.sum(dim=-1).max())
       if self.experimental_rad:
         #  print("inc toa shape", incoming_toa.shape, "area frac shape", area_frac.shape)
-         incoming_toa = torch.repeat_interleave(incoming_toa.unsqueeze(2),self.mp_ncol,dim=2)
+         incoming_toa = torch.repeat_interleave(incoming_toa.unsqueeze(2),self.nreg,dim=2)
          area_frac = torch.repeat_interleave(area_frac.unsqueeze(2),self.ng_sw,dim=2)
          incoming_toa = incoming_toa*area_frac[:,0,:,:]
       incoming_toa = incoming_toa.view(-1)
@@ -1252,8 +1250,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       albedo_surf_dir_sw    = torch.transpose(albedo_surf_dir_sw,0,1).contiguous()
       albedo_surf_diff_sw   = torch.transpose(albedo_surf_diff_sw,0,1).contiguous()
       if self.experimental_rad:
-         albedo_surf_dir_sw   = torch.repeat_interleave(albedo_surf_dir_sw.unsqueeze(2), self.mp_ncol, dim=2)
-         albedo_surf_diff_sw  = torch.repeat_interleave(albedo_surf_diff_sw.unsqueeze(2), self.mp_ncol, dim=2)
+         albedo_surf_dir_sw   = torch.repeat_interleave(albedo_surf_dir_sw.unsqueeze(2), self.nreg, dim=2)
+         albedo_surf_diff_sw  = torch.repeat_interleave(albedo_surf_diff_sw.unsqueeze(2), self.nreg, dim=2)
 
       albedo_surf_dir_sw    = albedo_surf_dir_sw.view(-1)
       albedo_surf_diff_sw   = albedo_surf_diff_sw.view(-1)
@@ -1266,12 +1264,12 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       #   # v_mat = torch.transpose(v_mat,1,2) # (nb, nlev, nreg*nreg)
       #   # v_mat = torch.transpose(v_mat,0,1) # (nlev, nb, nreg*nreg)
       #   v_mat = torch.repeat_interleave(v_mat.unsqueeze(2), self.ng_sw, dim=2)
-      #   ones  = torch.zeros(1, batch_size, self.ng_sw,self.mp_ncol*self.mp_ncol, device=device)
-      #   oness  = torch.zeros(11, batch_size, self.ng_sw,self.mp_ncol*self.mp_ncol, device=device)
+      #   ones  = torch.zeros(1, batch_size, self.ng_sw,self.nreg*self.nreg, device=device)
+      #   oness  = torch.zeros(11, batch_size, self.ng_sw,self.nreg*self.nreg, device=device)
       #   ones[:,:,:,0] = 1.0; oness[:,:,:,0] = 1.0
-      #   ones = ones.view(1, batch_size, self.ng_sw*self.mp_ncol*self.mp_ncol)
-      #   oness = oness.view(11, batch_size, self.ng_sw*self.mp_ncol*self.mp_ncol)
-      #   v_mat = torch.cat((oness, v_mat.view(self.nlev_crm-1, batch_size, self.ng_sw*self.mp_ncol*self.mp_ncol), ones), dim=0)
+      #   ones = ones.view(1, batch_size, self.ng_sw*self.nreg*self.nreg)
+      #   oness = oness.view(11, batch_size, self.ng_sw*self.nreg*self.nreg)
+      #   v_mat = torch.cat((oness, v_mat.view(self.nlev_crm-1, batch_size, self.ng_sw*self.nreg*self.nreg), ones), dim=0)
       #   del ones, oness
       #   # print("shape v mat", v_mat.shape)
       #   v_mat       = v_mat.view(nlev+1, -1)
@@ -1293,9 +1291,9 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       flux_sw_dn_direct = self.relu(flux_sw_dn_direct)
 
       if self.experimental_rad:
-        flux_sw_up          = torch.reshape(flux_sw_up, (nlev+1, batch_size, self.ng_sw, self.mp_ncol))
-        flux_sw_dn_diffuse  = torch.reshape(flux_sw_dn_diffuse, (nlev+1, batch_size, self.ng_sw, self.mp_ncol))
-        flux_sw_dn_direct   = torch.reshape(flux_sw_dn_direct, (nlev+1, batch_size, self.ng_sw, self.mp_ncol))
+        flux_sw_up          = torch.reshape(flux_sw_up, (nlev+1, batch_size, self.ng_sw, self.nreg))
+        flux_sw_dn_diffuse  = torch.reshape(flux_sw_dn_diffuse, (nlev+1, batch_size, self.ng_sw, self.nreg))
+        flux_sw_dn_direct   = torch.reshape(flux_sw_dn_direct, (nlev+1, batch_size, self.ng_sw, self.nreg))
         flux_sw_up          = torch.sum(flux_sw_up,dim=-1)
         flux_sw_dn_diffuse  = torch.sum(flux_sw_dn_diffuse,dim=-1)
         flux_sw_dn_direct   = torch.sum(flux_sw_dn_direct,dim=-1)
