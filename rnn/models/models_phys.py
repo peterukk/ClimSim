@@ -58,6 +58,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     reduce_sw_gas_optics: Final[bool]
     use_liq_frac_crm_mlp: Final[bool]
     pred_subgrid_temp: Final[bool]
+    use_clear_sky_region: Final[bool]
 
     def __init__(self, 
                 cfg: DictConfig, 
@@ -128,9 +129,13 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         if not self.use_physrad:
           self.allow_extra_heating = True
         self.pred_subgrid_temp = False 
-        print("ice_sedimentation: {}, allow_extra_heating {}, pred_subgrid_temp: {}".format(self.ice_sedimentation, 
-                        self.allow_extra_heating, self.pred_subgrid_temp))
-        
+        self.use_clear_sky_region = False
+        print("ice_sedimentation: {}, allow_extra_heating {}, pred_subgrid_temp: {}, use_clearskyregion: {}".format(self.ice_sedimentation, 
+                        self.allow_extra_heating, self.pred_subgrid_temp, self.use_clear_sky_region))
+        if self.use_clear_sky_region:
+          num_reg_cld  = self.mp_ncol -1 
+        else:
+          num_reg_cld = self.mp_ncol    
         # 
         # -------------------------------------------------------------------------------------------------
         # ---- Linear layers predicting variables needed in moist physics module from RNN hidden state ----
@@ -143,7 +148,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           self.mlp_eddy_diff  = nn.Linear(self.nh_rnn2, 1)
 
         # --- Microphysical process rates ---
-        self.mlp_evap_cond_vapor_crm  = nn.Linear(self.nh_rnn2, self.mp_ncol)
+        self.mlp_evap_cond_vapor_crm  = nn.Linear(self.nh_rnn2, num_reg_cld)
         self.mlp_evap_prec_crm        = nn.Linear(self.nh_rnn2, self.mp_ncol)
         self.mlp_mp_aa_crm            = nn.Linear(self.nh_rnn2, self.mp_ncol)
         if self.ice_sedimentation:
@@ -153,7 +158,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # nx_decoder = self.nh_mem0 
         nx_decoder = self.nh_rnn2
         self.mlp_qv_crm     = nn.Linear(nx_decoder, self.mp_ncol)
-        self.mlp_qn_crm     = nn.Linear(nx_decoder, self.mp_ncol)
+        self.mlp_qn_crm     = nn.Linear(nx_decoder, num_reg_cld)
+
         if self.pred_subgrid_temp:
           self.mlp_t_crm      = nn.Linear(nx_decoder, self.mp_ncol)
         if self.use_mp_constraint:
@@ -289,11 +295,9 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             if self.experimental_rad:
               self.conv_vmat = nn.Conv1d(self.mp_ncol, self.mp_ncol*self.mp_ncol, 2, stride=1)
 
-            if not (self.use_existing_gas_optics_sw and (not self.reduce_sw_gas_optics)): 
-              self.sw_solar_weights   = nn.Parameter(torch.randn(1, self.ng_sw))
-          else:
-            from norm_coefficients import rrtmgp_sw_solar_source
-            self.sw_solar_weights   = nn.Parameter(torch.randn(1, self.ng_sw))
+          if not (self.use_existing_gas_optics_sw and (not self.reduce_sw_gas_optics)): 
+            # self.sw_solar_weights   = nn.Parameter(torch.randn(1, self.ng_sw))
+            self.sw_solar_weights = nn.Parameter(torch.zeros(1, self.ng_sw)) 
 
           if not self.use_existing_gas_optics_sw:
             # self.mlp_sw_optprops    = nn.Linear(self.nx_sw_optprops, self.ny_sw_optprops*self.ng_sw)
@@ -391,10 +395,12 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # latent_state =  rnn_mem # rnn_mem_prev 
         qv_crm    = self.softplus(self.mlp_qv_crm(latent_state)) 
         qn_crm    = self.softplus(self.mlp_qn_crm(latent_state))
-        if self.pred_subgrid_temp:
-          # T_crm  = self.softplus(self.mlp_t_crm(latent_state))
-          deltaT    = self.mlp_t_crm(latent_state)
-
+        if self.use_clear_sky_region:
+          zeroes_lev = torch.zeros(batch_size, self.nlev_crm, 1, device=inputs_denorm.device)
+          qn_crm = torch.cat((zeroes_lev, qn_crm),dim=-1)
+        # if self.pred_subgrid_temp:
+        #   T_crm  = self.softplus(self.mlp_t_crm(latent_state))
+          
         #   1.2 Scale with GCM values 
         area_frac = self.softmax(self.mlp_subgrid_area_frac(rnn2out))
 
@@ -442,7 +448,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         flux1     = self.mlp_massflux(rnn2out)
         eddy_diff = self.mlp_eddy_diff(rnn2out)
 
-        zeroes_crm = torch.zeros(batch_size, 1, self.mp_ncol, device=inputs_denorm.device)
+        zeroes_crm_singlelevel = torch.zeros(batch_size, 1, self.mp_ncol, device=inputs_denorm.device)
         preslay_diff0 = play[:,self.ilev_crm:] - play[:,self.ilev_crm-1:-1]
         flux_net_H = eddy_diff*(self.cp/self.g)*T_crm*preslay_diff0 #  cp/g · T · Δp 
         flux_net_H[:,-1] = -self.relu(flux_net_H[:,-1]) # net downward flux at sfc must be upwards or zero
@@ -469,15 +475,15 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           sed = sed*self.g*qice_crm*torch.reshape(self.yscale_lev[self.ilev_crm:,2],(1,-1,1))
           # sedimentation = torch.mean( sed[:,-1], 1)
           sedimentation = torch.sum( area_frac[:,-1]*sed[:,-1], 1)
-          sed = torch.cat((zeroes_crm,sed),dim=1)
+          sed = torch.cat((zeroes_crm_singlelevel,sed),dim=1)
           sed_qn_dp = scaling_factor*( (sed[:,1:] - sed[:,0:-1]) / pres_diff) 
           # del qice_crm
         else:
           sedimentation = 0
 
 
-        flux_net_qv = torch.cat((zeroes_crm,flux_net_qv[:,0:-1], zeroes_crm),dim=1)
-        flux_net_qn = torch.cat((zeroes_crm,flux_net_qn[:,0:-1], zeroes_crm),dim=1)
+        flux_net_qv = torch.cat((zeroes_crm_singlelevel,flux_net_qv[:,0:-1], zeroes_crm_singlelevel),dim=1)
+        flux_net_qn = torch.cat((zeroes_crm_singlelevel,flux_net_qn[:,0:-1], zeroes_crm_singlelevel),dim=1)
 
         flux_qv_dp = scaling_factor*( (flux_net_qv[:,1:] - flux_net_qv[:,0:-1]) / pres_diff) 
         flux_qn_dp = scaling_factor*( (flux_net_qn[:,1:] - flux_net_qn[:,0:-1]) / pres_diff) 
@@ -488,6 +494,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         dqv_evap_prec       = self.mlp_evap_prec_crm(rnn2out)
         dqv_evap_prec       = self.relu(dqv_evap_prec) + 1.0e-6 # force positive
         dq_cond_evap_vapor  = self.mlp_evap_cond_vapor_crm(rnn2out)
+        if self.use_clear_sky_region:
+          dq_cond_evap_vapor = torch.cat((zeroes_lev, dq_cond_evap_vapor),dim=-1)
         if False: # ------- experimental ---------------
           rh = inputs_denorm[:,self.ilev_crm:,1:2]
           dq_cond_evap_vapor = dq_cond_evap_vapor*rh
@@ -557,7 +565,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           dq_cond_evap_vapor_s = torch.sum(area_frac*dq_cond_evap_vapor, 2, keepdim=True)
           dqv_evap_prec_s      = torch.sum(area_frac*dqv_evap_prec, 2, keepdim=True)
           net_condensation_crm = (1/self.cp)*((liq_frac*self.Lv + ice_frac*self.Ls)*dq_cond_evap_vapor_s - self.Lv*dqv_evap_prec_s)
-
+        # undo humidity-scaling (terms like dq_cond_evap have this) and apply temperature-scaling to get heating
         net_condensation_crm = (net_condensation_crm/self.yscale_lev[self.ilev_crm:,1:2]) * self.yscale_lev[self.ilev_crm:,0:1]
 
         dT_crm = dT_crm + net_condensation_crm 
@@ -672,7 +680,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       if self.use_e3sm_cloud_optics:
 
         #  ------------------- McICA style randomization of which cloud state each g-point sees -------------------
-
         if self.use_mcica:
           # Three different options for McICA-inspired stochastic cloud sampling:
           #   1) Just shuffle the sub-grid cloud states along the hidden dimension (ncol_mp for cloud variables, ng for rad variables),
@@ -684,10 +691,22 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           #   2) True McICA? Sample from sub-grid states according to their probability p (area_frac) until we have ng samples (g-points)
           #  For a given sample, a low-p cloud state may not selected at all, but because we do random draws we will occasionally
           #  sample also low-p states and the estimate will be unbiased (but noisy) 
-          p_flat = area_frac.view(-1, self.mp_ncol)
+
+          if self.use_clear_sky_region:
+            p_flat = area_frac[:,:,1:]
+            p_flat = p_flat * 1/torch.sum(p_flat,dim=-1,keepdim=True) # renorm so that it sums to 1
+            qn_crm = qn_crm[:,:,1:]
+            if self.pred_subgrid_temp and not self.use_liq_frac_crm_mlp:
+              T_crm = T_crm[:,:,1:]
+            nreg = self.mp_ncol - 1 
+          else:
+            nreg = self.mp_ncol
+            p_flat = area_frac 
+
+          p_flat = p_flat.view(-1, nreg)
           if self.pred_subgrid_temp and not self.use_liq_frac_crm_mlp:
-            T_crm_flat = T_crm.view(-1, self.mp_ncol)
-          qn_crm_flat = qn_crm.view(-1, self.mp_ncol)
+            T_crm_flat = T_crm.view(-1, nreg)
+          qn_crm_flat = qn_crm.view(-1, nreg)
 
           # indices = torch.multinomial(p_flat, num_samples=self.ng_sw, replacement=True)
           # T_crm = torch.gather(T_crm_flat, dim=-1, index=indices).reshape(batch_size, self.nlev_crm, self.ng_sw)
@@ -759,17 +778,10 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         if self.use_existing_gas_optics_lw:  
           zero_gases = torch.zeros(batch_size, self.nlev, 11, device=device)
           x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, ch4, n2o, zero_gases), dim=2)
-        #   print("x_gas 1 ch4 min max", torch.min(x_gas[:,:,5]).item(), torch.max(x_gas[:,:,5]).item())
-        #   print("x_gas 1 h2o min max", torch.min(x_gas[:,:,2]).item(), torch.max(x_gas[:,:,2]).item())
           x_gas = (x_gas - self.gas_optics_model_lw.xmin) / (self.gas_optics_model_lw.xmax - self.gas_optics_model_lw.xmin)
-        #   print("x_gas T  min max", torch.min(x_gas[:,:,0]).item(), torch.max(x_gas[:,:,0]).item())
-        #   print("x_gas P min max", torch.min(x_gas[:,:,1]).item(), torch.max(x_gas[:,:,1]).item())
-        #   print("x_gas h2o min max", torch.min(x_gas[:,:,2]).item(), torch.max(x_gas[:,:,2]).item())
-        #   print("x_gas o3 min max", torch.min(x_gas[:,:,3]).item(), torch.max(x_gas[:,:,3]).item())
-        #   print("x_gas co2 min max", torch.min(x_gas[:,:,4]).item(), torch.max(x_gas[:,:,4]).item())
-        #   print("x_gas ch4 min max", torch.min(x_gas[:,:,5]).item(), torch.max(x_gas[:,:,5]).item())
-        #   print("x_gas n20 min max", torch.min(x_gas[:,:,6]).item(), torch.max(x_gas[:,:,6]).item())
-        #   print("x_gas  min max", torch.min(x_gas).item(), torch.max(x_gas).item())
+          # gasopt_vars = ["T","p","h2o","o3","co2","ch4","n20"]
+          # for i in range(len(gasopt_vars)):
+          #   print("x_gas {} min {} max {}".format(gasopt_vars[i],torch.min(x_gas[:,:,i]).item(), torch.max(x_gas[:,:,i]).item()))
           x_gas = self.relu(x_gas)
           x_gas = torch.transpose(x_gas,0,1).contiguous()
           tau_lw, pfrac = self.gas_optics_model_lw(x_gas, col_dry)
@@ -780,9 +792,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           if self.reduce_lw_gas_optics:
             pfrac   = self.softmax(self.gas_optics_lw_reduce2(pfrac)) # (nlev, nb, g)
             tau_lw  = self.gas_optics_lw_reduce1(tau_lw)
-            tau_lw  = self.softplus(tau_lw)
-            # tau_lw = 0.1*tau_lw
-            tau_lw = 0.01*tau_lw
+            tau_lw  = 0.01*self.softplus(tau_lw)
           
           if printdebug:
             print("tau_lw1 min max mean", tau_lw.min().item(), tau_lw.max().item(), tau_lw.mean().item())
@@ -817,8 +827,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         if self.use_existing_gas_optics_sw:
             # inputs: ['tlay' 'play' 'h2o' 'o3' 'co2' 'n2o' 'ch4']
           if self.include_qv_variability:
-            vmr_h2o_crm = (torch.sqrt(torch.sqrt(vmr_h2o_crm)))
             vmr_h2o     = torch.transpose(vmr_h2o,0,1).contiguous()
+            vmr_h2o_crm = (torch.sqrt(torch.sqrt(vmr_h2o_crm)))
             area_fracs  = torch.transpose(area_frac,0,1).contiguous()
 
             k = 2
@@ -853,7 +863,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             # print("shape xgas1", x_gas_1.shape, "xmin", self.gas_optics_model_sw1.xmin.shape)
             x_gas_1 = (x_gas_1- self.gas_optics_model_sw1.xmin) / (self.gas_optics_model_sw1.xmax - self.gas_optics_model_sw1.xmin)
             x_gas_2 = (x_gas_2- self.gas_optics_model_sw1.xmin) / (self.gas_optics_model_sw1.xmax - self.gas_optics_model_sw1.xmin)
-            # Use SW gas optics absorption NN : first pass
+            # Use SW gas optics absorption NN : two passes to sample water vapor sub-grid variability, then merge
             tau_sw1     = self.gas_optics_model_sw1(x_gas_1, col_dry_1) # Absorption optical depth
             tau_sw_scat1= self.gas_optics_model_sw2(x_gas_1, col_dry_1) # Scattering optical depth
             tau_sw2     = self.gas_optics_model_sw1(x_gas_2, col_dry_2)
@@ -861,7 +871,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             mask          = torch.rand_like(tau_sw1) < 0.5
             tau_sw        = torch.where(mask, tau_sw1, tau_sw2)
             tau_sw_scat   = torch.where(mask, tau_sw_scat1, tau_sw_scat2)
-
+            # tau_sw        = 0.5*(tau_sw1+tau_sw2)
+            # tau_sw_scat   = 0.5*(tau_sw_scat1+tau_sw_scat2)
           else:
 
             x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, n2o, ch4), dim=2)
@@ -1186,7 +1197,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         toa_spectral = self.sw_solar_weights 
       else:
         # Here we apply torch.square to ensure the weights are positive, then softmax so that they sum to 1
-        toa_spectral = self.softmax_dim1(torch.square(self.sw_solar_weights))
+        # toa_spectral = self.softmax_dim1(torch.square(self.sw_solar_weights))
+        toa_spectral = self.softmax_dim1(self.sw_solar_weights)
 
       incoming_toa = incoming_toa*toa_spectral
       # print("inctoa shape", incoming_toa.shape, "spectral SUM mean", incoming_toa.sum(dim=-1).mean(), "SUM max",  incoming_toa.sum(dim=-1).max())

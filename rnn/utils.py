@@ -181,6 +181,75 @@ def relative_to_specific_humidity(rh, temp, pressure):
     
     return specific_humidity
     
+
+def specific_to_relative_humidity_excess(sh, temp, pressure):#, return_excess=False):
+    """
+    Convert specific humidity to relative humidity using PyTorch tensors.
+    
+    Args:
+        sh (torch.Tensor): Specific humidity (kg water vapor / kg total air)
+        temp (torch.Tensor): Temperature in Kelvin
+        pressure (torch.Tensor): Pressure in Pa (Pascals)
+        return_excess (bool): If True, return excess humidity instead of clamped RH
+    
+    Returns:
+        torch.Tensor: 
+            If return_excess=False: Relative humidity as a fraction (0-1), clamped
+            If return_excess=True: Excess specific humidity (kg/kg) when supersaturated,
+                                   0 when RH <= 1.0
+    
+    Notes:
+        - Uses Clausius-Clapeyron relation for saturation vapor pressure
+        - Latent heat of vaporization varies linearly with temperature
+        - All calculations performed in Kelvin
+        - Excess humidity represents water that would condense out
+    """
+    
+    # Constants
+    # Reference temperature and saturation vapor pressure
+    T0 = 273.16  # K (triple point of water)
+    es0 = 611.2  # Pa (saturation vapor pressure at T0)
+    
+    # Gas constant for water vapor
+    Rv = 461.5  # J/(kg·K)
+    
+    # Latent heat of vaporization with temperature dependence
+    # Lv = Lv0 + a * (T - T0)
+    Lv0 = 2.501e6  # J/kg (latent heat at 0°C/273.15K)
+    a = -2370.0  # J/(kg·K) (temperature coefficient)
+    
+    Lv = Lv0 + a * (temp - T0)
+    
+    # Calculate saturation vapor pressure using Clausius-Clapeyron
+    # es = es0 * exp((Lv/Rv) * (1/T0 - 1/T))
+    e_sat = es0 * torch.exp((Lv / Rv) * (1.0 / T0 - 1.0 / temp))
+    
+    # Gas constant ratio (water vapor / dry air)
+    epsilon = 0.622  # kg/kg
+    
+    # Calculate actual vapor pressure from specific humidity
+    # From: q = (epsilon * e) / (p - e * (1 - epsilon))
+    # Solving for e: e = (q * p) / (epsilon + q * (1 - epsilon))
+    e_actual = (sh * pressure) / (epsilon + sh * (1 - epsilon))
+    
+    # Calculate relative humidity (unclamped)
+    rh = e_actual / e_sat
+    
+    # if return_excess:
+    # Calculate saturation specific humidity
+    # q_sat = (epsilon * e_sat) / (p - e_sat * (1 - epsilon))
+    sh_sat = (epsilon * e_sat) / (pressure - e_sat * (1 - epsilon))
+    
+    # Excess is the amount above saturation (0 if not supersaturated)
+    excess = torch.where(sh > sh_sat, sh - sh_sat, torch.zeros_like(sh))
+
+    rh = torch.clamp(rh, 0.0, 1.0)
+    return rh, excess
+    # else:
+    #     # Return clamped relative humidity
+    #     rh = torch.clamp(rh, 0.0, 1.0)
+    #     return rh
+
 class train_or_eval_one_epoch:
     def __init__(self, dataloader, 
                  model, 
