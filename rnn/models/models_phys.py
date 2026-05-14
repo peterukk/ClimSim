@@ -609,7 +609,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             # print("mean max dT", out_new[:,self.ilev_crm:,0:1].mean().item(), out_new[:,self.ilev_crm:,0:1].max().item())
             # print("mean max cond", net_condensation.mean().item(), net_condensation.max().item())
 
-            # out_new[:,self.ilev_crm:,0:1]  = out_new[:,self.ilev_crm:,0:1]  + net_condensation
+            out_new[:,self.ilev_crm:,0:1]  = out_new[:,self.ilev_crm:,0:1]  + net_condensation
 
         # --------------- 5. Precipitation -------------------
         water_new = torch.sum((self.one_over_g*pres_diff.squeeze()*d_precip_sourcesink),1)  

@@ -467,10 +467,10 @@ def get_rh_loss(hyam, hybm,device):
         # print("min max rh new-pred REF", torch.min(rh_new_pred2).item(),  torch.max(rh_new_pred2).item(), torch.mean(rh_new_pred2).item())
 
         # diff = torch.nanmean(torch.abs(rh_new - rh_new_pred))
-        diff = torch.mean(torch.square(rh_new_pred- rh_new))
+        diff = torch.nanmean(torch.square(rh_new_pred- rh_new))
 
         # rh_excess =  F.relu(rh_new_pred - 1.0)
-        # diff = diff + 5*torch.mean(torch.square(rh_excess))
+        # diff = diff + 5*torch.nanmean(torch.square(rh_excess))
 
         return diff 
     return metric
