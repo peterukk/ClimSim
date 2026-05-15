@@ -109,6 +109,8 @@ concat: false
 separate_radiation: false
 use_physrad: false
 use_mcica: false
+use_e3sm_cloud_optics: true
+map_e3sm_cloud_optics: false
 existing_gasopt_file_lw: None
 existing_gasopt_file_sw: None 
 ng_lw: 16 

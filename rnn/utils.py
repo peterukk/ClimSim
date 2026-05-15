@@ -345,7 +345,9 @@ class train_or_eval_one_epoch:
             yto_lay = []; yto_sfc = []
             x_true_prev = []; y_true_prev = []; y_pred_prev = []
             inds_rnd = 0; prev_outputs = 0 
-            rnn_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev_mem, self.model.nh_mem, device=device)
+            # rnn_mem = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev_mem, self.model.nh_mem, device=device)
+            rnn_mem = torch.zeros(self.model.nlev_mem, self.batch_size*self.cfg.ensemble_size, self.model.nh_mem, device=device)
+
             if self.cfg.do_semi_online_training:
               x_pred = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev, 6, device=device)
               
@@ -1076,13 +1078,16 @@ class train_or_eval_one_epoch:
                         if self.model.return_neg_precip:
                             running_precip_neg  = running_precip_neg / fac
                             if self.model.store_precip: 
-                                prec = rnn_mem[:,-1,-1].detach()
+                                # prec = rnn_mem[:,-1,-1].detach()
+                                prec = rnn_mem[-1,:,-1].detach()
                                 print("Negative precip. mse {:.2f} | Stored precip. mean {:.2f}  max {:.2f}".format(running_precip_neg,torch.mean(prec).item(), torch.max(prec).item()))
                             else:
                                 print("Negative precipitation mse {:.2f}".format(running_precip_neg))
-                        if self.model.store_precip and not self.model.return_neg_precip:
-                            prec = rnn_mem[:,-1,-1].detach()
-                            print("Stored precipitation mean {:.2f}  max {:.2f} min {:.2f}".format(torch.mean(prec).item(), torch.max(prec).item(), torch.min(prec).item()))
+                        else:
+                            if self.model.store_precip:
+                                # prec = rnn_mem[:,-1,-1].detach()
+                                prec = rnn_mem[-1,:,-1].detach()
+                                print("Stored precipitation mean {:.2f}  max {:.2f} min {:.2f}".format(torch.mean(prec).item(), torch.max(prec).item(), torch.min(prec).item()))
                         # print("Weight w1 value:", self.model.w1)
                     print("--------------------------------------------------------------------------")
                     running_loss = 0.0; running_energy = 0.0; running_water=0.0; running_cldpath=0.0; running_precip=0.0; running_precip_neg=0.0
@@ -1193,12 +1198,6 @@ class train_or_eval_one_epoch:
         self.metrics['mae_cli'] = np.nanmean(epoch_mae_lev_cli / k)
         
         self.metric_R2.reset() 
-        #self.metric_R2_heating.reset(); self.metric_R2_precc.reset()
-        # if self.autoregressive:
-        #     # self.model.reset_states()
-        #     # model.rnn_mem = torch.randn_like(model.rnn_mem)
-        #     # model.rnn_mem = torch.randn(self.batch_size, nlev, model.nh_mem, device=device)
-        #     model.rnn_mem = torch.zeros(self.batch_size, nlev, model.nh_mem, device=device)
 
         datatype = "TRAIN" if self.train else "VAL"
         print('Epoch {} {} loss: {:.2e}  MSE: {:.2e}  h-con:  {:.2e}   R2: {:.2f}  R2-dT/dt: {:.2f}   R2-dq/dt: {:.2f}   R2-precc: {:.3f}'.format(epoch+1, datatype, 

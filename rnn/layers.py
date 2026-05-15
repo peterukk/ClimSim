@@ -35,46 +35,85 @@ class PositiveLinear(nn.Module):
     #     return nn.functional.linear(input, self.weight.exp())
     def forward(self, input):
         return nn.functional.linear(input, self.weight.clamp(min=0.))
+
+ 
+# class LayerPressure(nn.Module):
+#     def __init__(self,hyam, hybm, name='LayerPressure',
+#                  norm=True,
+#                  ):
+#         super(LayerPressure, self).__init__()
+
+#         self.nlev = hyam.shape[0]
         
+#         hyam = torch.reshape(hyam,(1,self.nlev,1))
+#         hybm = torch.reshape(hybm,(1,self.nlev,1))
+#         self.register_buffer('hyam', hyam)
+#         self.register_buffer('hybm', hybm)
+#         self.norm = norm
+
+#     def forward(self, sp):
+#         # unnormalize
+#         # sp = (sp + 1.0)*(self.sp_max - self.sp_min)/2 + self.sp_min
+
+#         pres = self.hyam*100000.0 + sp*self.hybm
+#         if self.norm:
+#             pres = torch.sqrt(pres) / 314.0
+#         return pres
+    
+# class PressureThickness(nn.Module):
+#     def __init__(self,hyai, hybi, name='PressureThickness',
+#                   # sp_min=62532.977,sp_max=104871.82,
+#                   ):
+#         super(PressureThickness, self).__init__()
+#         self.nlev = hyai.shape[0] - 1
+#         hyai = torch.reshape(hyai,(1,self.nlev+1,1))
+#         hybi = torch.reshape(hybi,(1,self.nlev+1,1))
+#         self.register_buffer('hyai', hyai)
+#         self.register_buffer('hybi', hybi)
+
+#     def forward(self, sp):
+#         # sp  (batch, 1, 1)   
+#         # hyai,hybi  (1, nlev+1, 1)
+        
+#         dp = sp*(self.hybi[:,1:self.nlev+1]-self.hybi[:,0:self.nlev]) + 100000.0*(self.hyai[:,1:self.nlev+1]-self.hyai[:,0:self.nlev])
+
+#         return dp
+    
+# class LevelPressure(nn.Module):
+#     def __init__(self,hyai, hybi, name='LevelPressure',
+#                   # sp_min=62532.977,sp_max=104871.82,
+#                   ):
+#         super(LevelPressure, self).__init__()
+
+#         self.nlev = hyai.shape[0] 
+#         hyai = torch.reshape(hyai,(1,self.nlev,1))
+#         hybi = torch.reshape(hybi,(1,self.nlev,1))
+#         self.register_buffer('hyai', hyai)
+#         self.register_buffer('hybi', hybi)
+
+#     def forward(self, sp):
+#         # sp  (batch, 1, 1)   
+#         # hyai,hybi  (1, nlev+1, 1)
+#         plev = sp*(self.hybi) + 100000.0*self.hyai
+
+#         return plev
+
 class LayerPressure(nn.Module):
     def __init__(self,hyam, hybm, name='LayerPressure',
                  norm=True,
-                  # sp_min=62532.977,sp_max=104871.82,
                  ):
         super(LayerPressure, self).__init__()
-
-        # self.sp_min = sp_min
-        # self.sp_max = sp_max
-        # self.pres_min = 36.434
-        # self.pres_max = self.sp_max
         self.nlev = hyam.shape[0]
-        
-        # hyam = torch.from_numpy(hyam)
-        # hybm = torch.from_numpy(hybm)
-        # self.hyam = torch.reshape(hyam,(1,self.nlev,1))
-        # self.hybm = torch.reshape(hybm,(1,self.nlev,1))
-        hyam = torch.reshape(hyam,(1,self.nlev,1))
-        hybm = torch.reshape(hybm,(1,self.nlev,1))
+        hyam = torch.reshape(hyam,(self.nlev,1,1))
+        hybm = torch.reshape(hybm,(self.nlev,1,1))
         self.register_buffer('hyam', hyam)
         self.register_buffer('hybm', hybm)
-
         self.norm = norm
-        
-        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # self.hyam = torch.reshape(hyam,(1,self.nlev,1)).to(device, torch.float32)
-        # self.hybm = torch.reshape(hybm,(1,self.nlev,1)).to(device, torch.float32)
-        
     def forward(self, sp):
-        # unnormalize
-        # sp = (sp + 1.0)*(self.sp_max - self.sp_min)/2 + self.sp_min
-
         pres = self.hyam*100000.0 + sp*self.hybm
         if self.norm:
             pres = torch.sqrt(pres) / 314.0
-        # print(pres[0,:])
-        # pres = (pres-self.pres_min)/(self.pres_max-self.pres_min)*2 - 1.0
-
         return pres
     
 class PressureThickness(nn.Module):
@@ -82,24 +121,14 @@ class PressureThickness(nn.Module):
                   # sp_min=62532.977,sp_max=104871.82,
                   ):
         super(PressureThickness, self).__init__()
-        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # self.sp_min = sp_min
-        # self.sp_max = sp_max
-        # self.pres_min = 36.434
-        # self.pres_max = self.sp_max
         self.nlev = hyai.shape[0] - 1
-        hyai = torch.reshape(hyai,(1,self.nlev+1,1))
-        hybi = torch.reshape(hybi,(1,self.nlev+1,1))
+        hyai = torch.reshape(hyai,(self.nlev+1,1,1))
+        hybi = torch.reshape(hybi,(self.nlev+1,1,1))
         self.register_buffer('hyai', hyai)
         self.register_buffer('hybi', hybi)
 
     def forward(self, sp):
-        # sp  (batch, 1, 1)   
-        # hyai,hybi  (1, nlev+1, 1)
-        
-        dp = sp*(self.hybi[:,1:self.nlev+1]-self.hybi[:,0:self.nlev]) + 100000.0*(self.hyai[:,1:self.nlev+1]-self.hyai[:,0:self.nlev])
-
+        dp = sp*(self.hybi[1:self.nlev+1]-self.hybi[0:self.nlev]) + 100000.0*(self.hyai[1:self.nlev+1]-self.hyai[0:self.nlev])
         return dp
     
 class LevelPressure(nn.Module):
@@ -107,20 +136,16 @@ class LevelPressure(nn.Module):
                   # sp_min=62532.977,sp_max=104871.82,
                   ):
         super(LevelPressure, self).__init__()
-
         self.nlev = hyai.shape[0] 
-        hyai = torch.reshape(hyai,(1,self.nlev,1))
-        hybi = torch.reshape(hybi,(1,self.nlev,1))
+        hyai = torch.reshape(hyai,(self.nlev,1,1))
+        hybi = torch.reshape(hybi,(self.nlev,1,1))
         self.register_buffer('hyai', hyai)
         self.register_buffer('hybi', hybi)
 
     def forward(self, sp):
-        # sp  (batch, 1, 1)   
-        # hyai,hybi  (1, nlev+1, 1)
         plev = sp*(self.hybi) + 100000.0*self.hyai
-
         return plev
-
+    
 def interpolate_tlev_batchfirst(tlay, play, plev):
     ncol, nlay = tlay.shape
     device = tlay.device
@@ -171,15 +196,25 @@ class gasopt_mlp(nn.Module):
         self.nh = nn_w1.shape[1]
         xmin  = torch.from_numpy(xmin)
         xmax  = torch.from_numpy(xmax)
+        self.register_buffer('xmin', xmin)
+        self.register_buffer('xmax', xmax)
         ymean = torch.from_numpy(ymean[0:self.ng])
         ystd  = torch.from_numpy(ystd[0:self.ng])
         if self.change_last_layer:
-            ymean[:] = 0.0
-            ystd[:] = 1.0# 0.0005#1.0
-        self.register_buffer('xmin', xmin)
-        self.register_buffer('xmax', xmax)
-        self.register_buffer('ymean', ymean)
-        self.register_buffer('ystd', ystd)
+            # ymean[:] = 0.0
+            # ystd[:] = 1.0# 0.0005#1.0
+            if self.is_longwave:
+              self.ymean = nn.Parameter(torch.Tensor(self.ng))
+              self.ystd  = nn.Parameter(torch.Tensor(self.ng))
+              print("Changing last layer and using adaptable normalization coefficients!!")
+            else:
+              # ymean[:] = 0.0
+              # ystd[:] = 1.0# 0.0005#1.0  
+              self.register_buffer('ymean', ymean)
+              self.register_buffer('ystd', ystd)
+        else:
+            self.register_buffer('ymean', ymean)
+            self.register_buffer('ystd', ystd)
         self.softsign =  nn.Softsign()
         self.mlp1 = nn.Linear(self.nx, self.nh)
         self.mlp2 = nn.Linear(self.nh, self.nh)
@@ -228,8 +263,8 @@ class gasopt_mlp(nn.Module):
         # if col_dry is not None:
         # print("shape coldry", col_dry.shape, "tau", tau.shape, "ystd", self.ystd.shape)
         tau = col_dry * torch.pow(self.ystd*tau + self.ymean,8)
-        if self.change_last_layer:
-            tau = 1e-19*tau 
+        # if self.change_last_layer:
+        #     tau = 1e-19*tau 
     #    ! Postprocess absorption output: reverse standard scaling and square root scaling
     #    tau(igpt,ilay,icol) = (ystd(igpt) * outp_both(igpt,ilay,icol) + ymeans(igpt))**8
     #    ! Optical depth from cross-sections
