@@ -92,7 +92,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         self.softplus = nn.Softplus()
         self.softmax = nn.Softmax(dim=2)
         self.softmax_dim1 = nn.Softmax(dim=1)
-        self.softmax_dim0 = nn.Softmax(dim=1)
+        self.softmax_dim0 = nn.Softmax(dim=0)
         self.sigmoid = nn.Sigmoid()
         self.softsign =  nn.Softsign()
         print("Building RNN model that feeds its hidden memory at t0,z0 to its inputs at t1,z0")
@@ -131,8 +131,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         self.allow_extra_heating  = False
         if not self.use_physrad:
           self.allow_extra_heating = True
-        self.pred_subgrid_temp = False 
-        self.use_clear_sky_region = False
+        self.pred_subgrid_temp = False
+        self.use_clear_sky_region = True
         self.condense_supersaturated_water = False
         print("ice_sedimentation: {}, allow_extra_heating {}, pred_subgrid_temp: {}, use_clearskyreg: {}, condense_supersat: {}".format(self.ice_sedimentation, 
                         self.allow_extra_heating, self.pred_subgrid_temp, self.use_clear_sky_region, self.condense_supersaturated_water))
@@ -555,7 +555,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # to compute latent heat release. This is an approximation because it ignores sub-grid variability in liquid fraction,
         # but should not matter too much for the purposes of latent heat from phase changes as Ls and Lv are quite similar
         if self.pred_subgrid_temp:
-          temp = T_gcm.squeeze() + (torch.sum(area_frac*dT_crm, 2)/self.yscale_lev[self.ilev_crm:,0]) * 1200
+          temp = T_gcm.squeeze() + (torch.sum(area_frac*dT_crm, 2)/self.yscale_lev[self.ilev_crm:,0:1]) * 1200
           liq_frac    = torch.unsqueeze(self.temperature_scaling(temp),2); ice_frac = 1 - liq_frac
           net_condensation_crm = (1/self.cp)*((liq_frac*self.Lv + ice_frac*self.Ls)*dq_cond_evap_vapor - self.Lv*dqv_evap_prec)
         else:
