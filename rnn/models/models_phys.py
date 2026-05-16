@@ -358,10 +358,12 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         self.rnn2.flatten_parameters()
         if self.add_stochastic_layer:
             use_bias=False
+            # nx_srnn = self.nh_rnn2 + self.nx_rnn1
+            nx_srnn = self.nh_rnn2
             if self.use_lstm:
-              self.rnn2 = MyStochasticLSTMLayer4(self.nh_rnn2+self.nx_rnn1, self.nh_rnn2, use_bias=use_bias)  
+              self.rnn2 = MyStochasticLSTMLayer4(nx_srnn, self.nh_rnn2, use_bias=use_bias)  
             else:
-              self.rnn3 = MyStochasticGRULayer5(self.nh_rnn2+self.nx_rnn1, self.nh_rnn2, use_bias=use_bias)   
+              self.rnn3 = MyStochasticGRULayer5(nx_srnn, self.nh_rnn2, use_bias=use_bias)   
             # self.rnn3.flatten_parameters()
         if self.separate_radiation:
           if self.use_physrad:
@@ -1374,9 +1376,9 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           (last_h, last_c) = last_h
 
         if self.add_stochastic_layer:
-          # input_srnn = rnn2out
-          input_srnn = torch.flip(rnn2out, [0]) 
-          input_srnn = torch.cat((input_srnn, rnn1_input),dim=2)
+          input_srnn = rnn2out
+          # input_srnn = torch.flip(rnn2out, [0]) 
+          # input_srnn = torch.cat((input_srnn, rnn1_input),dim=2)
 
           hx = torch.randn((batch_size, self.nh_rnn2),device=inputs_main.device) 
           if self.use_lstm:
@@ -1386,7 +1388,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           else:
             srnn_out = self.rnn3(input_srnn, hx)
 
-          srnn_out = torch.flip(srnn_out, [0]) 
+          # srnn_out = torch.flip(srnn_out, [0]) 
 
           h_sfc_perturb = srnn_out[-1,:,:]
 

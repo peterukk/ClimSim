@@ -755,14 +755,34 @@ def main(cfg: DictConfig):
     if len(cfg.model_file_checkpoint)>0:
         print("loading existing model from {}".format(cfg.model_file_checkpoint))
         checkpoint = torch.load("saved_models/"+cfg.model_file_checkpoint,weights_only=True)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        if not cfg.only_load_model:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            start_epoch = checkpoint['epoch']
+              
+        if cfg.retrain_det_model:
+          model.load_state_dict(checkpoint['model_state_dict'],strict=False)
+          # all_layers = list(model.named_children())
+          all_layers = [name for name, _ in model.named_children()]
+          all_layers.remove("rnn3")
+          # all_layers.remove("mlp_output")
+          for name, param in model.named_parameters():
+              # Get the top-level parent layer name (e.g., 'layer1' from 'layer1.0.weight')
+              base_layer_name = name.split('.')[0]
+              
+              if base_layer_name in all_layers:
+                  param.requires_grad = False
+                  # print("froze ", base_layer_name)
+          # quit()
+          infostr = summary(model)
+
+
+        else:
+          model.load_state_dict(checkpoint['model_state_dict'])
+          if not cfg.only_load_model:
+              optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+              lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+              start_epoch = checkpoint['epoch']
         print("LOADED FROM MODEL CHECKPOINT SUCCESSFULLY")
         # model.update_qv_for_rad=True
         # print("update qv", model.update_qv_for_rad)
+          
 
         if cfg.save_loaded_model_and_quit:
           MODEL_STR=cfg.model_file_checkpoint.split(".pt")[0]
@@ -817,37 +837,6 @@ def main(cfg: DictConfig):
 
           import torch_tensorrt
           save_file_torch2_gpu = "saved_models/" + MODEL_STR + "_script_gpu2.ts"
-
-        #   trt_gm = torch_tensorrt.compile(model, ir="dynamo", arg_inputs=inp_list)
-
-        #   input_signature = (
-        #     torch_tensorrt.Input(shape=[384, 60, model.nx0], dtype=torch.float),
-        #     torch_tensorrt.Input(shape=[384, model.nx_sfc0], dtype=torch.float),
-        #     torch_tensorrt.Input(shape=[384,model.nlev_mem, model.nh_mem], dtype=torch.float)
-        #     )
-        #   compile_spec = {
-        #         "input_signature": input_signature,
-        #         "device": torch_tensorrt.Device("gpu:0"),
-        #         "enabled_precisions": {torch.float},
-        #         "min_block_size": 1,
-        #         "require_full_compilation": True,
-        #         "ir":"dynamo",
-        #     }    
-        #   trt_gm = torch_tensorrt.ts.compile(model, **compile_spec)
-        #   input_signature = [
-        #     torch_tensorrt.Input(shape=[384, 60, model.nx0], dtype=torch.float),
-        #     torch_tensorrt.Input(shape=[384, model.nx_sfc0], dtype=torch.float),
-        #     torch_tensorrt.Input(shape=[384,model.nlev_mem, model.nh_mem], dtype=torch.float)
-        #     ]
-
-        #   trt_gm = torch_tensorrt.compile(model, ir="ts", inputs=(inp_list,))
-        #   trt_gm = torch_tensorrt.dynamo.compile(model, inputs=(inp_list,))
-        #   trt_gm = torch_tensorrt.dynamo.trace(model, inputs=(inp_list,))
-        #   trt_gm = torch.compile(model, backend="torch_tensorrt", dynamic=False)
-        #   trt_gm = torch.jit.trace(trt_gm, example_inputs=(inp_list,))
-
-        #   torch_tensorrt.save(trt_gm, save_file_torch2_gpu, output_format="torchscript", inputs=(inp_list,))
-        #   print("saved model to: ", save_file_torch2_gpu)
 
           quit()
 

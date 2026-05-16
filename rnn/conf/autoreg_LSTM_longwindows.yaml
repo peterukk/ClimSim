@@ -27,6 +27,7 @@ val_epoch_start: 0
 
 model_file_checkpoint: ""
 only_load_model: false
+retrain_det_model: false
 
 autoregressive: true
 ar_noise_mode: 0
