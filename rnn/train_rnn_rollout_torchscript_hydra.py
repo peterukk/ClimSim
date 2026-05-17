@@ -961,7 +961,7 @@ def main(cfg: DictConfig):
             labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
             # if True:
             if cfg.save_model:
-              if val_loss < best_val_loss or epoch in [5,11,19,39,59]:
+              if val_loss < best_val_loss or epoch in [5,11,19,39,49,59,69]:
                 if val_loss < best_val_loss:
                   SAVE_PATH       = "saved_models/" + MODEL_STR + "_BEST.pt"
                 else:
