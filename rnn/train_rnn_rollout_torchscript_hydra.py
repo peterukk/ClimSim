@@ -762,6 +762,7 @@ def main(cfg: DictConfig):
           all_layers = [name for name, _ in model.named_children()]
           all_layers.remove("rnn3")
           # all_layers.remove("mlp_output")
+          print("Freezing weights of all layers except stochastic RNN")
           for name, param in model.named_parameters():
               # Get the top-level parent layer name (e.g., 'layer1' from 'layer1.0.weight')
               base_layer_name = name.split('.')[0]
