@@ -779,7 +779,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         if self.use_existing_gas_optics_lw:  
           zero_gases = torch.zeros(self.nlev, batch_size, 11, device=device)
           x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, ch4, n2o, zero_gases), dim=2)
-          x_gas = (x_gas - self.gas_optics_model_lw.xmin) / (self.gas_optics_model_lw.xmax - self.gas_optics_model_lw.xmin)
+          x_gas = (x_gas - self.gas_optics_model_lw.xmin) / self.gas_optics_model_lw.xdiv
           # gasopt_vars = ["T","p","h2o","o3","co2","ch4","n20"]
           # for i in range(len(gasopt_vars)):
           #   print("x_gas {} min {} max {}".format(gasopt_vars[i],torch.min(x_gas[:,:,i]).item(), torch.max(x_gas[:,:,i]).item()))
@@ -825,11 +825,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         if self.use_existing_gas_optics_sw:
             # inputs: ['tlay' 'play' 'h2o' 'o3' 'co2' 'n2o' 'ch4']
           if self.include_qv_variability:
+            qv_crm = torch.clamp(qv_crm, max=0.05)
             vmr_h2o_crm = (qv_crm / (1.0-qv_crm))*1.608079364 
-            fact = 1/ (1 + vmr_h2o_crm)
-            m_air = (0.04698 + vmr_h2o_crm)*fact #(m_dry + m_h2o * vmr_h2o) * fact 
-            col_dry_crm = 10.0 * delta_plev[self.ilev_crm:] * 6.02214076e23 * fact/(1000.0*m_air*100.0*9.80665) 
-            vmr_h2o_crm = (torch.sqrt(torch.sqrt(vmr_h2o_crm)))
 
             k = 2
             i0 = torch.arange (self.nlev_crm).unsqueeze (-1).unsqueeze (-1).expand(self.nlev_crm, batch_size, k)
@@ -841,26 +838,25 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             vmr_h2o_1 = torch.cat((vmr_h2o_top, vmr_h2o_1),dim=0).contiguous()
             vmr_h2o_2 = torch.cat((vmr_h2o_top, vmr_h2o_2),dim=0).contiguous()
 
-            # print("vmr h20 mmm", vmr_h2o.min().item(),vmr_h2o.max().item(),vmr_h2o.mean().item())
-            # print("vmr h20 1 mmm", vmr_h2o_1.min().item(),vmr_h2o_1.max().item(),vmr_h2o_1.mean().item())
-            # print("vmr h20 2 mmm", vmr_h2o_2.min().item(),vmr_h2o_2.max().item(),vmr_h2o_2.mean().item())
-            col_dry_crm_sorted = col_dry_crm[i0,i1,i2]
-            col_dry_1,col_dry_2 = col_dry_crm_sorted.chunk(k,2)
-            col_dry_top = col_dry[0:10]
-            col_dry_1 = torch.cat((col_dry_top, col_dry_1),dim=0).contiguous()
-            col_dry_2 = torch.cat((col_dry_top, col_dry_2),dim=0).contiguous()
-            # print("shape col dry", col_dry_2.shape, "vmr", vmr_h2o_1.shape)
+            fact = 1/ (1 + vmr_h2o_1)
+            col_dry_crm_1 = delta_plev * 60.2214076e23 * fact/(((0.04698 + vmr_h2o_1)*fact)*980665) 
+            vmr_h2o_1 = torch.sqrt(torch.sqrt(vmr_h2o_1))
+
+            fact = 1/ (1 + vmr_h2o_2)
+            col_dry_crm_2 = delta_plev * 60.2214076e23 * fact/(((0.04698 + vmr_h2o_2)*fact)*980665) 
+            vmr_h2o_2 = torch.sqrt(torch.sqrt(vmr_h2o_2))
 
             x_gas_1 = torch.cat((T_new, pres1, vmr_h2o_1, o3, co2, n2o, ch4), dim=2)
-            x_gas_2 = torch.cat((x_gas_1[:,:,0:2], vmr_h2o_2, x_gas_1[:,:,3:]), dim=2) # torch.cat((T_neww, pres11, vmr_h2o_2, o3, co2, n2o, ch4), dim=2)
-            # print("shape xgas1", x_gas_1.shape, "xmin", self.gas_optics_model_sw1.xmin.shape)
-            x_gas_1 = (x_gas_1- self.gas_optics_model_sw1.xmin) / (self.gas_optics_model_sw1.xmax - self.gas_optics_model_sw1.xmin)
-            x_gas_2 = (x_gas_2- self.gas_optics_model_sw1.xmin) / (self.gas_optics_model_sw1.xmax - self.gas_optics_model_sw1.xmin)
+            x_gas_2 = torch.cat((x_gas_1[:,:,0:2], vmr_h2o_2, x_gas_1[:,:,3:]), dim=2)
+
+            x_gas_1 = (x_gas_1- self.gas_optics_model_sw1.xmin) / self.gas_optics_model_sw1.xdiv
+            x_gas_2 = (x_gas_2- self.gas_optics_model_sw1.xmin) / self.gas_optics_model_sw1.xdiv
             # Use SW gas optics absorption NN : two passes to sample water vapor sub-grid variability, then merge
-            tau_sw1     = self.gas_optics_model_sw1(x_gas_1, col_dry_1) # Absorption optical depth
-            tau_sw_scat1= self.gas_optics_model_sw2(x_gas_1, col_dry_1) # Scattering optical depth
-            tau_sw2     = self.gas_optics_model_sw1(x_gas_2, col_dry_2)
-            tau_sw_scat2= self.gas_optics_model_sw2(x_gas_2, col_dry_2)
+            tau_sw1     = self.gas_optics_model_sw1(x_gas_1, col_dry_crm_1) # Absorption optical depth
+            tau_sw_scat1= self.gas_optics_model_sw2(x_gas_1, col_dry_crm_1) # Scattering optical depth
+            tau_sw2     = self.gas_optics_model_sw1(x_gas_2, col_dry_crm_2)
+            tau_sw_scat2= self.gas_optics_model_sw2(x_gas_2, col_dry_crm_2)
+
             mask          = torch.rand_like(tau_sw1) < 0.5
             tau_sw        = torch.where(mask, tau_sw1, tau_sw2)
             tau_sw_scat   = torch.where(mask, tau_sw_scat1, tau_sw_scat2)

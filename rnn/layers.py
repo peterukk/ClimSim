@@ -196,8 +196,10 @@ class gasopt_mlp(nn.Module):
         self.nh = nn_w1.shape[1]
         xmin  = torch.from_numpy(xmin)
         xmax  = torch.from_numpy(xmax)
+        xdiv = xmax - xmin
         self.register_buffer('xmin', xmin)
         self.register_buffer('xmax', xmax)
+        self.register_buffer('xdiv', xdiv)
         ymean = torch.from_numpy(ymean[0:self.ng])
         ystd  = torch.from_numpy(ystd[0:self.ng])
         if self.change_last_layer:
