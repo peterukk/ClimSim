@@ -769,16 +769,14 @@ def main(cfg: DictConfig):
               if base_layer_name in all_layers:
                   param.requires_grad = False
                   # print("froze ", base_layer_name)
-          # quit()
           infostr = summary(model)
-
 
         else:
           model.load_state_dict(checkpoint['model_state_dict'])
-          if not cfg.only_load_model:
-              optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-              lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-              start_epoch = checkpoint['epoch']
+        if not cfg.only_load_model:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            start_epoch = checkpoint['epoch']
         print("LOADED FROM MODEL CHECKPOINT SUCCESSFULLY")
         # model.update_qv_for_rad=True
         # print("update qv", model.update_qv_for_rad)
