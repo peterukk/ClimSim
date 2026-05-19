@@ -865,7 +865,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           else:
 
             x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, n2o, ch4), dim=2)
-            x_gas = (x_gas - self.gas_optics_model_sw1.xmin) / (self.gas_optics_model_sw1.xmax - self.gas_optics_model_sw1.xmin)
+            x_gas = (x_gas - self.gas_optics_model_sw1.xmin) / self.gas_optics_model_sw1.div
           
             tau_sw     = self.gas_optics_model_sw1(x_gas, col_dry)
             tau_sw_scat= self.gas_optics_model_sw2(x_gas, col_dry)
