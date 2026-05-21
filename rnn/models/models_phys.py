@@ -21,6 +21,8 @@ from typing import Final
 import time
 from omegaconf import DictConfig, OmegaConf
 
+printdebug = False 
+
 class physical_RNN_autoreg(Base_RNN_autoreg):
     """
     Physics-informed version of the BiRNN
@@ -276,7 +278,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                 self.gas_optics_lw_reduce2 = nn.Linear(self.gas_optics_model_lw.ng, self.ng_lw)
               # and we still need MLPs for cloud optical properties (only abs. optical depth)
               if not self.use_e3sm_cloud_optics:
-                self.cloud_optics_lw = nn.Linear(3, self.ng_lw)
+                self.cloud_optics_lw = nn.Linear(3 + self.nh_mem, self.ng_lw)
 
             if self.use_existing_gas_optics_sw:
               if self.gas_optics_model_sw1.ng !=  self.ng_sw:
@@ -295,7 +297,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
               # and we still need MLPs for cloud optical properties (optical depth, ssa, g)
               if not self.use_e3sm_cloud_optics:
                 # self.cloud_optics_sw = nn.Linear(2*self.nreg+self.nh_mem +2, 3*self.ng_sw)
-                self.cloud_optics_sw = nn.Linear(2 + self.nreg, 2*self.ng_sw)
+                self.cloud_optics_sw = nn.Linear(3 + self.nh_mem, 2*self.ng_sw)
                 self.cloud_optics_sw2 = nn.Linear(2*self.ng_sw, 3*self.ng_sw)
 
             print("Reduce LW: {} SW: {}".format(self.reduce_lw_gas_optics, self.reduce_sw_gas_optics))
@@ -375,14 +377,15 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         else:
           self.mlp_output = nn.Linear(self.nh_rnn2, self.ny)
 
-
-    def microphysics_decode(self, inputs_denorm, delta_plev, play, plev, P_old, out, rnn_mem, rnn2out, last_h):
+    @torch.compile(dynamic=False)
+    def microphysics_decode(self, inputs_denorm, delta_plev, play, P_old, out, rnn_mem, rnn2out, last_h):
         nlev, batch_size, nx  = inputs_denorm.shape 
         device                = inputs_denorm.device
         
-        out_new         = torch.zeros(self.nlev, batch_size, self.ny, device=device)
-        scaling_factor  = -self.g # tendency equation in pressure coordinates has -g in front
-        pres_diff       = delta_plev[self.ilev_crm:]
+        out_new               = torch.zeros(self.nlev, batch_size, self.ny, device=device)
+        scaling_factor        = -self.g # tendency equation in pressure coordinates has -g in front
+        pres_diff             = delta_plev[self.ilev_crm:]
+        one_over_pres_diff    = 1/pres_diff
 
         #  mp_mode ==-1  ['ptend_t', 'dqv', 'dqn', 'liq_frac', 'ptend_u', 'ptend_v']
         #  mp_mode ==0  ['ptend_t', 'dqv', 'dqliq', "dqice", 'ptend_u', 'ptend_v']
@@ -392,8 +395,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         if self.allow_extra_heating:
           out_new[self.ilev_crm+2:,:,0] = out[2:,:,0]
 
-        # --------------- 1. Get current sub-grid value -------------------
-        #   1.1 Predict with local MLPs
         qv_gcm      = inputs_denorm[self.ilev_crm:,:,-1:]
         T_gcm       = inputs_denorm[self.ilev_crm:,:,0:1]
         qliq_gcm    = inputs_denorm[self.ilev_crm:,:,2:3] 
@@ -401,6 +402,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         qn_gcm      = qliq_gcm + qice_gcm
         # tlev        = interpolate_tlev_batchfirst(inputs_denorm[:,:,0], play.squeeze(), plev.squeeze()) # (nb, nlev+1)
 
+        # --------------- 1. Expand current state-variables into "sub-grid" values, preserving mean -------------------
+        #   1.1 Predict with local MLPs
         latent_state = rnn2out 
         # latent_state =  rnn_mem # rnn_mem_prev 
         qv_crm    = self.softplus(self.mlp_qv_crm(latent_state)) 
@@ -458,7 +461,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         else:
           zer = torch.zeros(1, batch_size, 1, device=inputs_denorm.device)
         flux_net_H = torch.cat((zer,flux_net_H),dim=0)
-        flux_t_dp = (scaling_factor/self.cp)*( (flux_net_H[1:] - flux_net_H[0:-1]) / pres_diff) 
+        flux_t_dp = (scaling_factor/self.cp)*( (flux_net_H[1:] - flux_net_H[0:-1]) * one_over_pres_diff) 
         del flux_net_H, eddy_diff
 
         flux_mult_coeff = 3.0e5 # just some scaling to help learning
@@ -477,7 +480,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # sedimentation = torch.mean( sed[:,-1], 1)
           sedimentation = torch.sum( area_frac[-1]*sed[-1], -1)
           sed = torch.cat((zeroes_single_level,sed),dim=0)
-          sed_qn_dp = scaling_factor*( (sed[1:] - sed[0:-1]) / pres_diff) 
+          sed_qn_dp = scaling_factor*( (sed[1:] - sed[0:-1]) * one_over_pres_diff) 
           # del qice_crm
         else:
           sedimentation = 0
@@ -485,8 +488,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         flux_net_qv = torch.cat((zeroes_single_level,flux_net_qv[0:-1], zeroes_single_level),dim=0)
         flux_net_qn = torch.cat((zeroes_single_level,flux_net_qn[0:-1], zeroes_single_level),dim=0)
 
-        flux_qv_dp = scaling_factor*( (flux_net_qv[1:] - flux_net_qv[0:-1]) / pres_diff) 
-        flux_qn_dp = scaling_factor*( (flux_net_qn[1:] - flux_net_qn[0:-1]) / pres_diff) 
+        flux_qv_dp = scaling_factor*( (flux_net_qv[1:] - flux_net_qv[0:-1]) * one_over_pres_diff) 
+        flux_qn_dp = scaling_factor*( (flux_net_qn[1:] - flux_net_qn[0:-1]) * one_over_pres_diff) 
         del flux1, flux_net_qv, flux_net_qn
 
         # --------------- 3. Compute MP rates -------------------
@@ -496,9 +499,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         dq_cond_evap_vapor  = self.mlp_evap_cond_vapor_crm(rnn2out)
         if self.use_clear_sky_region:
           dq_cond_evap_vapor = torch.cat((zeroes_lev, dq_cond_evap_vapor),dim=-1)
-        if False: # ------- experimental ---------------
-          rh = inputs_denorm[self.ilev_crm:,:,1:2]
-          dq_cond_evap_vapor = dq_cond_evap_vapor*rh
 
         if self.store_precip: # Relate evaporated precipitation to stored precipitation here?
           # P_old_vertical = rnn_mem[:,self.ilev_crm:,0] 
@@ -666,96 +666,40 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
         return out_new, precc, precsc, rnn_mem, T_crm, qv_crm, qn_crm, area_frac, prec_negative
     
-    def radiative_transfer(self, inputs_main, inputs_aux0, inputs_denorm, play, plev, delta_plev, rnn_mem, 
+    @torch.compile(dynamic=False)
+    def rad_optical_props(self, inputs_main, inputs_aux0, inputs_denorm, play, plev, delta_plev, rnn_mem, 
                 T_crm, qv_crm, qn_crm, T_new, qv_new, qn_new, area_frac, rnn2out):
-      
+      """
+      Prediction of atmospheric (gas + cloud) optical properties for SW and LW using correlated-k or similar methods
+      Fully parallelizable (no vertical loops)
+      This module is a bit complicated mainly because we are lacking pre-trained spectrally reduced gas and cloud optics
+      NNs. We can use pre-existing RRTMGP-NN models (Ukkonen & Hogan 2022) but these have high spectral resolution (112-118)
+      so we probably want to combine this with training a new MLP to shrink the dimension (reduce_LW_gas_optics)
+      Furthermore there various options for:
+        - using or not using the cloud optics scheme from E3SM 
+        - representing water vapor sub-grid variability in gas optics (include_qv_variability)
+        - representing cloud sub-grid variability : 
+            - use_mcica=True : McICA, used in most GCMs
+            - use_mcica=False: a deterministic approach assuming ng=nreg which seems to work here but is not very interpretable
+            - experimental_rad=True : TripleClouds-like but we don't have the cloud overlap matrices so experimental at best
+      """
       nlev, batch_size, nx = inputs_main.shape 
       device = inputs_main.device
       inputs_aux =  (inputs_aux0*self.xdiv_sca) + self.xmean_sca
-
-      # T_before        = inputs_denorm[:,:,0:1] 
-
-      # ----------------- PHYSICAL RADIATIVE TRANSFER ----------------
       
-      # 0. INPUT SCALING - gases
-      # Water vapor specific humidity to volume mixing ratio
+      # Water vapor specific humidity to volume mixing ratio - needed by gas optics
       vmr_h2o = (qv_new / ( 1.0 - qv_new))  *  1.608079364 # 28.97 / 18.01528 # mol_weight_air / mol_weight_gas
-      # vmr_h2o = qv_new * 1.608079364 # (28.97 / 18.01528) # mol_weight_air / mol_weight_gas
-      # print("vmr_h2o  min max mean", torch.min(vmr_h2o).item(), torch.max(vmr_h2o).item(), torch.mean(vmr_h2o[:,:]).item())
       fact = 1/ (1 + vmr_h2o)
-      m_air = (0.04698 + vmr_h2o)*fact #(m_dry + m_h2o * vmr_h2o) * fact 
+      m_air = (0.04698 + vmr_h2o)*fact # (m_dry + m_h2o * vmr_h2o) * fact 
+      # Compute path number of dry air molecules in a column N (mol m−2) - used for scaling predicted optical properties
       #                             avogad
       col_dry = 10.0 * delta_plev * 6.02214076e23 * fact/(1000.0*m_air*100.0*9.80665) 
       col_dry = torch.reshape(col_dry,(nlev,batch_size,1))
+      log_play = torch.log(play)
 
-      if self.use_e3sm_cloud_optics:
-
-        #  ------------------- McICA style randomization of which cloud state each g-point sees -------------------
-        if self.use_mcica:
-          # Three different options for McICA-inspired stochastic cloud sampling:
-          #   1) Just shuffle the sub-grid cloud states along the hidden dimension (ncol_mp for cloud variables, ng for rad variables),
-          #      requires  ncol_mp = ng_sw = ng_lw and doesn't account for area fractions
-          # oops, code below uses same permutation for each sample, we don't want that!
-          # idx               = torch.randperm(self.nreg) 
-          # qn_crm            = qn_crm[:,:,idx]
-          # T_crm             = T_crm[:,:,idx]
-          #   2) True McICA? Sample from sub-grid states according to their probability p (area_frac) until we have ng samples (g-points)
-          #  For a given sample, a low-p cloud state may not selected at all, but because we do random draws we will occasionally
-          #  sample also low-p states and the estimate will be unbiased (but noisy) 
-
-          if self.use_clear_sky_region:
-            p_flat = area_frac[:,:,1:]
-            p_flat = p_flat * 1/torch.sum(p_flat,dim=-1,keepdim=True) # renorm so that it sums to 1
-            qn_crm = qn_crm[:,:,1:]
-            if self.pred_subgrid_temp and not self.use_liq_frac_crm_mlp:
-              T_crm = T_crm[:,:,1:]
-            nreg = self.nreg - 1 
-          else:
-            nreg = self.nreg
-            p_flat = area_frac 
-
-          p_flat = p_flat.view(-1, nreg)
-          if self.pred_subgrid_temp and not self.use_liq_frac_crm_mlp:
-            T_crm_flat = T_crm.view(-1, nreg)
-          qn_crm_flat = qn_crm.view(-1, nreg)
-
-          # indices = torch.multinomial(p_flat, num_samples=self.ng_sw, replacement=True)
-          # T_crm = torch.gather(T_crm_flat, dim=-1, index=indices).reshape(self.nlev_crm, batch_size, self.ng_sw)
-          # qn_crm = torch.gather(qn_crm_flat, dim=-1, index=indices).reshape(self.nlev_crm, batch_size, self.ng_sw)
-
-          # #  3) Rather than purely random assignment, deterministically partition g-points among states proportional to p, then shuffle.
-          # # Same cost as McICA, zero bias, lower variance
-          indices = stratified_sample(p_flat, self.ng_lw) #, shuffle=False)
-          if self.pred_subgrid_temp and not self.use_liq_frac_crm_mlp:
-            T_crm = torch.gather(T_crm_flat, dim=-1, index=indices).view(self.nlev_crm, batch_size, self.ng_lw)
-          qn_crm = torch.gather(qn_crm_flat, dim=-1, index=indices).view(self.nlev_crm, batch_size, self.ng_lw)
-          
-
-        # This would be how things are done in the underlying CRM: temperature on CRM grid is used to diagnose cloud into liquid and ice
-        if not self.use_liq_frac_crm_mlp:
-          liq_frac_crm          = self.temperature_scaling(T_crm.squeeze())
-        # However it may be difficult to optimize T_crm - instead, predict liq_frac_crm with a NN?
-        else:
-          liq_frac_crm = self.sigmoid(self.mlp_liq_frac_crm(rnn2out))
-          if self.use_mcica:
-            liq_frac_crm = torch.gather(liq_frac_crm.view(-1,self.nreg), dim=-1, index=indices).view(self.nlev_crm, batch_size, self.ng_lw)
-
-        cldpath_tot       = 1000*(delta_plev[self.ilev_crm:]/self.g)*qn_crm
-        cldpath_liq       = liq_frac_crm * cldpath_tot 
-        cldpath_ice       = (1-liq_frac_crm) * cldpath_tot
-      else:
-        # just use column dry air "path" to scale
-        cldpath       = 1000*(delta_plev[self.ilev_crm:]/self.g)*qn_crm
-        # print("cldpath min max mean", cldpath.min().item(), cldpath.max().item(), cldpath.mean().item())
-        
-      temp        = (T_new - 160 ) / (180)
-      pressure    = (torch.log(play) - 0.00515) / (11.59485)
-
-      printdebug=False
-
-      # 1. PREDICT OPTICAL PROPERTIES
       if self.use_existing_gas_optics_lw or self.use_existing_gas_optics_sw:
-        pres1 = torch.log(play)
+        # inputs needed for gas optical properties
+        pres1 = log_play
         vmr_h2o = (torch.sqrt(torch.sqrt(vmr_h2o)))
         o3 =  inputs_denorm[:,:,12:13] 
         o3 = torch.sqrt(torch.sqrt(o3))
@@ -763,6 +707,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         n2o =  inputs_denorm[:,:,14:15]
         co2 =  torch.full((self.nlev, batch_size, 1), 388.7e-6, device=device)
 
+        # inputs needed for cloud optical properties: ice and liquid cloud effective radius using the LUT interpolation routine from E3SM-MMF
         T_new1 = T_new[self.ilev_crm:].view(-1)
         ice_eff_rad = reitab(T_new1)
         ice_eff_rad = ice_eff_rad.view((self.nlev_crm, batch_size,1))
@@ -772,10 +717,77 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         liq_eff_rad = reltab(T_new1, landfrac.view(-1), icefrac.view(-1), snowh.view(-1))
         liq_eff_rad = liq_eff_rad.view((self.nlev_crm, batch_size,1))
 
+        if not self.use_e3sm_cloud_optics:
+          t_new_crm   = (T_crm - 160 ) / (180)
+          liq_eff_rad_normed  = liq_eff_rad / 13.5
+          ice_eff_rad_normed   = ice_eff_rad / 125.0
+          x_cld =  torch.cat((t_new_crm, ice_eff_rad_normed, liq_eff_rad_normed, rnn_mem), dim=2)
+          # the cloud optical depth is scaled with cloud path 
+          cldpath    = 1000*(delta_plev[self.ilev_crm:]/self.g)*qn_crm
+          # print("cldpath min max mean", cldpath.min().item(), cldpath.max().item(), cldpath.mean().item()
+
         # print("min max mean ice_eff_rad", ice_eff_rad.min().item(), ice_eff_rad.max().item(), ice_eff_rad.mean().item())
         # print("min max mean liq_eff_rad", liq_eff_rad.min().item(), liq_eff_rad.max().item(), liq_eff_rad.mean().item())
         # print("min max mean T_new1", T_new1.min().item(), T_new1.max().item(), T_new1.mean().item())
 
+        # -------- ACCOUNTING FOR CLOUD SUB-GRID VARIABILITY ---------
+        # 
+        if self.use_e3sm_cloud_optics: 
+          #  ------------------- McICA style randomization of which cloud state each g-point sees -------------------
+          if self.use_mcica:
+            # Three different options for McICA-inspired stochastic cloud sampling:
+            #   1) Just shuffle the sub-grid cloud states along the hidden dimension (ncol_mp for cloud variables, ng for rad variables),
+            #      requires  ncol_mp = ng_sw = ng_lw and doesn't account for area fractions
+            # oops, code below uses same permutation for each sample, we don't want that!
+            # idx               = torch.randperm(self.nreg) 
+            # qn_crm            = qn_crm[:,:,idx]
+            # T_crm             = T_crm[:,:,idx]
+            #   2) True McICA? Sample from sub-grid states according to their probability p (area_frac) until we have ng samples (g-points)
+            #  For a given sample, a low-p cloud state may not selected at all, but because we do random draws we will occasionally
+            #  sample also low-p states and the estimate will be unbiased (but noisy) 
+
+            if self.use_clear_sky_region: # the first index (area_frac[:,:,0]) is a clear-sky region without clouds
+              p_flat = area_frac[:,:,1:]
+              p_flat = p_flat * 1/torch.sum(p_flat,dim=-1,keepdim=True) # renorm so that it sums to 1
+              qn_crm = qn_crm[:,:,1:]
+              if self.pred_subgrid_temp and not self.use_liq_frac_crm_mlp:
+                T_crm = T_crm[:,:,1:]
+              nreg = self.nreg - 1 
+            else:
+              nreg = self.nreg
+              p_flat = area_frac 
+
+            p_flat = p_flat.view(-1, nreg)
+            if self.pred_subgrid_temp and not self.use_liq_frac_crm_mlp:
+              T_crm_flat = T_crm.view(-1, nreg)
+            qn_crm_flat = qn_crm.view(-1, nreg)
+
+            # indices = torch.multinomial(p_flat, num_samples=self.ng_sw, replacement=True)
+            # T_crm = torch.gather(T_crm_flat, dim=-1, index=indices).reshape(self.nlev_crm, batch_size, self.ng_sw)
+            # qn_crm = torch.gather(qn_crm_flat, dim=-1, index=indices).reshape(self.nlev_crm, batch_size, self.ng_sw)
+
+            # #  3) Rather than purely random assignment, deterministically partition g-points among states proportional to p, then shuffle.
+            # # Same cost as McICA, zero bias, lower variance
+            indices = stratified_sample(p_flat, self.ng_lw) #, shuffle=False)
+            if self.pred_subgrid_temp and not self.use_liq_frac_crm_mlp:
+              T_crm = torch.gather(T_crm_flat, dim=-1, index=indices).view(self.nlev_crm, batch_size, self.ng_lw)
+            qn_crm = torch.gather(qn_crm_flat, dim=-1, index=indices).view(self.nlev_crm, batch_size, self.ng_lw)
+            
+
+          # This would be how things are done in the underlying CRM: temperature on CRM grid is used to diagnose cloud into liquid and ice
+          if not self.use_liq_frac_crm_mlp:
+            liq_frac_crm          = self.temperature_scaling(T_crm.squeeze())
+          # However it may be difficult to optimize T_crm - instead, predict liq_frac_crm with a NN?
+          else:
+            liq_frac_crm = self.sigmoid(self.mlp_liq_frac_crm(rnn2out))
+            if self.use_mcica:
+              liq_frac_crm = torch.gather(liq_frac_crm.view(-1,self.nreg), dim=-1, index=indices).view(self.nlev_crm, batch_size, self.ng_lw)
+
+          cldpath_tot       = 1000*(delta_plev[self.ilev_crm:]/self.g)*qn_crm
+          cldpath_liq       = liq_frac_crm * cldpath_tot 
+          cldpath_ice       = (1-liq_frac_crm) * cldpath_tot
+
+        # ------ LONGWAVE OPTICAL PROPERTIES -------
         if self.use_existing_gas_optics_lw:  
           zero_gases = torch.zeros(self.nlev, batch_size, 11, device=device)
           x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, ch4, n2o, zero_gases), dim=2)
@@ -784,9 +796,12 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # for i in range(len(gasopt_vars)):
           #   print("x_gas {} min {} max {}".format(gasopt_vars[i],torch.min(x_gas[:,:,i]).item(), torch.max(x_gas[:,:,i]).item()))
           x_gas = self.relu(x_gas)
+          
+          t0 = time.time()
           tau_lw, pfrac = self.gas_optics_model_lw(x_gas, col_dry)
+          print("elapsed lwgas {}".format(time.time() - t0))
 
-          if self.reduce_lw_gas_optics:
+          if self.reduce_lw_gas_optics: # we used an existing gas optics scheme, but want to shrink the spectral dimension with an MLP
             pfrac   = self.softmax(self.gas_optics_lw_reduce2(pfrac)) # (nlev, nb, g)
             tau_lw  = self.gas_optics_lw_reduce1(tau_lw)
             tau_lw  = 0.01*self.softplus(tau_lw)
@@ -796,11 +811,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             print("pfrac min max mean", pfrac.min().item(), pfrac.max().item(), pfrac.mean().item())
 
           zeroes = torch.zeros(self.ilev_crm, batch_size, self.ng_lw, device=device)
-          # ---
+        
           if self.use_e3sm_cloud_optics:
-            # tau_lw_cld_liq      = cldpath_liq*self.relu(tau_lw_cld_liq.squeeze())
-            # tau_lw_cld_ice      = cldpath_ice*self.relu(tau_lw_cld_ice.squeeze())
-
             # slingo_liq_optics_lw: https://github.com/NVlabs/E3SM/blob/main/components/eam/src/physics/rrtmgp/slingo.F90#L147
             # Strange that there's no spectral dependence, cannot be very accurate!
             icefrac         = cldpath_ice / torch.clamp(cldpath_tot, min=1.0e-8)
@@ -810,10 +822,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             tau_lw_cld_ice  = cldpath_tot*icefrac*(0.005 + 1.0 / ice_eff_rad.clamp(13.0, 130.0))
             tau_lw_cld      = tau_lw_cld_liq + tau_lw_cld_ice        
           else:
-            t_new_crm   = (T_crm - 160 ) / (180)
-            liq_eff_rad_normed  = liq_eff_rad / 13.5
-            ice_eff_rad_normed   = ice_eff_rad / 125.0
-            x_cld =  torch.cat((t_new_crm, ice_eff_rad_normed, liq_eff_rad_normed), dim=2)
             tau_lw_cld = cldpath*self.relu(self.cloud_optics_lw(x_cld)) # 0.01*self.relu(tau_lw_cld)
 
           if not self.use_mcica and (self.nreg != self.ng_lw): 
@@ -822,9 +830,11 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           tau_lw_cld  = torch.cat((zeroes, tau_lw_cld),dim=0)
           tau_lw      = tau_lw + tau_lw_cld # shape is (nlev, ncol, ng)
 
+        # ------ SHORTWAVE OPTICAL PROPERTIES -------
         if self.use_existing_gas_optics_sw:
             # inputs: ['tlay' 'play' 'h2o' 'o3' 'co2' 'n2o' 'ch4']
           if self.include_qv_variability:
+            # Account for sub-grid variability of water vapor by taking the two most likely values and doing two passes with gas opt MLP
             qv_crm = torch.clamp(qv_crm, max=0.05)
             vmr_h2o_crm = (qv_crm / (1.0-qv_crm))*1.608079364 
 
@@ -847,21 +857,22 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             vmr_h2o_2 = torch.sqrt(torch.sqrt(vmr_h2o_2))
 
             x_gas_1 = torch.cat((T_new, pres1, vmr_h2o_1, o3, co2, n2o, ch4), dim=2)
-            x_gas_2 = torch.cat((x_gas_1[:,:,0:2], vmr_h2o_2, x_gas_1[:,:,3:]), dim=2)
-
             x_gas_1 = (x_gas_1- self.gas_optics_model_sw1.xmin) / self.gas_optics_model_sw1.xdiv
-            x_gas_2 = (x_gas_2- self.gas_optics_model_sw1.xmin) / self.gas_optics_model_sw1.xdiv
+
+            x_gas_2 = x_gas_1.clone()
+            x_gas_2[:, :, 2:3] = (vmr_h2o_2 - self.gas_optics_model_sw1.xmin[2:3]) / self.gas_optics_model_sw1.xdiv[2:3]
             # Use SW gas optics absorption NN : two passes to sample water vapor sub-grid variability, then merge
             tau_sw1     = self.gas_optics_model_sw1(x_gas_1, col_dry_crm_1) # Absorption optical depth
             tau_sw_scat1= self.gas_optics_model_sw2(x_gas_1, col_dry_crm_1) # Scattering optical depth
             tau_sw2     = self.gas_optics_model_sw1(x_gas_2, col_dry_crm_2)
             tau_sw_scat2= self.gas_optics_model_sw2(x_gas_2, col_dry_crm_2)
 
-            mask          = torch.rand_like(tau_sw1) < 0.5
-            tau_sw        = torch.where(mask, tau_sw1, tau_sw2)
-            tau_sw_scat   = torch.where(mask, tau_sw_scat1, tau_sw_scat2)
-            # tau_sw        = 0.5*(tau_sw1+tau_sw2)
-            # tau_sw_scat   = 0.5*(tau_sw_scat1+tau_sw_scat2)
+            # mask          = torch.rand_like(tau_sw1) < 0.5
+            # tau_sw        = torch.where(mask, tau_sw1, tau_sw2)
+            # tau_sw_scat   = torch.where(mask, tau_sw_scat1, tau_sw_scat2)
+            tau_sw        = 0.5*(tau_sw1+tau_sw2)
+            tau_sw_scat   = 0.5*(tau_sw_scat1+tau_sw_scat2)
+
           else:
 
             x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, n2o, ch4), dim=2)
@@ -888,7 +899,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                 zeroes = torch.zeros(10, batch_size, self.ng_sw, device=device)
             
           if self.use_e3sm_cloud_optics:
-            if self.map_e3sm_cloud_optics:
+            if self.map_e3sm_cloud_optics: # use an MLP to map E3SM cloud optics to the spectral discretization used here
               k_sw_cld_liq0, ssa_sw_cld_liq0, g_sw_cld_liq0 = slingo_liq_cloud_optics_sw(liq_eff_rad)
               ksca_sw_cld_liq0  = k_sw_cld_liq0*ssa_sw_cld_liq0
               kscag_sw_cld_liq0 = ksca_sw_cld_liq0*g_sw_cld_liq0
@@ -906,7 +917,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
               k_sw_cld_liq, ksca_sw_cld_liq, kscag_sw_cld_liq = slingo_liq_cloud_optics_sw(liq_eff_rad, self.ng_sw)
               ksca_sw_cld_liq  = k_sw_cld_liq*ksca_sw_cld_liq # ksca_sw_cld_liq is ssa before this line
               kscag_sw_cld_liq = ksca_sw_cld_liq*kscag_sw_cld_liq # kscag_sw_cld_liq is g before this line
-
               k_sw_cld_ice, ksca_sw_cld_ice, kscag_sw_cld_ice = ec_ice_optics_sw(ice_eff_rad, self.ng_sw)
               ksca_sw_cld_ice  = k_sw_cld_ice*ksca_sw_cld_ice
               kscag_sw_cld_ice = ksca_sw_cld_ice*kscag_sw_cld_ice
@@ -936,37 +946,51 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             # g_sw_cld = torch.where(tau_sw_scat_cld == 0, torch.zeros_like(tau_sw_scat_cld), g_tau_scat_sw_cld / tau_sw_scat_cld)
             # g_sw_cld            =  g_tau_scat_sw_cld / tau_sw_scat_cld
             g_sw_cld            = g_tau_scat_sw_cld / (tau_sw_scat_cld + cldeps)
-            # print("max min mean gswcld", g_sw_cld.max().item(), g_sw_cld.min().item(),  g_sw_cld.mean().item())
-            # print("min max mean tau_sw", tau_sw.min().item(), tau_sw.max().item(), tau_sw.mean().item())
-            # print("min max mean tau_sw_cld", tau_sw_cld.min().item(), tau_sw_cld.max().item(), tau_sw_cld.mean().item())
-            # print("max mean tau_sw_cld*ssa", tau_sw_scat_cld.max().item(), tau_sw_scat_cld.min().item(), tau_sw_scat_cld.mean().item())
-            # print("max mean tau_sw_cld*ssa*g", g_tau_scat_sw_cld.max().item(), g_tau_scat_sw_cld.min().item(),g_tau_scat_sw_cld.mean().item())
+            if printdebug:
+              print("max min mean gswcld", g_sw_cld.max().item(), g_sw_cld.min().item(),  g_sw_cld.mean().item())
+              print("min max mean tau_sw", tau_sw.min().item(), tau_sw.max().item(), tau_sw.mean().item())
+              print("min max mean tau_sw_cld", tau_sw_cld.min().item(), tau_sw_cld.max().item(), tau_sw_cld.mean().item())
+              print("max mean tau_sw_cld*ssa", tau_sw_scat_cld.max().item(), tau_sw_scat_cld.min().item(), tau_sw_scat_cld.mean().item())
+              print("max mean tau_sw_cld*ssa*g", g_tau_scat_sw_cld.max().item(), g_tau_scat_sw_cld.min().item(),g_tau_scat_sw_cld.mean().item())
 
-            tau_sw_scat_cld = torch.cat((zeroes, tau_sw_scat_cld),dim=0)
-            tau_sw_cld      = torch.cat((zeroes, tau_sw_cld),dim=0)
             del tau_sw_cld_ice, tau_sw_cld_liq, tau_sw_scat_cld_liq, tau_sw_scat_cld_ice, g_tau_scat_sw_cld_liq
             del g_tau_scat_sw_cld_ice, g_tau_scat_sw_cld, k_sw_cld_liq, ksca_sw_cld_liq, k_sw_cld_ice, ksca_sw_cld_ice
-            # tau_sw_cld = tau_sw_cld + tau_sw_scat_cld 
 
-          else: # if we're not using E3SM cloud optics, we predict cloud single-scattering albedo and asymmetry factor directly
+          else: 
             sw_optprops = self.cloud_optics_sw(x_cld)
             sw_optprops = self.cloud_optics_sw2(sw_optprops) 
+            # if we're not using E3SM cloud optics, we predict cloud single-scattering albedo and asymmetry factor directly
             tau_sw_cld, ssa_sw_cld, g_sw_cld = sw_optprops.chunk(3,2 )
-            # print("shape args", tau_sw_cld_liq.shape, tau_sw_cld_ice.shape, ssa_sw_cld.shape, g_sw_cld.shape)
-            ssa_sw_cld      = self.sigmoid(ssa_sw_cld.squeeze())
-            tau_sw_cld      = torch.cat((zeroes, tau_sw_cld),dim=0)
             tau_sw_cld      = cldpath*self.relu(tau_sw_cld.squeeze()) # / 1000
+            ssa_sw_cld      = self.sigmoid(ssa_sw_cld.squeeze())
             g_sw_cld        = self.sigmoid(g_sw_cld.squeeze())
-            ssa_sw_cld      = torch.cat((zeroes, ssa_sw_cld),dim=0)
             tau_sw_scat_cld = ssa_sw_cld * tau_sw_cld
 
+          # ------ COMBINE SHORTWAVE GAS AND CLOUD OPTICAL PROPERTIES -----
+          tau_sw_scat_cld = torch.cat((zeroes, tau_sw_scat_cld),dim=0)
+          tau_sw_cld      = torch.cat((zeroes, tau_sw_cld),dim=0)
           g_sw_cld        = torch.cat((zeroes, g_sw_cld.squeeze()),dim=0)
+          # Compute total optical depth as gas (total) optical depth + cloud (total) optical depth
+          tau_sw_tot      = tau_sw + tau_sw_cld
+          # Compute total scattering optical depth
+          tau_sw_scat_tot = tau_sw_scat + tau_sw_scat_cld # total scattering optical depth 
+          # Combine cloud and gas asymmetry factors, weighting by scattering optical depth 
+          #        gas g*tau_scat         cloud g*tau_scat        total tau_scat
+          # g_sw    = (g_sw*tau_sw_scat + g_sw_cld*tau_sw_scat_cld) / (tau_sw_scat_tot) 
+          # HOWEVER g_sw from gases is zero, so lose first term
+          g_sw = g_sw_cld*tau_sw_scat_cld / tau_sw_scat_tot                              
+          tau_sw  = tau_sw_tot 
+          ssa_sw  = tau_sw_scat_tot / tau_sw_tot
+          del tau_sw_scat, tau_sw_scat_tot, tau_sw_scat_cld      
 
-      if not (self.use_existing_gas_optics_sw and self.use_existing_gas_optics_lw): # if at least one is False 
-      
+      if not (self.use_existing_gas_optics_sw and self.use_existing_gas_optics_lw): 
+        # at least one is False, so SW and/or LW optical properties are predicted with a new MLP (that does gas+cld)
+        
+        # Humidity, T and p with simple scaling
         qv_new    = qv_new * 1.608079364 # (28.97 / 18.01528) # mol_weight_air / mol_weight_gas
         qv_new    = (torch.sqrt(torch.sqrt(qv_new))) / 0.497653
-
+        temp      = (T_new - 160 ) / (180)
+        pressure  = (log_play - 0.00515) / (11.59485)
         if not (self.use_existing_gas_optics_sw or self.use_existing_gas_optics_lw):
         # if neither are True ( both are False), effective radiuses have not been computed yet
           T_new1 = T_new[self.ilev_crm:].view(-1) 
@@ -976,30 +1000,51 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           snowh     =  torch.repeat_interleave(inputs_aux[:,15:16].unsqueeze(0),self.nlev_crm,dim=0)
           liq_eff_rad = reltab(T_new1, landfrac.view(-1), icefrac.view(-1), snowh.view(-1)).view((self.nlev_crm, batch_size, 1))
 
-        liq_eff_rad  = liq_eff_rad / 13.5
-        ice_eff_rad   = ice_eff_rad / 250.0
+        liq_eff_rad  = liq_eff_rad / 13.5  # simple scaling 
+        ice_eff_rad  = ice_eff_rad / 250.0 # simple scaling
         zer_1 = torch.zeros(10, batch_size, 1, device=device)
         ice_eff_rad = torch.cat((zer_1, ice_eff_rad),dim=0)
         liq_eff_rad = torch.cat((zer_1, liq_eff_rad),dim=0)  
 
-        mem  = torch.zeros(nlev, batch_size, self.nh_mem0, device=device)
+        # we use a latent convective memory as input here, but need to concatenate with zeros near the top where moist physics is inactive
+        mem                 = torch.zeros(nlev, batch_size, self.nh_mem0, device=device)
         mem[self.ilev_crm:] = rnn_mem[:,:,0:self.nh_mem0] #[:,:,0:1]
-        qn_new        = 1 - torch.exp(-qn_new * self.lbd_qn.reshape(-1,1,1))
+        qn_new              = 1 - torch.exp(-qn_new * self.lbd_qn.reshape(-1,1,1))
         # inputs_rad = torch.cat((pressure, temp, qv_new, qn_new, inputs_main[:,:,6:9], inputs_main[:,:,12:15], mem),dim=2)
         inputs_rad = torch.cat((pressure, temp, qv_new, qn_new, inputs_main[:,:,12:15], liq_eff_rad, ice_eff_rad, mem),dim=2)
 
-      if not self.use_existing_gas_optics_lw:
-        # --------------------------- LONGWAVE ---------------------------
-        lw_optprops = self.mlp_lw_optprops(inputs_rad) 
-        # (nlev, nb, ng*ny ) -->  (nlev, nb, ny, ng)
-        lw_optprops = torch.reshape(lw_optprops,(nlev, batch_size, self.ny_lw_optprops, self.ng_lw))
-        tau_lw, pfrac = lw_optprops.chunk(2, 2)
-        tau_lw      = torch.pow(tau_lw.squeeze(), 8) # (nlev,batch,ng)
-        tau_lw      = tau_lw*(1e-24*col_dry)
-        tau_lw      = torch.clamp(tau_lw, min=1e-6, max=400.0)
-        pfrac       = pfrac.squeeze() # 
-        pfrac       = self.softmax(pfrac)
-        del lw_optprops
+        # --- SHORTWAVE ---
+        if not self.use_existing_gas_optics_sw:
+          # sw_optprops = self.mlp_sw_optprops(inputs_rad)
+          sw_optprops = self.mlp_sw_optprops1(inputs_rad)
+          sw_optprops = self.softsign(sw_optprops)
+          sw_optprops = self.mlp_sw_optprops2(sw_optprops)
+
+          # (nlev, nb, ng*ny ) -->  (nlev, nb, ny, ng)
+          sw_optprops = torch.reshape(sw_optprops,(self.nlev, batch_size, self.ny_sw_optprops, self.ng_sw))
+          tau_sw, ssa_sw, g_sw = sw_optprops.chunk(3,2 )
+          g_sw        = self.sigmoid(g_sw.squeeze())
+          ssa_sw      = self.sigmoid(ssa_sw.squeeze())
+
+          # print("tau sha", tau_sw.shape, "coldry", col_dry.shape)
+          tau_sw      = torch.pow(tau_sw.squeeze(), 8)
+          tau_sw      = tau_sw*(1e-23*col_dry)
+          tau_sw      = torch.clamp(tau_sw, min=1e-6, max=40.0) 
+          del sw_optprops
+
+        # --- LONGWAVE ---
+        if not self.use_existing_gas_optics_lw:
+          # --------------------------- LONGWAVE ---------------------------
+          lw_optprops = self.mlp_lw_optprops(inputs_rad) 
+          # (nlev, nb, ng*ny ) -->  (nlev, nb, ny, ng)
+          lw_optprops = torch.reshape(lw_optprops,(nlev, batch_size, self.ny_lw_optprops, self.ng_lw))
+          tau_lw, pfrac = lw_optprops.chunk(2, 2) # LW optical depth and Planck fraction 
+          tau_lw      = torch.pow(tau_lw.squeeze(), 8) # (nlev,batch,ng)
+          tau_lw      = tau_lw*(1e-24*col_dry)
+          tau_lw      = torch.clamp(tau_lw, min=1e-6, max=400.0)
+          pfrac       = pfrac.squeeze() # 
+          pfrac       = self.softmax(pfrac)
+          del lw_optprops
         
       # print("pfrac1 min max mean", torch.min(pfrac[:,:]).item(), torch.max(pfrac[:,:]).item(), torch.mean(pfrac[:,:]).item())
       # print("tau_lw1 min max mean", torch.min(tau_lw[:,:]).item(), torch.max(tau_lw[:,:]).item(), torch.mean(tau_lw[:,:]).item())
@@ -1025,139 +1070,95 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         print("source_lev min max mean", source_lev.min().item(), source_lev.max().item(), source_lev.mean().item())
         print("source_lev 100", source_lev[:,100,0])
       del pfrac
-      
-      # ---- REFTRANS LW ----
-      planck_top = source_lev[0:-1,:,:].view(-1)
-      planck_bot = source_lev[1:,:,:].view(-1)
-      tau_lw = tau_lw.view(-1)
-      source_up, source_dn, trans_lw = reftrans_lw(planck_top,planck_bot, tau_lw)
-      del tau_lw, planck_top, planck_bot, source_lev
-      source_up = source_up.view(nlev, -1)
-      source_dn = source_up.view(nlev, -1)
-      trans_lw = trans_lw.view(nlev, -1)
 
-      if printdebug:
+      return tau_lw, source_lev, source_sfc, tau_sw, ssa_sw, g_sw
+    
+
+    def radiative_transfer(self, inputs_aux0, delta_plev, area_frac, tau_lw, source_lev, source_sfc, tau_sw, ssa_sw, g_sw):
+      """
+      Two-stream longwave and shortwave radiative transfer with correlated-k (or other spectral discretization)
+      Arrays are structured (level, batch, spectral)
+      """
+
+      nlev, batch_size, ng = tau_lw.shape 
+      device = tau_lw.device
+      inputs_aux =  (inputs_aux0*self.xdiv_sca) + self.xmean_sca # undo norm
+
+      # -------------------------- LONGWAVE -----------------------------
+      # 
+      # LW REFLECTANCE-TRANSMITTANCE COMPUTATIONS
+      planck_top = source_lev[0:-1,:,:]
+      planck_bot = source_lev[1:,:,:]
+      source_up, source_dn, trans_lw = reftrans_lw(planck_top.view(-1),planck_bot.view(-1), tau_lw.view(-1))
+      del tau_lw, planck_top, planck_bot, source_lev
+
+      emissivity_surf = torch.ones_like(source_sfc)
+      
+      if printdebug: 
         print("source_up min max mean", source_up.min().item(), source_up.max().item(), source_up.mean().item())
         print("source_dn min max mean", source_dn.min().item(), source_dn.max().item(), source_dn.mean().item())
         print("trans_lw min max mean", trans_lw.min().item(), trans_lw.max().item(), trans_lw.mean().item(), "shape", trans_lw.shape)
-        print("source_up min max", torch.min(source_up[:,:]).item(), torch.max(source_up[:,:]).item())
-
-      # Surface reflection and emission (vectorized)
-      # albedos_lw = inputs_aux[:,7:9]
-      # albedos_lw = self.mlp_sfc_albedo_lw(albedos_lw)
-      # albedos_lw = self.sigmoid(albedos_lw)
-      emissivity_surf = torch.ones_like(source_sfc)
-      emissivity_surf = emissivity_surf.view(-1)
-      source_sfc  = source_sfc.view(-1)
-      
-      if printdebug: 
+        print("source_up min max", torch.min(source_up[:,:]).item(), torch.max(source_up[:,:]).item())   
         print("emissivity_surf min max mean", emissivity_surf.min().item(), emissivity_surf.max().item(), emissivity_surf.mean().item())
-      flux_lw_dn, flux_lw_up = lw_solver_noscat_batchlast(trans_lw, source_dn, source_up, source_sfc, emissivity_surf)
-      if printdebug: print("flux lw gpt up  min max mean", flux_lw_up.min().item(), flux_lw_up.max().item(),flux_lw_up.mean().item())
+
+      # call LW solver to predict downward and upward spectral fluxes at each half-level. LW scattering is ignored here (as in most ESMs)
+      flux_lw_dn, flux_lw_up = lw_solver_noscat_batchlast(trans_lw.view(nlev, -1), source_dn.view(nlev, -1), source_up.view(nlev, -1), 
+                                                          source_sfc.view(-1), emissivity_surf.view(-1))
 
       flux_lw_up = flux_lw_up.view(nlev+1,batch_size, self.ng_lw)
       flux_lw_dn = flux_lw_dn.view(nlev+1,batch_size, self.ng_lw)
-      flux_lw_up = torch.sum(flux_lw_up,dim=2)
+      flux_lw_up = torch.sum(flux_lw_up,dim=2) # spectral reduction to get broadband flux
       flux_lw_dn = torch.sum(flux_lw_dn,dim=2)
       if printdebug:
+        print("flux lw gpt up  min max mean", flux_lw_up.min().item(), flux_lw_up.max().item(),flux_lw_up.mean().item())
         print("flux lw up ", flux_lw_up[:,100])
         print("flux lw up  min max mean", flux_lw_up.min().item(), flux_lw_up.max().item(),flux_lw_up.mean().item())
+      del trans_lw, source_dn, source_up, source_sfc, emissivity_surf
 
       # -------------------------- SHORTWAVE -----------------------------
-      if not self.use_existing_gas_optics_sw:
-        # sw_optprops = self.mlp_sw_optprops(inputs_rad)
-        sw_optprops = self.mlp_sw_optprops1(inputs_rad)
-        sw_optprops = self.softsign(sw_optprops)
-        sw_optprops = self.mlp_sw_optprops2(sw_optprops)
-
-        # (nlev, nb, ng*ny ) -->  (nlev, nb, ny, ng)
-        sw_optprops = torch.reshape(sw_optprops,(self.nlev, batch_size, self.ny_sw_optprops, self.ng_sw))
-        tau_sw, ssa_sw, g_sw = sw_optprops.chunk(3,2 )
-        g_sw        = self.sigmoid(g_sw.squeeze())
-        ssa_sw      = self.sigmoid(ssa_sw.squeeze())
-
-        # print("tau sha", tau_sw.shape, "coldry", col_dry.shape)
-        tau_sw      = torch.pow(tau_sw.squeeze(), 8)
-        tau_sw      = tau_sw*(1e-23*col_dry)
-        tau_sw      = torch.clamp(tau_sw, min=1e-6, max=40.0) 
-        del sw_optprops
-      else:
-
-        # Compute total optical depth as gas (total) optical depth + cloud (total) optical depth
-        tau_sw_tot      = tau_sw + tau_sw_cld
-        # Compute total scattering optical depth
-        tau_sw_scat_tot = tau_sw_scat + tau_sw_scat_cld # total scattering optical depth 
-        # Combine cloud and gas asymmetry factors, weighting by scattering optical depth 
-        #        gas g*tau_scat         cloud g*tau_scat        total tau_scat
-        # g_sw    = (g_sw*tau_sw_scat + g_sw_cld*tau_sw_scat_cld) / (tau_sw_scat_tot) 
-        # HOWEVER g_sw from gases is zero, so lose first term
-        g_sw = g_sw_cld*tau_sw_scat_cld / tau_sw_scat_tot                              
-        tau_sw  = tau_sw_tot 
-        ssa_sw  = tau_sw_scat_tot / tau_sw_tot
-        # print("min max g_sw_cld", g_sw_cld.min().item(), g_sw_cld.max().item())
-        # print("min max mean tau_sw_cld", tau_sw_cld.min().item(), tau_sw_cld.max().item(), tau_sw_cld.mean().item())
-        # print("min max mean tau_sw_scat", tau_sw_scat.min().item(), tau_sw_scat.max().item(), tau_sw_scat.mean().item())
-        # print("min max mean tau_sw_scat_tot", tau_sw_scat_tot.min().item(), tau_sw_scat_tot.max().item(), tau_sw_scat_tot.mean().item())    
-        # print("min max mean g sw", g_sw.min().item(), g_sw.max().item(), g_sw.max().item())
-        # print("min max mean ssa", ssa_sw.min().item(), ssa_sw.max().item(), ssa_sw.mean().item())
-        # print("min max mean tau", tau_sw.min().item(), tau_sw.max().item(), tau_sw.mean().item())
-        del tau_sw_scat, tau_sw_scat_tot, tau_sw_scat_cld
-      
-      # ---- REFTRANS SW ------
+      # 
       mu0 = torch.reshape(inputs_aux[:,6:7],(-1,1,1))
       min_mu = 1e-6 #1e-3
       mu0 = torch.clamp(mu0, min=min_mu) 
 
-      # (ncol) -> (nlev, ncol) -> (nlev,ng*ncol)
-      mu0_rep = torch.repeat_interleave(torch.repeat_interleave(mu0.reshape((1,-1,1)), self.nlev, dim=0),self.ng_sw,dim=2)
+      # expand mu0 (cosine of solar zenith angle) from (ncol) -> (nlev,ncol,ng_sw)
+      mu0_rep = mu0.reshape((1,-1,1)).expand(self.nlev, -1, self.ng_sw)
       if self.experimental_rad:
-         mu0_rep = torch.repeat_interleave(mu0_rep.unsqueeze(3), self.nreg, dim=3)
-
+        mu0_rep = mu0_rep.unsqueeze(3).expand(-1, -1, -1, self.nreg)
       # print("mu0 min max", torch.min(mu0).item(), torch.max(mu0).item())
-      # print("tau_sw min max", torch.min(tau_sw).item(), torch.max(tau_sw).item())
-      # print("ssa_sw min max", torch.min(ssa_sw).item(), torch.max(ssa_sw).item())
-      # print("g_sw min max", torch.min(g_sw).item(), torch.max(g_sw).item())
 
-      # t0 = time.time()
-      # batched_reftra = torch.func.vmap(self.calc_reflectance_transmittance_sw)
-      ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir = calc_ref_trans_sw(mu0_rep.view(-1), tau_sw.view(-1), ssa_sw.view(-1), g_sw.view(-1))
+      # SW REFLECTANCE-TRANSMITTANCE COMPUTATIONS
+      ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir = calc_ref_trans_sw(mu0_rep, tau_sw, ssa_sw, g_sw)
+
       ref_diff            = ref_diff.view(nlev, -1)
       trans_diff          = trans_diff.view(nlev, -1)
       ref_dir             = ref_dir.view(nlev, -1)
       trans_dir_diff      = trans_dir_diff.view(nlev, -1)
       trans_dir_dir       = trans_dir_dir.view(nlev, -1)
-      # print("elapsed reftra {}".format(time.time() - t0))
       del tau_sw, ssa_sw, g_sw, mu0_rep
 
       incoming_toa    = inputs_aux[:,1:2]
 
-      if printdebug:
-        print("incoming toa", incoming_toa[500:560])
+      if printdebug: print("incoming toa", incoming_toa[500:560])
 
       if (self.use_existing_gas_optics_sw and (not self.reduce_sw_gas_optics)):
         toa_spectral = self.sw_solar_weights 
       else:
-        # Here we apply torch.square to ensure the weights are positive, then softmax so that they sum to 1
-        # toa_spectral = self.softmax_dim1(torch.square(self.sw_solar_weights))
+        # Here we apply softmax to ensure the solar weights sum to 1 (and are positive)
         toa_spectral = self.softmax_dim1(self.sw_solar_weights)
 
       incoming_toa = incoming_toa*toa_spectral
-      # print("inctoa shape", incoming_toa.shape, "spectral SUM mean", incoming_toa.sum(dim=-1).mean(), "SUM max",  incoming_toa.sum(dim=-1).max())
       if self.experimental_rad:
-        #  print("inc toa shape", incoming_toa.shape, "area frac shape", area_frac.shape)
          incoming_toa = torch.repeat_interleave(incoming_toa.unsqueeze(2),self.nreg,dim=2)
          area_frac_toa = torch.repeat_interleave(area_frac[0].unsqueeze(1),self.ng_sw,dim=1)
          incoming_toa = incoming_toa*area_frac_toa
       incoming_toa = incoming_toa.view(-1)
 
-      aldif = inputs_aux[:,7].view(1,-1)
-      aldir = inputs_aux[:,8].view(1,-1)
-      asdif = inputs_aux[:,9].view(1,-1)
-      asdir  = inputs_aux[:,10].view(1,-1)
-
-      # Extract spectral points associated with near-IR and visible radiation
-      # If we are using RRTMGP(-NN), then this should exactly match how things are done in subroutine set_albedo in E3SM/components/eam/src/physics/rrtmgp/radiation.F90
-      # If we are learning a new gas optics module on the fly, or a decoder to shrink the spectral (=hidden) dimension after RRTMGP-NN, then the lines below assume that it's a good
+      # ------- COMPUTE SURFACE SPECTRAL ALBEDO TO DIRECT AND DIFFUSE RADIATION --
+      # 
+      # The input surface albedos are given only in 4 bands and don't match our k-distribution. Need to do a simple mapping
+      # If we are using RRTMGP(-NN), then this should match exactly the subroutine set_albedo in E3SM/components/eam/src/physics/rrtmgp/radiation.F90
+      # If we are learning a new gas optics module on the fly, or a decoder to shrink the spectral dimension after RRTMGP-NN, then the lines below assume that it's a good
       # idea to follow RRTMGP in how much of the spectral space is allocated to near-IR versus visible
       # 1,10 | 11,18 | 19,29 | 30,37 | 38,46 | 47,56 | 57,67 | 68,71 | 72,80 | 81,89 | 90, 96 | 97, 102 | 103, 109 | 110, 112 
       # 820, 2680 | 2680, 3250 | 3250, 4000 | 4000, 4650 | 4650, 5150  | 5150, 6150 | 6150, 7700 | 7700, 8050  | 12850, 16000 | 
@@ -1172,26 +1173,20 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       ng_mix = iend_mix - iend_ir
       ng_vis = self.ng_sw - iend_mix
 
-      aldir1 = torch.repeat_interleave(aldir,ng_ir,dim=0)
-      aldir2 = torch.repeat_interleave(aldir,ng_mix,dim=0)
-      asdir1 = torch.repeat_interleave(asdir,ng_vis,dim=0)
-      asdir2 = torch.repeat_interleave(asdir,ng_mix,dim=0)
-
-      aldif1 = torch.repeat_interleave(aldif,ng_ir,dim=0)
-      aldif2 = torch.repeat_interleave(aldif,ng_mix,dim=0)
-      asdif1 = torch.repeat_interleave(asdif,ng_vis,dim=0)
-      asdif2 = torch.repeat_interleave(asdif,ng_mix,dim=0)
-
-      albedo_surf_dir_sw[0:iend_ir]           =  aldir1
-      albedo_surf_dir_sw[iend_ir:iend_mix]    =  0.5*(aldir2 + asdir2)
-      albedo_surf_dir_sw[iend_mix:]           =  asdir1
-      albedo_surf_diff_sw[0:iend_ir]          =  aldif1
-      albedo_surf_diff_sw[iend_ir:iend_mix]   =  0.5*(aldif2 + asdif2)
-      albedo_surf_diff_sw[iend_mix:]          =  asdif1
+      aldif = inputs_aux[:,7].view(1,-1)
+      aldir = inputs_aux[:,8].view(1,-1)
+      asdif = inputs_aux[:,9].view(1,-1)
+      asdir  = inputs_aux[:,10].view(1,-1)
+    
+      albedo_surf_dir_sw[0:iend_ir]           =  aldir.expand(ng_ir,-1)
+      albedo_surf_dir_sw[iend_ir:iend_mix]    =  0.5*(aldir.expand(ng_mix,-1) + asdir.expand(ng_mix,-1) )
+      albedo_surf_dir_sw[iend_mix:]           =  asdir.expand(ng_vis,-1)
+      albedo_surf_diff_sw[0:iend_ir]          =  aldif.expand(ng_ir,-1)
+      albedo_surf_diff_sw[iend_ir:iend_mix]   =  0.5*(aldif.expand(ng_mix,-1) + asdif.expand(ng_mix,-1) )
+      albedo_surf_diff_sw[iend_mix:]          =  asdif.expand(ng_vis,-1)
 
       albedo_surf_dir_sw    = torch.transpose(albedo_surf_dir_sw,0,1).contiguous()
       albedo_surf_diff_sw   = torch.transpose(albedo_surf_diff_sw,0,1).contiguous()
-      # print("shape emis", albedo_surf_diff_sw.shape, "ref_diff", ref_diff.shape)
 
       if self.experimental_rad:
          albedo_surf_dir_sw   = torch.repeat_interleave(albedo_surf_dir_sw.unsqueeze(2), self.nreg, dim=2)
@@ -1200,6 +1195,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       albedo_surf_dir_sw    = albedo_surf_dir_sw.view(-1)
       albedo_surf_diff_sw   = albedo_surf_diff_sw.view(-1)
 
+      # --------- SW RADIATIVE TRANSFER USING ADDING METHOD -----------
+      # t0 = time.time()
       # if self.experimental_rad:
       #   # xx = torch.transpose(rnn2out,1,2)
       #   xx = torch.transpose(qn_crm,1,2) # qn_crm(nb,nlev,nreg) --> (nb,nreg*nreg,nlev)
@@ -1229,16 +1226,13 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                   ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir)
           
       del ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir
-
-      flux_sw_up = self.relu(flux_sw_up)
-      flux_sw_dn_diffuse = self.relu(flux_sw_dn_diffuse)
-      flux_sw_dn_direct = self.relu(flux_sw_dn_direct)
+      # print("elapsed adding_ica_sw {}".format(time.time() - t0))
 
       if self.experimental_rad:
         flux_sw_up          = torch.reshape(flux_sw_up, (nlev+1, batch_size, self.ng_sw, self.nreg))
         flux_sw_dn_diffuse  = torch.reshape(flux_sw_dn_diffuse, (nlev+1, batch_size, self.ng_sw, self.nreg))
         flux_sw_dn_direct   = torch.reshape(flux_sw_dn_direct, (nlev+1, batch_size, self.ng_sw, self.nreg))
-        flux_sw_up          = torch.sum(flux_sw_up,dim=-1)
+        flux_sw_up          = torch.sum(flux_sw_up,dim=-1) # sum over sub-grid regions
         flux_sw_dn_diffuse  = torch.sum(flux_sw_dn_diffuse,dim=-1)
         flux_sw_dn_direct   = torch.sum(flux_sw_dn_direct,dim=-1)
       else:
@@ -1262,7 +1256,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       flux_sw_dn_sfc      = flux_sw_dn[-1,:].unsqueeze(1)             # NETSW  
 
       flux_sw_net = flux_sw_dn - flux_sw_up
-      # mu_rep = torch.repeat_interleave(inputs_aux[:,6:7].reshape(1,-1),nlev+1,dim=0)
+      # We did SW computations in all columns, so now we need to zero out nighttime columns
       inds_zero = inputs_aux[:,6] < min_mu
       flux_sw_net[:,inds_zero] = 0.0
       flux_sw_dn_sfc[inds_zero] = 0.0
@@ -1305,6 +1299,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         nlev        = inputs_main.shape[1]
         device      = inputs_main.device
 
+        # t0 = time.time()
         inputs_main = torch.transpose(inputs_main,0,1).contiguous()
         inputs_denorm = torch.transpose(inputs_denorm,0,1).contiguous()
 
@@ -1431,7 +1426,11 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
         out = self.mlp_output(rnn_mem)
 
-        # PHYSICAL MOIST PHYSICS MODULE
+        # print("elapsed RNNs {}".format(time.time() - t0))
+
+        # ------ MOIST PHYSICS MODULE ------
+        #
+        # t0 = time.time()
         # if torch.is_autocast_enabled() and self.training:
         #   # print("autocast ON!!")
         #   with torch.autocast(device_type=rnn2out.device.type, enabled=False):
@@ -1439,12 +1438,14 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         #     last_h = last_h.float()
         #     # rnn_mem = rnn_mem.float()
         #     out_new, precc, precsc, rnn_mem, T_crm, qv_crm, qn_crm, area_frac, prec_negative = self.microphysics_decode(inputs_denorm, 
-        #                                         delta_plev, play, plev, P_old, out, rnn_mem, rnn2out, last_h)
+        #                                         delta_plev, play, P_old, out, rnn_mem, rnn2out, last_h)
         # else:
         out_new, precc, precsc, rnn_mem, T_crm, qv_crm, qn_crm, area_frac, prec_negative = self.microphysics_decode(inputs_denorm, 
-                                              delta_plev, play, plev, P_old, out, rnn_mem, rnn2out, last_h)
+                                              delta_plev, play, P_old, out, rnn_mem, rnn2out, last_h)
         # area_frac = area_frac.detach()
-        
+        # print("elapsed microphysics_decode {}".format(time.time() - t0))
+
+        # ------ RADIATION MODULE ------
         if self.use_physrad:
           
           T     = inputs_denorm[:,:,0:1]
@@ -1454,19 +1455,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           qv    = inputs_denorm[:,:,-1:]
 
           if self.update_states_for_rad:
-            # if self.training:
-            #     out_denorm   = out_new_true / self.yscale_lev.unsqueeze(1) 
-            # #   if True:
-            # #     qn_gcm = qn + out_denorm[:,:,2]*1200
-            # #     qn_mean_old = (qn_crm * area_frac).sum(dim=-1, keepdim=True)
-            # #     scale = torch.where( #  rescale to enforce constraint exactly
-            # #         qn_mean_old == 0, torch.ones_like(qn_mean_old), qn_gcm / qn_mean_old)
-            # #     qn_crm = qn_crm * scale
-            # else:
-            #     out_denorm    = out_new / self.yscale_lev.unsqueeze(1) 
-            # dT = 1200*out_denorm[:,:,0:1].detach().clone()
-            # dqv = 1200*out_denorm[:,:,1:2].detach().clone()
-            
+
             out_denorm    = out_new / self.yscale_lev.unsqueeze(1)
             dT = 1200*out_denorm[:,:,0:1]
             dqv = 1200*out_denorm[:,:,1:2]
@@ -1477,9 +1466,15 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             T   = self.relu(T + dT)
             qv  = self.relu(qv + dqv)
 
-          dT_rad, out_sfc_rad = self.radiative_transfer(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
+          # t0 = time.time()
+          tau_lw, source_lev, source_sfc, tau_sw, ssa_sw, g_sw = self.rad_optical_props(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
                                       rnn_mem, T_crm, qv_crm, qn_crm, T, qv, qn, area_frac, rnn2out)
+          # print("elapsed rad_optical_props {}".format(time.time() - t0))
+
+          # t0 = time.time()
+          dT_rad, out_sfc_rad = self.radiative_transfer(inputs_aux, delta_plev, area_frac, tau_lw, source_lev, source_sfc, tau_sw, ssa_sw, g_sw)
           dT_rad = dT_rad.unsqueeze(2)
+          # print("elapsed radiative_transfer {}".format(time.time() - t0))
 
         # print("dT_rad 2  min max", torch.min(dT_rad[:,:]).item(), torch.max(dT_rad[:,:]).item())
         # print("shape out", out_new.shape, "dt", dT_rad.shape)
