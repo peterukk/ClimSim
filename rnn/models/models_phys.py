@@ -797,9 +797,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           #   print("x_gas {} min {} max {}".format(gasopt_vars[i],torch.min(x_gas[:,:,i]).item(), torch.max(x_gas[:,:,i]).item()))
           x_gas = self.relu(x_gas)
           
-          t0 = time.time()
           tau_lw, pfrac = self.gas_optics_model_lw(x_gas, col_dry)
-          print("elapsed lwgas {}".format(time.time() - t0))
 
           if self.reduce_lw_gas_optics: # we used an existing gas optics scheme, but want to shrink the spectral dimension with an MLP
             pfrac   = self.softmax(self.gas_optics_lw_reduce2(pfrac)) # (nlev, nb, g)
