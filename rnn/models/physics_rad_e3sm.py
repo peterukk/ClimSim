@@ -9,7 +9,6 @@ import torch.nn.parameter as Parameter
 import torch.nn.functional as F
 from torch import Tensor
 
-@torch.compile(dynamic=False)
 def reitab(t: torch.Tensor) -> torch.Tensor:
     """
     Interpolate effective radius from temperature using tabulated values.
@@ -59,7 +58,6 @@ def reitab(t: torch.Tensor) -> torch.Tensor:
 
     return re
 
-@torch.compile(dynamic=False)
 def reltab(
         t: torch.Tensor,          # (N,) flattened from (ncol, pver)
         landfrac: torch.Tensor,   # (N,) — repeated across levels by caller

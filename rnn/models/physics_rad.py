@@ -48,7 +48,6 @@ def interpolate_tlev_batchlast(tlay, play, plev):
                               
     return tlev
 
-@torch.compile(dynamic=False)
 def outgoing_lw(temp):
     # Stefan-Boltzmann constant (W/m²/K⁴)
     # sigma = 5.670374419e-8
@@ -142,11 +141,11 @@ def calc_ref_trans_sw(mu0, od, ssa, asymmetry):
     Two-stream shortwave reflectance and transmittance calculation.
     Implements Meador & Weaver (1980) equations.
 
-    Args:
-        mu0:       Cosine of solar zenith angle (ncol*ng) (expanded in outer code)
-        od:        Optical depth, shape (ncol*ng)
-        ssa:       Single scattering albedo, shape (ncol*ng)
-        asymmetry: Asymmetry factor, shape (ncol*ng)
+    Args:   (variable dimensions don't matter because all operations are element wise)
+        mu0:       Cosine of solar zenith angle (nlev,ncol,ng) (expanded view)
+        od:        Optical depth, shape (nlev,ncol,ng) 
+        ssa:       Single scattering albedo, shape (nlev,ncol,ng) 
+        asymmetry: Asymmetry factor, shape (nlev,ncol,ng) 
 
     Returns:
         ref_diff:       Diffuse reflectance.

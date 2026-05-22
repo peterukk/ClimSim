@@ -21,8 +21,6 @@ from typing import Final
 import time
 from omegaconf import DictConfig, OmegaConf
 
-printdebug = False 
-
 class physical_RNN_autoreg(Base_RNN_autoreg):
     """
     Physics-informed version of the BiRNN
@@ -63,6 +61,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     reduce_sw_gas_optics: Final[bool]
     use_liq_frac_crm_mlp: Final[bool] 
     pred_subgrid_temp: Final[bool]
+    printdebug: Final[bool]
 
     def __init__(self, 
                 cfg: DictConfig, 
@@ -103,7 +102,14 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         print("nx rnn2", self.nx_rnn2, "nh rnn2", self.nh_rnn2)  
         print("nx sfc", self.nx_sfc)
         self.presdelta = PressureThickness(self.hyai,self.hybi)
-
+        self.reitab = reitab 
+        self.reltab = reltab
+        self.stratified_sample = stratified_sample
+        self.interpolate_tlev_batchlast = interpolate_tlev_batchlast
+        self.outgoing_lw = outgoing_lw
+        self.slingo_liq_cloud_optics_sw = slingo_liq_cloud_optics_sw 
+        self.ec_ice_optics_sw = ec_ice_optics_sw
+        self.printdebug = False
         # --------- Moist physics options configured in cfg ---------
         # 
         # Number of sub-grid regions
@@ -264,7 +270,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           if self.use_existing_gas_optics_lw or self.use_existing_gas_optics_sw:
             if self.use_e3sm_cloud_optics:
               print("For cloud optics, using the simple E3SM cloud optics scheme")
-              if self.map_e3sm_cloud_optics:
+              if self.map_e3sm_cloud_optics and self.use_existing_gas_optics_sw:
                 print("..in the SW, this includes a learned spectral mapping from e3SM cloud bands")
                 self.cloud_optics_sw_expand = PositiveLinear(4, self.ng_sw) # nn.Identity()# for debugging
             if self.use_existing_gas_optics_lw:
@@ -709,12 +715,12 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
         # inputs needed for cloud optical properties: ice and liquid cloud effective radius using the LUT interpolation routine from E3SM-MMF
         T_new1 = T_new[self.ilev_crm:].view(-1)
-        ice_eff_rad = reitab(T_new1)
+        ice_eff_rad = self.reitab(T_new1)
         ice_eff_rad = ice_eff_rad.view((self.nlev_crm, batch_size,1))
         icefrac   =  torch.repeat_interleave(inputs_aux[:,12].view(1,-1),self.nlev_crm,dim=0)
         landfrac  =  torch.repeat_interleave(inputs_aux[:,13].view(1,-1),self.nlev_crm,dim=0)
         snowh     =  torch.repeat_interleave(inputs_aux[:,15].view(1,-1),self.nlev_crm,dim=0)
-        liq_eff_rad = reltab(T_new1, landfrac.view(-1), icefrac.view(-1), snowh.view(-1))
+        liq_eff_rad = self.reltab(T_new1, landfrac.view(-1), icefrac.view(-1), snowh.view(-1))
         liq_eff_rad = liq_eff_rad.view((self.nlev_crm, batch_size,1))
 
         if not self.use_e3sm_cloud_optics:
@@ -768,7 +774,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
             # #  3) Rather than purely random assignment, deterministically partition g-points among states proportional to p, then shuffle.
             # # Same cost as McICA, zero bias, lower variance
-            indices = stratified_sample(p_flat, self.ng_lw) #, shuffle=False)
+            indices = self.stratified_sample(p_flat, self.ng_lw) #, shuffle=False)
             if self.pred_subgrid_temp and not self.use_liq_frac_crm_mlp:
               T_crm = torch.gather(T_crm_flat, dim=-1, index=indices).view(self.nlev_crm, batch_size, self.ng_lw)
             qn_crm = torch.gather(qn_crm_flat, dim=-1, index=indices).view(self.nlev_crm, batch_size, self.ng_lw)
@@ -804,7 +810,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             tau_lw  = self.gas_optics_lw_reduce1(tau_lw)
             tau_lw  = 0.01*self.softplus(tau_lw)
           
-          if printdebug:
+          if self.printdebug:
             print("tau_lw min max mean", tau_lw.min().item(), tau_lw.max().item(), tau_lw.mean().item())
             print("pfrac min max mean", pfrac.min().item(), pfrac.max().item(), pfrac.mean().item())
 
@@ -898,24 +904,24 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             
           if self.use_e3sm_cloud_optics:
             if self.map_e3sm_cloud_optics: # use an MLP to map E3SM cloud optics to the spectral discretization used here
-              k_sw_cld_liq0, ssa_sw_cld_liq0, g_sw_cld_liq0 = slingo_liq_cloud_optics_sw(liq_eff_rad)
+              k_sw_cld_liq0, ssa_sw_cld_liq0, g_sw_cld_liq0 = self.slingo_liq_cloud_optics_sw(liq_eff_rad)
               ksca_sw_cld_liq0  = k_sw_cld_liq0*ssa_sw_cld_liq0
               kscag_sw_cld_liq0 = ksca_sw_cld_liq0*g_sw_cld_liq0
               k_sw_cld_liq      = self.cloud_optics_sw_expand(k_sw_cld_liq0)
               ksca_sw_cld_liq   = self.cloud_optics_sw_expand(ksca_sw_cld_liq0) # / k_sw_cld_liq 
               kscag_sw_cld_liq  = self.cloud_optics_sw_expand(kscag_sw_cld_liq0) # / (k_sw_cld_liq*ssa_sw_cld_liq)
 
-              k_sw_cld_ice0, ssa_sw_cld_ice0, g_sw_cld_ice0 = ec_ice_optics_sw(ice_eff_rad)
+              k_sw_cld_ice0, ssa_sw_cld_ice0, g_sw_cld_ice0 = self.ec_ice_optics_sw(ice_eff_rad)
               ksca_sw_cld_ice0  = k_sw_cld_ice0*ssa_sw_cld_ice0
               kscag_sw_cld_ice0 = ksca_sw_cld_ice0*g_sw_cld_ice0
               k_sw_cld_ice    = self.cloud_optics_sw_expand(k_sw_cld_ice0)
               ksca_sw_cld_ice = self.cloud_optics_sw_expand(ksca_sw_cld_ice0)
               kscag_sw_cld_ice  = self.cloud_optics_sw_expand(kscag_sw_cld_ice0)
             else:
-              k_sw_cld_liq, ksca_sw_cld_liq, kscag_sw_cld_liq = slingo_liq_cloud_optics_sw(liq_eff_rad, self.ng_sw)
+              k_sw_cld_liq, ksca_sw_cld_liq, kscag_sw_cld_liq = self.slingo_liq_cloud_optics_sw(liq_eff_rad, self.ng_sw)
               ksca_sw_cld_liq  = k_sw_cld_liq*ksca_sw_cld_liq # ksca_sw_cld_liq is ssa before this line
               kscag_sw_cld_liq = ksca_sw_cld_liq*kscag_sw_cld_liq # kscag_sw_cld_liq is g before this line
-              k_sw_cld_ice, ksca_sw_cld_ice, kscag_sw_cld_ice = ec_ice_optics_sw(ice_eff_rad, self.ng_sw)
+              k_sw_cld_ice, ksca_sw_cld_ice, kscag_sw_cld_ice = self.ec_ice_optics_sw(ice_eff_rad, self.ng_sw)
               ksca_sw_cld_ice  = k_sw_cld_ice*ksca_sw_cld_ice
               kscag_sw_cld_ice = ksca_sw_cld_ice*kscag_sw_cld_ice
 
@@ -944,7 +950,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             # g_sw_cld = torch.where(tau_sw_scat_cld == 0, torch.zeros_like(tau_sw_scat_cld), g_tau_scat_sw_cld / tau_sw_scat_cld)
             # g_sw_cld            =  g_tau_scat_sw_cld / tau_sw_scat_cld
             g_sw_cld            = g_tau_scat_sw_cld / (tau_sw_scat_cld + cldeps)
-            if printdebug:
+            if self.printdebug:
               print("max min mean gswcld", g_sw_cld.max().item(), g_sw_cld.min().item(),  g_sw_cld.mean().item())
               print("min max mean tau_sw", tau_sw.min().item(), tau_sw.max().item(), tau_sw.mean().item())
               print("min max mean tau_sw_cld", tau_sw_cld.min().item(), tau_sw_cld.max().item(), tau_sw_cld.mean().item())
@@ -992,11 +998,11 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         if not (self.use_existing_gas_optics_sw or self.use_existing_gas_optics_lw):
         # if neither are True ( both are False), effective radiuses have not been computed yet
           T_new1 = T_new[self.ilev_crm:].view(-1) 
-          ice_eff_rad = reitab(T_new1).view((self.nlev_crm, batch_size, 1))
+          ice_eff_rad = self.reitab(T_new1).view((self.nlev_crm, batch_size, 1))
           icefrac   =  torch.repeat_interleave(inputs_aux[:,12:13].unsqueeze(0),self.nlev_crm,dim=0)
           landfrac  =  torch.repeat_interleave(inputs_aux[:,13:14].unsqueeze(0),self.nlev_crm,dim=0)
           snowh     =  torch.repeat_interleave(inputs_aux[:,15:16].unsqueeze(0),self.nlev_crm,dim=0)
-          liq_eff_rad = reltab(T_new1, landfrac.view(-1), icefrac.view(-1), snowh.view(-1)).view((self.nlev_crm, batch_size, 1))
+          liq_eff_rad = self.reltab(T_new1, landfrac.view(-1), icefrac.view(-1), snowh.view(-1)).view((self.nlev_crm, batch_size, 1))
 
         liq_eff_rad  = liq_eff_rad / 13.5  # simple scaling 
         ice_eff_rad  = ice_eff_rad / 250.0 # simple scaling
@@ -1046,7 +1052,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         
       # print("pfrac1 min max mean", torch.min(pfrac[:,:]).item(), torch.max(pfrac[:,:]).item(), torch.mean(pfrac[:,:]).item())
       # print("tau_lw1 min max mean", torch.min(tau_lw[:,:]).item(), torch.max(tau_lw[:,:]).item(), torch.mean(tau_lw[:,:]).item())
-      tlev        = interpolate_tlev_batchlast(T_new.squeeze(), play.squeeze(), plev.squeeze()) # (nlev+1, nb)
+      tlev        = self.interpolate_tlev_batchlast(T_new.squeeze(), play.squeeze(), plev.squeeze()) # (nlev+1, nb)
       # print("tlev min max mean", tlev.min().item(), tlev.max().item(), tlev.mean().item())
       # lwup_sfc    = (inputs_aux[:,11]*self.xdiv_sca[11]) + self.xmean_sca[11]
       lwup_sfc    = inputs_aux[:,11]
@@ -1055,11 +1061,11 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       # RRTMGP planck fracs sum to 1 only within bands, not across all g-points. 
       # We should be multiplying with the band-wise Planck emissions, not broadband Planck emission. 
       source_sfc  = pfrac[-1,:,:]*lwup_sfc.unsqueeze(1)
-      lwup_lev    = torch.unsqueeze(outgoing_lw(tlev),2) # (nlev+1, nb, ng)
+      lwup_lev    = torch.unsqueeze(self.outgoing_lw(tlev),2) # (nlev+1, nb, ng)
       source_lev  = torch.zeros(nlev+1, batch_size, self.ng_lw, device=device)
       source_lev[-1,:,:] = pfrac[-1,:,:] * lwup_lev[-1,:,:]
       source_lev[0:-1,:,:] = pfrac[:,:,:]  * lwup_lev[0:-1,:,:]
-      if printdebug:
+      if self.printdebug:
         print("lup sfc min max mean", lwup_sfc.min().item(), lwup_sfc.max().item(), lwup_sfc.mean().item())
         print("source_sfc min max mean", source_sfc.min().item(), source_sfc.max().item(), source_sfc.mean().item())
         print("pfrac min max", torch.min(pfrac[:,:]).item(), torch.max(pfrac[:,:]).item(), "sfc", pfrac[-1,100,:])
@@ -1075,7 +1081,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     def radiative_transfer(self, inputs_aux0, delta_plev, area_frac, tau_lw, source_lev, source_sfc, tau_sw, ssa_sw, g_sw):
       """
       Two-stream longwave and shortwave radiative transfer with correlated-k (or other spectral discretization)
-      Arrays are structured (level, batch, spectral)
+      Arrays are structured (level, column, spectral) where we can collapse the column (batch) and spectral dims
       """
 
       nlev, batch_size, ng = tau_lw.shape 
@@ -1084,7 +1090,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
       # -------------------------- LONGWAVE -----------------------------
       # 
-      # LW REFLECTANCE-TRANSMITTANCE COMPUTATIONS
+      # Computation of layer-wise LW transmittances and source terms 
       planck_top = source_lev[0:-1,:,:]
       planck_bot = source_lev[1:,:,:]
       source_up, source_dn, trans_lw = reftrans_lw(planck_top.view(-1),planck_bot.view(-1), tau_lw.view(-1))
@@ -1092,26 +1098,27 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
       emissivity_surf = torch.ones_like(source_sfc)
       
-      if printdebug: 
-        print("source_up min max mean", source_up.min().item(), source_up.max().item(), source_up.mean().item())
-        print("source_dn min max mean", source_dn.min().item(), source_dn.max().item(), source_dn.mean().item())
-        print("trans_lw min max mean", trans_lw.min().item(), trans_lw.max().item(), trans_lw.mean().item(), "shape", trans_lw.shape)
-        print("source_up min max", torch.min(source_up[:,:]).item(), torch.max(source_up[:,:]).item())   
-        print("emissivity_surf min max mean", emissivity_surf.min().item(), emissivity_surf.max().item(), emissivity_surf.mean().item())
-
       # call LW solver to predict downward and upward spectral fluxes at each half-level. LW scattering is ignored here (as in most ESMs)
       flux_lw_dn, flux_lw_up = lw_solver_noscat_batchlast(trans_lw.view(nlev, -1), source_dn.view(nlev, -1), source_up.view(nlev, -1), 
                                                           source_sfc.view(-1), emissivity_surf.view(-1))
 
       flux_lw_up = flux_lw_up.view(nlev+1,batch_size, self.ng_lw)
       flux_lw_dn = flux_lw_dn.view(nlev+1,batch_size, self.ng_lw)
-      flux_lw_up = torch.sum(flux_lw_up,dim=2) # spectral reduction to get broadband flux
+      # finally spectral reduction to get broadband flux
+      flux_lw_up = torch.sum(flux_lw_up,dim=2) 
       flux_lw_dn = torch.sum(flux_lw_dn,dim=2)
-      if printdebug:
+      if self.printdebug:
+        print("source_up min max mean", source_up.min().item(), source_up.max().item(), source_up.mean().item())
+        print("source_dn min max mean", source_dn.min().item(), source_dn.max().item(), source_dn.mean().item())
+        print("trans_lw min max mean", trans_lw.min().item(), trans_lw.max().item(), trans_lw.mean().item())
+        print("source_up min max", torch.min(source_up[:,:]).item(), torch.max(source_up[:,:]).item())   
+        print("emissivity_surf min max mean", emissivity_surf.min().item(), emissivity_surf.max().item(), emissivity_surf.mean().item())
         print("flux lw gpt up  min max mean", flux_lw_up.min().item(), flux_lw_up.max().item(),flux_lw_up.mean().item())
         print("flux lw up ", flux_lw_up[:,100])
         print("flux lw up  min max mean", flux_lw_up.min().item(), flux_lw_up.max().item(),flux_lw_up.mean().item())
       del trans_lw, source_dn, source_up, source_sfc, emissivity_surf
+
+      # -------------------------- END LONGWAVE -----------------------------
 
       # -------------------------- SHORTWAVE -----------------------------
       # 
@@ -1123,7 +1130,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       mu0_rep = mu0.reshape((1,-1,1)).expand(self.nlev, -1, self.ng_sw)
       if self.experimental_rad:
         mu0_rep = mu0_rep.unsqueeze(3).expand(-1, -1, -1, self.nreg)
-      # print("mu0 min max", torch.min(mu0).item(), torch.max(mu0).item())
 
       # SW REFLECTANCE-TRANSMITTANCE COMPUTATIONS
       ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir = calc_ref_trans_sw(mu0_rep, tau_sw, ssa_sw, g_sw)
@@ -1137,7 +1143,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
       incoming_toa    = inputs_aux[:,1:2]
 
-      if printdebug: print("incoming toa", incoming_toa[500:560])
+      if self.printdebug: print("incoming toa", incoming_toa[500:560])
 
       if (self.use_existing_gas_optics_sw and (not self.reduce_sw_gas_optics)):
         toa_spectral = self.sw_solar_weights 
@@ -1154,12 +1160,12 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
       # ------- COMPUTE SURFACE SPECTRAL ALBEDO TO DIRECT AND DIFFUSE RADIATION --
       # 
-      # The input surface albedos are given only in 4 bands and don't match our k-distribution. Need to do a simple mapping
-      # If we are using RRTMGP(-NN), then this should match exactly the subroutine set_albedo in E3SM/components/eam/src/physics/rrtmgp/radiation.F90
-      # If we are learning a new gas optics module on the fly, or a decoder to shrink the spectral dimension after RRTMGP-NN, then the lines below assume that it's a good
+      # Here the input surface albedos are given only in 4 bands and don't match our k-distribution, so we need to do a simple mapping
+      # If we are using RRTMGP(-NN), the mapping below should match the subroutine set_albedo in E3SM/components/eam/src/physics/rrtmgp/radiation.F90
+      # If we are learning a new gas optics NN on the fly, or an extraNN to shrink the spectral dim of RRTMGP-NN, then below its assumed to be a good
       # idea to follow RRTMGP in how much of the spectral space is allocated to near-IR versus visible
-      # 1,10 | 11,18 | 19,29 | 30,37 | 38,46 | 47,56 | 57,67 | 68,71 | 72,80 | 81,89 | 90, 96 | 97, 102 | 103, 109 | 110, 112 
-      # 820, 2680 | 2680, 3250 | 3250, 4000 | 4000, 4650 | 4650, 5150  | 5150, 6150 | 6150, 7700 | 7700, 8050  | 12850, 16000 | 
+      # band g-points:  1,10 | 11,18 | 19,29 | 30,37 | 38,46 | 47,56 | 57,67 | 68,71 | 72,80 | 81,89 | 90, 96 | 97, 102 | 103, 109 | 110, 112 
+      # wavenum limits: 820, 2680 | 2680, 3250 | 3250, 4000 | 4000, 4650 | 4650, 5150  | 5150, 6150 | 6150, 7700 | 7700, 8050  | 12850, 16000 | 
       # 16000, 22650 | 22650, 29000 | 29000, 38000 | 38000, 50000 |
 
       iend_ir = int(round((80/112)*self.ng_sw)) # RRTMGP bands 1-9 (g-points 1-80) encompass 820-12850 cm-1 (near-ir), see data/rrtmgp-data-sw-g112-210809.nc
@@ -1194,14 +1200,10 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       albedo_surf_diff_sw   = albedo_surf_diff_sw.view(-1)
 
       # --------- SW RADIATIVE TRANSFER USING ADDING METHOD -----------
-      # t0 = time.time()
       # if self.experimental_rad:
-      #   # xx = torch.transpose(rnn2out,1,2)
       #   xx = torch.transpose(qn_crm,1,2) # qn_crm(nb,nlev,nreg) --> (nb,nreg*nreg,nlev)
       #   v_mat = self.softmax_dim1(self.conv_vmat(xx)) # (nb, nreg*nreg, nlev)
       #   v_mat = torch.permute(v_mat,(2,0,1)).contiguous()
-      #   # v_mat = torch.transpose(v_mat,1,2) # (nb, nlev, nreg*nreg)
-      #   # v_mat = torch.transpose(v_mat,0,1) # (nlev, nb, nreg*nreg)
       #   v_mat = torch.repeat_interleave(v_mat.unsqueeze(2), self.ng_sw, dim=2)
       #   ones  = torch.zeros(1, batch_size, self.ng_sw,self.nreg*self.nreg, device=device)
       #   oness  = torch.zeros(11, batch_size, self.ng_sw,self.nreg*self.nreg, device=device)
@@ -1210,7 +1212,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       #   oness = oness.view(11, batch_size, self.ng_sw*self.nreg*self.nreg)
       #   v_mat = torch.cat((oness, v_mat.view(self.nlev_crm-1, batch_size, self.ng_sw*self.nreg*self.nreg), ones), dim=0)
       #   del ones, oness
-      #   # print("shape v mat", v_mat.shape)
       #   v_mat       = v_mat.view(nlev+1, -1)
         
       #   flux_sw_up, flux_sw_dn_diffuse, flux_sw_dn_direct = adding_tc_sw_batchlast_opt(incoming_toa, 
@@ -1224,20 +1225,18 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                   ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir)
           
       del ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir
-      # print("elapsed adding_ica_sw {}".format(time.time() - t0))
 
       if self.experimental_rad:
-        flux_sw_up          = torch.reshape(flux_sw_up, (nlev+1, batch_size, self.ng_sw, self.nreg))
-        flux_sw_dn_diffuse  = torch.reshape(flux_sw_dn_diffuse, (nlev+1, batch_size, self.ng_sw, self.nreg))
-        flux_sw_dn_direct   = torch.reshape(flux_sw_dn_direct, (nlev+1, batch_size, self.ng_sw, self.nreg))
-        flux_sw_up          = torch.sum(flux_sw_up,dim=-1) # sum over sub-grid regions
-        flux_sw_dn_diffuse  = torch.sum(flux_sw_dn_diffuse,dim=-1)
-        flux_sw_dn_direct   = torch.sum(flux_sw_dn_direct,dim=-1)
+        # sum over region dimension
+        flux_sw_up          = torch.sum(flux_sw_up.view(nlev+1, batch_size, self.ng_sw, self.nreg),dim=-1)
+        flux_sw_dn_diffuse  = torch.sum(flux_sw_dn_diffuse.view(nlev+1, batch_size, self.ng_sw, self.nreg),dim=-1)
+        flux_sw_dn_direct   = torch.sum(flux_sw_dn_direct.view(nlev+1, batch_size, self.ng_sw, self.nreg),dim=-1)
       else:
         flux_sw_up = torch.reshape(flux_sw_up, (nlev+1, batch_size, self.ng_sw))
         flux_sw_dn_diffuse = torch.reshape(flux_sw_dn_diffuse, (nlev+1, batch_size, self.ng_sw))
         flux_sw_dn_direct = torch.reshape(flux_sw_dn_direct, (nlev+1, batch_size, self.ng_sw))
                 
+      # Sum over whole / parts of spectral dimension to get broadband / band-wise fluxes
       sw_dir_dn_mixband = torch.sum(flux_sw_dn_direct[-1,:,iend_ir:iend_mix],dim=1,keepdim=True)
       SOLL = torch.sum(flux_sw_dn_direct[-1,:,0:iend_ir],dim=1,keepdim=True) + 0.5*sw_dir_dn_mixband
       SOLS = torch.sum(flux_sw_dn_direct[-1,:,iend_mix:],dim=1,keepdim=True) + 0.5*sw_dir_dn_mixband
@@ -1263,7 +1262,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       SOLLD[inds_zero] = 0.0
       SOLSD[inds_zero] = 0.0
 
-      if printdebug:
+      if self.printdebug:
         print("flux sw dn ", flux_sw_dn[:,500])
         print("flux sw up ", flux_sw_up[:,500])
 
@@ -1272,7 +1271,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       flux_net        = flux_lw_net + flux_sw_net
       flux_diff       = flux_net[1:,:] - flux_net[0:-1,:]
       dT_rad          = -(flux_diff / delta_plev.squeeze()) * 0.009761357302 # * g/cp = 9.80665 / 1004.64
-      dT_rad          = dT_rad * self.yscale_lev[:,0:1] # normalize
+      dT_rad          = dT_rad * self.yscale_lev[:,0:1] # scaling (physical computations gave us unscaled tendency, but target outputs are scaled)
       
       out_sfc_rad = torch.cat((flux_sw_dn_sfc, flux_lw_dn_sfc,  SOLS, SOLL, SOLSD, SOLLD ), dim=1)
       out_sfc_rad = out_sfc_rad * self.yscale_sca_rad

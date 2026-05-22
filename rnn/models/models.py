@@ -13,16 +13,9 @@ from layers import * #LayerPressure, LevelPressure
 import torch.nn.functional as F
 from typing import List, Tuple, Final, Optional
 from torch import Tensor
-from models_torch_kernels import GLU
 from models_torch_kernels import *
-from .physics_rad import outgoing_lw, reftrans_lw, lw_solver_noscat_batchlast
-from .physics_rad import calc_ref_trans_sw, adding_ica_sw_batchlast_opt, adding_tc_sw_batchlast_opt
-from .physics_rad import stratified_sample, interpolate_tlev_batchfirst, interpolate_tlev_batchlast
-from .physics_rad_e3sm import reitab, reltab, slingo_liq_cloud_optics_sw, ec_ice_optics_sw
-from metrics import specific_to_relative_humidity_torch_cc, specific_to_relative_humidity_torch
 import numpy as np 
 from typing import Final 
-import time
 from omegaconf import DictConfig, OmegaConf
 
 # class BiRNN(nn.Module):
