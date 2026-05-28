@@ -30,6 +30,8 @@ only_load_model: false
 retrain_det_model: false
 
 autoregressive: true
+ensemble_size: 1
+crps_start_epoch: 0
 ar_noise_mode: 0
 ar_tau: 0.85
 
@@ -107,6 +109,13 @@ model_type: LSTM
 use_lstm: true
 randomly_initialize_cellstate: false
 concat: false
+
+# Microphysics options
+ice_sedimentation: true
+pred_subgrid_temp: false
+use_clear_sky_region: true
+
+# Radiation options
 separate_radiation: false
 use_physrad: false
 use_mcica: false
@@ -116,8 +125,6 @@ existing_gasopt_file_lw: None
 existing_gasopt_file_sw: None 
 ng_lw: 16 
 ng_sw: 16
-ensemble_size: 1 
-crps_start_epoch: 0 
 
 lr_scheduler: OneCycleLR
 scheduler_end_epoch: 95
