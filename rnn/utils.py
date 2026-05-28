@@ -24,8 +24,230 @@ from norm_coefficients import lbd_qi_lev, lbd_qi_mean,  lbd_qc_lev, lbd_qc_mean,
 import matplotlib
 import matplotlib.pyplot as plt
 import random
+import types
+from typing import List, Tuple, Final, Optional
 from torchinfo import summary
 
+class model_wrapper(nn.Module):
+    qinput_prune: Final[bool]
+    rh_prune: Final[bool]
+    snowhice_fix: Final[bool]
+    v5_input: Final[bool]
+    mp_constraint: Final[bool]
+    perturb: Final[bool]
+    return_det: Final[bool]
+    rh_to_q: Final[bool]
+    include_q_input: Final[bool]
+    use_ar_noise: Final[bool]
+    nx: Final[int]
+    nmem: Final[int]
+    nlev_mem: Final[int]
+    is_stochastic: Final[bool]
+    add_stochastic_layer: Final[bool]
+
+    qinput_prune, snowhice_fix, v5_input, perturb, rh_prune = False, True, False, False, False
+
+    def __init__(self, original_model, mp_mode=1,
+                 qinput_prune=False, rh_prune=False,
+                 rh_to_q=False, include_q_input=True, use_ar_noise=False, 
+                 snowhice_fix=True, v5_input=False,  is_stochastic=False, add_stochastic_layer=False, 
+                 perturb=False, return_det=False):
+        
+        super(model_wrapper, self).__init__()
+        self.original_model = original_model
+        self.mp_mode = mp_mode
+        if self.mp_mode==0: # predict qliq, qice
+            self.mp_constraint = False 
+        elif self.mp_mode>0: # predict qn, DIAGNOSE liquid fraction
+            self.mp_constraint = True 
+        else: # < 0  predict qn and liquid fraction
+            self.mp_constraint = True       
+        nx = original_model.xmean_lev.shape[1]
+        if nx in [16,21]:
+            self.include_q_input = True 
+        else:
+            self.include_q_input = False 
+        # print("DEV", self.original_model.hybm.device)
+        self.nx             = nx
+        self.nmem           = original_model.nh_mem
+        self.nlev_mem       = original_model.nlev_mem
+        self.rh_to_q        = rh_to_q
+        self.include_q_input = include_q_input
+        self.use_ar_noise   = use_ar_noise
+        self.hardtanh       = nn.Hardtanh(0.0, 1.0)
+        self.qinput_prune   = qinput_prune
+        self.rh_prune       = rh_prune
+        self.snowhice_fix   = snowhice_fix
+        self.v5_input       = v5_input
+        self.perturb        = perturb
+        self.return_det     = return_det
+        self.add_stochastic_layer = add_stochastic_layer 
+        self.is_stochastic = is_stochastic
+        if use_ar_noise:
+            self.forward = types.MethodType(model_wrapper.forward_with_x1, self)
+        else:
+            self.forward = types.MethodType(model_wrapper.forward_base, self)
+
+    def torch_polyval(self, coeffs, x):
+        """Evaluate polynomial (coeffs in same order as numpy.polyval) using Horner's method."""
+        out = torch.zeros_like(x, dtype=coeffs.dtype)
+        for c in coeffs:
+            out = out * x + c
+        return out
+    
+    def eliq_torch(self, T):
+        """T: torch tensor (K). Returns saturation (hPa scaled by 100 as in original)."""
+        a_liq = torch.tensor([-0.976195544e-15, -0.952447341e-13, 0.640689451e-10,
+                              0.206739458e-7, 0.302950461e-5, 0.264847430e-3,
+                              0.142986287e-1, 0.443987641, 6.11239921], dtype=T.dtype, device=T.device)
+        c_liq = -80.0
+        T0 = 273.16
+        x = torch.clamp(T - T0, min=c_liq)  # equivalent to np.maximum(c_liq, T-T0)
+        return 100.0 * self.torch_polyval(a_liq, x)
+    
+    def eice_torch(self, T):
+        a_ice = torch.tensor([0.252751365e-14, 0.146898966e-11, 0.385852041e-9,
+                              0.602588177e-7, 0.615021634e-5, 0.420895665e-3,
+                              0.188439774e-1, 0.503160820, 6.11147274], dtype=T.dtype, device=T.device)
+        c_ice = torch.tensor([273.15, 185.0, -100.0, 0.00763685, 0.000151069, 7.48215e-07],
+                             dtype=T.dtype, device=T.device)
+        T0 = 273.16
+    
+        cond1 = (T > c_ice[0])
+        cond2 = ((T <= c_ice[0]) & (T > c_ice[1]))    
+        branch1 = self.eliq_torch(T)
+        branch2 = 100.0 * self.torch_polyval(a_ice, T - T0)
+        tmp = torch.clamp(T - T0, min=c_ice[2])
+        branch3 = 100.0 * (c_ice[3] + tmp * (c_ice[4] + tmp * c_ice[5]))
+    
+        result = torch.where(cond1, branch1, torch.where(cond2, branch2, branch3))
+        return result
+    
+    def relative_to_specific_humidity_torch(self, rh, temp, pressure):
+        """rh: torch tensor (0..1), temp: K tensor, pressure: Pa tensor -> specific humidity."""
+        T0 = 273.16
+        T00 = 253.16
+        omega = (temp - T00) / (T0 - T00)
+        omega = torch.clamp(omega, min=0.0, max=1.0)
+        esat = omega * self.eliq_torch(temp) + (1.0 - omega) * self.eice_torch(temp)
+        Rd = 287.0
+        Rv = 461.0
+        qvs = (Rd * esat) / (Rv * pressure)
+        q = rh * qvs
+        return q
+
+    def preprocessing(self, x_main, x_sfc):
+        if self.snowhice_fix:
+            x_sfc = torch.where(torch.ge(x_sfc,1e10), torch.tensor(-1.0), x_sfc)
+            
+        if self.v5_input: 
+            qn   = x_main[:,:,2]  + x_main[:,:,3]
+            if self.qinput_prune:
+                qn[:,0:15] = 0.0
+            qn = 1 - torch.exp(-qn * self.original_model.lbd_qn)
+            x_main[:,:,2] = qn
+            liq_frac_constrained  = self.original_model.temperature_scaling(x_main[:,:,0])
+
+            x_main[:,:,3] = liq_frac_constrained
+
+            #                            mean     max - min
+            x_main = (x_main - self.original_model.xmean_lev)/(self.original_model.xdiv_lev)
+            x_sfc =  (x_sfc -  self.original_model.xmean_sca)/(self.original_model.xdiv_sca)
+           
+        else: # v4 inputs
+            # cloud liq, ice
+            x_main[:,:,2] = 1 - torch.exp(-x_main[:,:,2] * self.original_model.lbd_qc)
+            x_main[:,:,3] = 1 - torch.exp(-x_main[:,:,3] * self.original_model.lbd_qi)   
+            
+            #                            mean                      max - min
+            x_main = (x_main - self.original_model.xmean_lev)/(self.original_model.xdiv_lev)
+            x_sfc =  (x_sfc -  self.original_model.xmean_sca)/(self.original_model.xdiv_sca)
+            
+            if self.qinput_prune:
+                x_main[:,0:15,2:3] = 0.0
+                
+        if self.rh_prune:         # clip RH 
+            x_main[:,:,1] = torch.clamp(x_main[:,:,1], 0, 1.2)
+
+        x_main = torch.where(torch.isnan(x_main), torch.tensor(0.0, device=x_main.device), x_main)
+        x_main = torch.where(torch.isinf(x_main), torch.tensor(0.0, device=x_main.device), x_main)
+        return x_main, x_sfc 
+  
+    def forward_eps(self, x_main0, x_sfc0, rnn1_mem, eps_prev):            
+
+        if self.rh_to_q or self.include_q_input:
+            temp = x_main0[:,:,0]
+            rh = x_main0[:,:,1]  
+            sp = x_sfc0[:,0:1] 
+            pres = self.original_model.hyam*100000.0 + sp*self.original_model.hybm
+            pres = torch.squeeze(pres)
+            q = self.relative_to_specific_humidity_torch(rh, temp, pres)
+            if self.include_q_input:
+                x_main0 = torch.cat((x_main0, torch.unsqueeze(q,2)),dim=2)
+            else:
+                x_main0[:,:,1] = q
+                    
+        x_main = x_main0.clone(); x_sfc = x_sfc0.clone()
+        x_main, x_sfc = self.preprocessing(x_main, x_sfc)
+
+        inp_list = [x_main, x_sfc]
+        inp_list.append(rnn1_mem)
+        inp_list.append(eps_prev)
+        inp_list.append(x_main0)
+        
+        if self.perturb:
+            out_lev, out_sfc, rnn1_mem, out_lev_det, eps_prev = self.original_model(inp_list)
+        else:
+            out_lev, out_sfc, rnn1_mem, eps_prev = self.original_model(inp_list)
+    
+
+        out_lev, out_sfc = self.original_model.postprocessing(out_lev, out_sfc, x_main0)
+        if self.perturb:
+            out_lev_det, out_sfc_tmp = self.original_model.postprocessing(out_lev_det, out_sfc, x_main0)
+
+        out_lev = torch.where(torch.isnan(out_lev), torch.tensor(0.0, device=x_main.device), out_lev)
+        if self.perturb and self.return_det:
+            out_lev_det = torch.where(torch.isnan(out_lev_det), torch.tensor(0.0, device=x_main.device), out_lev_det)
+            return out_lev, out_lev_det, out_sfc, rnn1_mem, eps_prev
+        else:
+            return out_lev, out_sfc, rnn1_mem, eps_prev
+ 
+    def forward_base(self, x_main0, x_sfc0, rnn1_mem):
+
+        if self.rh_to_q or self.include_q_input:
+            temp = x_main0[:,:,0]
+            rh = x_main0[:,:,1]  
+            sp = x_sfc0[:,0:1] 
+            pres = self.original_model.hyam*100000.0 + sp*self.original_model.hybm
+            pres = torch.squeeze(pres)
+            q = self.relative_to_specific_humidity_torch(rh, temp, pres)
+            if self.include_q_input:
+                x_main0 = torch.cat((x_main0, torch.unsqueeze(q,2)),dim=2)
+            else:
+                x_main0[:,:,1] = q
+        
+        x_main = x_main0.clone(); x_sfc = x_sfc0.clone()
+        x_main, x_sfc = self.preprocessing(x_main, x_sfc)
+    
+        if self.perturb:
+            out_lev, out_sfc, rnn1_mem, out_lev_det = self.original_model(x_main, x_sfc, rnn1_mem)
+        else:
+            inp_list = [x_main, x_sfc]
+            inp_list.append(rnn1_mem)
+            inp_list.append(x_main0)
+            out_lev, out_sfc, rnn1_mem = self.original_model(inp_list)
+    
+        out_lev, out_sfc = self.original_model.postprocessing(out_lev, out_sfc, x_main0)
+        if self.perturb:
+            out_lev_det, out_sfc_tmp = self.original_model.postprocessing(out_lev_det, out_sfc, x_main0)
+
+        out_lev = torch.where(torch.isnan(out_lev), torch.tensor(0.0, device=x_main.device), out_lev)
+        if self.perturb and self.return_det:
+            out_lev_det = torch.where(torch.isnan(out_lev_det), torch.tensor(0.0, device=x_main.device), out_lev_det)
+            return out_lev, out_lev_det, out_sfc, rnn1_mem
+        else:
+            return out_lev, out_sfc, rnn1_mem
+        
 def ccc(y_true, y_pred):
     """Calculates Lin's Concordance Correlation Coefficient."""
     # 1. Means

@@ -56,7 +56,7 @@ print(device)
 
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from utils import train_or_eval_one_epoch, generator_xy, BatchSampler, plot_bias_diff,  load_gas_optics_model
+from utils import train_or_eval_one_epoch, generator_xy, BatchSampler, plot_bias_diff,  load_gas_optics_model, model_wrapper
 import metrics as metrics
 from torchmetrics.regression import R2Score
 import wandb
@@ -735,12 +735,13 @@ def main(cfg: DictConfig):
     # Strings for saving model 
     inpstr = "v5" if cfg.v4_to_v5_inputs else "v4"
     physrad_str = "physRad-{}".format(cfg.ng_lw) if cfg.use_physrad else "MLRad"
-    MODEL_STR =  '{}_{}_nreg{}_lr{}.neur{}-{}_x{}_mp{}_num{}'.format(cfg.model_type, physrad_str,
+    nx = model.xmean_lev.shape[1]
+    MODEL_STR =  '{}_{}_nreg{}_lr{}.neur{}-{}_nx{}_x{}_mp{}_num{}'.format(cfg.model_type, physrad_str,
                                                                      cfg.nreg, cfg.lr, 
                                                                      cfg.nneur[0], cfg.nneur[1], 
-                                                                     inpstr, cfg.mp_mode,
+                                                                     nx, inpstr, cfg.mp_mode,
                                                                      conf["model_num"] )
-
+    print("MODEL_STR : {}".format(MODEL_STR))
     # SAVE_PATH       = "saved_models/" + MODEL_STR + ".pt"
     # save_file_torch = "saved_models/" + MODEL_STR + "_script.pt"
     
@@ -840,8 +841,8 @@ def main(cfg: DictConfig):
           quit()
 
     if False: # test saving to TorchScript
-      save_file_torch1 = "saved_models/" + MODEL_STR + "_sscript_gpu.pt"
-      save_file_torch2 = "saved_models/" + MODEL_STR + "_sscript_cpu.pt"
+      save_file_torch1 = "saved_models/" + MODEL_STR + "_script_gpu.pt"
+      save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
       print("saving model to", save_file_torch2)
       # print("New best validation result obtained, saving model to", SAVE_PATH)
       if is_stochastic:
@@ -853,20 +854,32 @@ def main(cfg: DictConfig):
           model.return_neg_precip = False
       model.train(False)
       # model.compile(mode="max-autotune")
-      scripted_model = torch . jit . script ( model )
-    #   attrs = ["nlev", "nh_mem","nlev_mem", "xmean_lev","xmean_sca","xdiv_lev","xdiv_sca",
-    #       "lbd_qc","lbd_qi","lbd_qn","yscale_lev","yscale_sca","hyam", "hybm", 
-    #       "postprocessing","temperature_scaling"]
-      # scripted_model = torch.jit.freeze(scripted_model,preserved_attrs=attrs)  
-      scripted_model = scripted_model.eval()
-      scripted_model.save(save_file_torch1)
+    #   model = model.to(device)
+
+      scripted_model_wrapped_gpu = model_wrapper(model, mp_mode=cfg.mp_mode,
+                 qinput_prune=cfg.qinput_prune, rh_prune=cfg.rh_prune,
+                 rh_to_q=cfg.rh_input_to_q, include_q_input=cfg.include_q_input, use_ar_noise=False, 
+                 snowhice_fix=cfg.snowhice_fix, v5_input=cfg.v4_to_v5_inputs, is_stochastic=is_stochastic, add_stochastic_layer=model.add_stochastic_layer,
+                 perturb=False, return_det=False)
+      scripted_model_wrapped_gpu = scripted_model_wrapped_gpu.to(device)
+      scripted_model_wrapped_gpu = torch.jit.script(scripted_model_wrapped_gpu)
+      scripted_model_wrapped_gpu = scripted_model_wrapped_gpu.eval()
+      scripted_model_wrapped_gpu = torch.jit.optimize_for_inference(scripted_model_wrapped_gpu)
+      save_file_torch_wrap = "saved_models/" + MODEL_STR + "_script_gpu_wrapped.pt"
+      scripted_model_wrapped_gpu.save(save_file_torch_wrap)
+
       model = model.to("cpu")
-      scripted_model = torch . jit . script ( model )
-      # scripted_model = torch.jit.freeze(scripted_model,preserved_attrs=attrs) 
-      scripted_model = scripted_model.eval()
-      scripted_model.save(save_file_torch2)
-      scripted_model.nmem = model.nh_mem
-      # print("nmem:", scripted_model.nmem, "nlev_mem", scripted_model.nlev_mem)
+      scripted_model_wrapped_cpu = model_wrapper(model, mp_mode=cfg.mp_mode,
+                 qinput_prune=cfg.qinput_prune, rh_prune=cfg.rh_prune,
+                 rh_to_q=cfg.rh_input_to_q, include_q_input=cfg.include_q_input, use_ar_noise=False, 
+                 snowhice_fix=cfg.snowhice_fix, v5_input=cfg.v4_to_v5_inputs,  is_stochastic=is_stochastic, add_stochastic_layer=model.add_stochastic_layer,
+                 perturb=False, return_det=False)
+      scripted_model_wrapped_cpu = torch.jit.script(scripted_model_wrapped_cpu)
+      scripted_model_wrapped_cpu = scripted_model_wrapped_cpu.eval()
+      scripted_model_wrapped_cpu = torch.jit.optimize_for_inference(scripted_model_wrapped_cpu)
+      save_file_torch_wrap = "saved_models/" + MODEL_STR + "_script_cpu_wrapped.pt"
+      scripted_model_wrapped_cpu.save(save_file_torch_wrap)
+
       quit()
       
     prev_nan = False
@@ -966,8 +979,6 @@ def main(cfg: DictConfig):
                 else:
                   SAVE_PATH       = "saved_models/" + MODEL_STR + "_ep{}".format(epoch+1) + ".pt"
 
-                save_file_torch1 = SAVE_PATH.split(".pt")[0] + "_script_gpu.pt"
-                save_file_torch2 = SAVE_PATH.split(".pt")[0] + "_script_cpu.pt"
                 print("saving model to", SAVE_PATH)
                 # print("New best validation result obtained, saving model to", SAVE_PATH)
                 if is_stochastic:
@@ -977,7 +988,6 @@ def main(cfg: DictConfig):
                   if model.return_neg_precip:
                     return_neg_precip=True 
                     model.return_neg_precip = False
-                # model = model.to("cpu")
                 torch.save({
                             'epoch': epoch+1,
                             'model_state_dict': model.state_dict(),
@@ -988,15 +998,31 @@ def main(cfg: DictConfig):
                 
                 model.train(False)
                 # model.compile(mode="max-autotune")
-                scripted_model = torch . jit . script ( model )
-                scripted_model = scripted_model.eval()
-                # scripted_model = torch.jit.freeze(scripted_model)  
-                scripted_model.save(save_file_torch1)
+
+                scripted_model_wrapped_gpu = model_wrapper(model, mp_mode=cfg.mp_mode,
+                 qinput_prune=cfg.qinput_prune, rh_prune=cfg.rh_prune,
+                 rh_to_q=cfg.rh_input_to_q, include_q_input=cfg.include_q_input, use_ar_noise=False, 
+                 snowhice_fix=cfg.snowhice_fix, v5_input=cfg.v4_to_v5_inputs, is_stochastic=is_stochastic, add_stochastic_layer=model.add_stochastic_layer,
+                 perturb=False, return_det=False)
+                scripted_model_wrapped_gpu = scripted_model_wrapped_gpu.to(device)
+                scripted_model_wrapped_gpu = torch.jit.script(scripted_model_wrapped_gpu)
+                scripted_model_wrapped_gpu = scripted_model_wrapped_gpu.eval()
+                scripted_model_wrapped_gpu = torch.jit.optimize_for_inference(scripted_model_wrapped_gpu)
+                save_file_torch_wrap = SAVE_PATH.split(".pt")[0] + "_script_gpu_wrapped.pt"
+                scripted_model_wrapped_gpu.save(save_file_torch_wrap)
+
                 model = model.to("cpu")
-                scripted_model = torch . jit . script ( model )
-                scripted_model = scripted_model.eval()
-                # scripted_model = torch.jit.freeze(scripted_model)  
-                scripted_model.save(save_file_torch2)
+                scripted_model_wrapped_cpu = model_wrapper(model, mp_mode=cfg.mp_mode,
+                            qinput_prune=cfg.qinput_prune, rh_prune=cfg.rh_prune,
+                            rh_to_q=cfg.rh_input_to_q, include_q_input=cfg.include_q_input, use_ar_noise=False, 
+                            snowhice_fix=cfg.snowhice_fix, v5_input=cfg.v4_to_v5_inputs,  is_stochastic=is_stochastic, add_stochastic_layer=model.add_stochastic_layer,
+                            perturb=False, return_det=False)
+                scripted_model_wrapped_cpu = torch.jit.script(scripted_model_wrapped_cpu)
+                scripted_model_wrapped_cpu = scripted_model_wrapped_cpu.eval()
+                scripted_model_wrapped_cpu = torch.jit.optimize_for_inference(scripted_model_wrapped_cpu)
+                save_file_torch_wrap = SAVE_PATH.split(".pt")[0] + "_script_cpu_wrapped.pt"
+                scripted_model_wrapped_cpu.save(save_file_torch_wrap)
+    
                 best_val_loss = val_loss 
                 model = model.to(device)
                 model.train(True)
