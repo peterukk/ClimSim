@@ -237,7 +237,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # Option for using TripleClouds-style solver where fluxes are computed in each sub-grid region (nreg) and g-point,
           # then summed over the regions
           # The vertical overlap between regions is handled by a matrix (v_matrix) which is here predicted with a convolutional layer
-          self.experimental_rad       = True   
+          self.experimental_rad       = False   
           # McICA-style sampling of sub-grid cloud states for each g-point
           self.use_mcica              = cfg.use_mcica # False 
           if self.experimental_rad:
@@ -622,6 +622,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             # print("mean max qv ex", qv_excess.mean().item(), qv_excess.max().item())
             dqv = dqv -  qv_excess*self.yscale_lev[self.ilev_crm:,1:2].unsqueeze(2)
             dqn = dqn +  qv_excess*self.yscale_lev[self.ilev_crm:,2:3].unsqueeze(2)
+            if self.pred_subgrid_liq_frac or self.pred_subgrid_temp:
+              liq_frac    = self.temperature_scaling(temp); ice_frac = 1 - liq_frac
             net_condensation =  (1/self.cp)*((liq_frac*self.Lv + ice_frac*self.Ls)*qv_excess)* self.yscale_lev[self.ilev_crm:,0:1].unsqueeze(2)
             # print("mean max dT", out_new[:,self.ilev_crm:,0:1].mean().item(), out_new[:,self.ilev_crm:,0:1].max().item())
             # print("mean max cond", net_condensation.mean().item(), net_condensation.max().item())
