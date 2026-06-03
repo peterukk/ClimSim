@@ -113,14 +113,15 @@ concat: false
 # Microphysics options
 ice_sedimentation: true
 pred_subgrid_temp: false
+pred_subgrid_liq_frac: true
 use_clear_sky_region: true
 
 # Radiation options
 separate_radiation: false
-use_physrad: false
+use_physrad: true
 use_mcica: false
 use_e3sm_cloud_optics: true
-map_e3sm_cloud_optics: false
+map_e3sm_cloud_optics: true
 existing_gasopt_file_lw: None
 existing_gasopt_file_sw: None 
 ng_lw: 16 
@@ -138,7 +139,7 @@ use_wandb: true
 num_epochs: 100
 lr: 0.001
 timestepped_optimizer: false
-mp_autocast: true
+mp_autocast: false
 use_scaler: true
 shuffle_data: false
 timestep_scheduling: true

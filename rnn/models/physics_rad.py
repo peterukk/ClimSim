@@ -423,23 +423,36 @@ def adding_ica_sw(
         )
 
 @torch.compile(dynamic=False)
-def adding_tc_sw_batchlast_opt(incoming_toa, albedo_surf_diffuse, albedo_surf_direct,
-                reflectance, transmittance, ref_dir, trans_dir_diff, trans_dir_dir, V, nreg):
+def adding_tc_sw_batchlast_opt(
+        incoming_toa: Tensor,
+        albedo_surf_diffuse: Tensor,
+        albedo_surf_direct: Tensor,
+        R: Tensor,
+        T: Tensor,
+        ref_dir: Tensor,
+        T_dir_diff: Tensor,
+        T_dir_dir: Tensor,
+        V: Tensor, 
+        nreg: int) -> Tuple[Tensor, Tensor, Tensor]:
+
         """
         Adding method for shortwave radiation, experimental TripleClouds version
         Requires overlap matrix V
 
         Args are torch.Tensors:
           incoming_toa[nbatch], albedo_surf_diffuse[nbatch], albedo_surf_diffuse[nbatch],
-          reflectance[nlev,nbatch], transmittance[nlev,nbatch], ref_dir[nlev,nbatch], trans_dir_diff[nlev,nbatch],
-          trans_dir_dir[nlev,nbatch], V[nlev,nbatch]
+          R[nlev,nbatch], T[nlev,nbatch], ref_dir[nlev,nbatch], T_dir_diff[nlev,nbatch],
+          T_dir_dir[nlev,nbatch], V[nlev,nbatch]
+
+        Not done, this bit is missing!:
+        https://github.com/peterukk/ecrad-opt/blob/clean_no_opt_testing/radiation/radiation_tripleclouds_sw.F90#L624
 
         Returns:
             tuple: (flux_up, flux_dn_diffuse, flux_dn_direct) each of shape [nbatch, nlev+1]
         """
-        
-        nlev, nbatch = reflectance.shape
-        device = reflectance.device
+
+        nlev, nbatch = R.shape
+        device = R.device
         
         # Set surface albedo
         albedo = torch.jit.annotate(List[Tensor], [])
@@ -452,39 +465,30 @@ def adding_tc_sw_batchlast_opt(incoming_toa, albedo_surf_diffuse, albedo_surf_di
 
         # Work up through the atmosphere and compute the albedo of the entire earth/atmosphere system below that half-level
         for jlev in range(nlev-1, -1, -1):  # nlev down to 1 in Fortran indexing
-
-            # comparing ecRad Tripleclouds code to the McICA code, "source" variable  is like fluxdndir*albedodir
-            # If we use albedodir instead (like in TripleClouds), we dont need to precompute fluxdndir in a separate loop, so just two vertical loops
-            # Adapted from https://github.com/ecmwf-ifs/ecrad/blob/master/radiation/radiation_tripleclouds_sw.F90
             albedodir0 = (ref_dir[jlev] +
-                                    (trans_dir_dir[jlev]*albedodir0 + trans_dir_diff[jlev]*albedo0) *
-                                    transmittance[jlev] / (1.0 - albedo0 * reflectance[jlev])) #*V[jlev] #* inv_denom)  
+                                    (T_dir_dir[jlev]*albedodir0 + T_dir_diff[jlev]*albedo0) *
+                                    T[jlev] / (1.0 - albedo0 * R[jlev]))  
             
-            albedodir0 = albedodir0.view(-1,nreg)
+            albedodir0 = albedodir0.view(-1,1,nreg)
             Vmat = V[jlev].view(-1,nreg,nreg)
-            # for nreg=3:
+            # Account for cloud overlap when computing albedo, using direction overlap matrix V for nreg=3 this is:
             # A[:,1] =  A[:,1]*V[:,1,1] + A[:,2]*V[:,2,1] + A[:,3]*V[:,3,1]
             # A[:,2] =  A[:,1]*V[:,1,2] + A[:,2]*V[:,2,2] + A[:,3]*V[:,3,2]
             # A[:,3] =  A[:,1]*V[:,1,3] + A[:,2]*V[:,2,3] + A[:,3]*V[:,3,3]
-            albedodir0 = torch.bmm(albedodir0.unsqueeze(1), Vmat).squeeze(1)
+            albedodir0 = torch.bmm(albedodir0, Vmat)
             albedodir0 = albedodir0.view(-1)
             albedodir  += [albedodir0]  
             
-            albedo0 = (reflectance[jlev] + torch.square(transmittance[jlev]) * albedo0  / (1.0 - albedo0 * reflectance[jlev])) #*V[jlev]
-            albedo0 = albedo0.view(-1,nreg)
-            albedo0 = torch.bmm(albedo0.unsqueeze(1), Vmat).squeeze(1)
+            albedo0 = R[jlev] + torch.square(T[jlev]) * albedo0  / (1.0 - albedo0 * R[jlev]) 
+            albedo0 = albedo0.view(-1,1,nreg)
+            albedo0 = torch.bmm(albedo0, Vmat)
             albedo0 = albedo0.view(-1)
 
 
             albedo  += [albedo0]
 
-            # TripleClouds :
-            # ng_nreg = self.nreg//3 
-            # A[:,1,lev]            = A[:,1,jlev]*V[1,1] + A[:,2,jlev]*V[2,1] + A[:,3,jlev]*V[3,1]
-            # A[:,2,jlev]           = A[:,1,jlev]*V[1,2] + A[:,2,jlev]*V[2,2] + A[:,3,jlev]*V[3,2]
-            # A[:,3,jlev]           = A[:,1,jlev]*V[1,3] + A[:,2,jlev]*V[2,3] + A[:,3,jlev]*V[3,3]         
-            # A[jlev]           = A[jlev]*V[jlev]
 
+        # Reverse arrays because next loop will go from top-of-atmosphere to surface
         albedo.reverse(); albedodir.reverse()
         
         # At top-of-atmosphere, all upwelling radiation is due to scattering by the direct beam below that level
@@ -504,27 +508,29 @@ def adding_tc_sw_batchlast_opt(incoming_toa, albedo_surf_diffuse, albedo_surf_di
         # Work back down through the atmosphere computing the fluxes at each half-level
         for jlev in range(nlev):  # 1 to nlev in Fortran indexing
 
-            fluxdndiff = (transmittance[jlev]*fluxdndiff + fluxdndir 
-                    * (transmittance[jlev]*albedodir[jlev + 1]*reflectance[jlev]  + trans_dir_diff[jlev] ) 
-                    / (1.0-  reflectance[jlev]*albedo[jlev + 1])) 
+            fluxdndiff = (T[jlev]*fluxdndiff 
+                + fluxdndir * (T[jlev]*albedodir[jlev+1]*R[jlev] + T_dir_diff[jlev])) / (1.0 - R[jlev]*albedo[jlev+1])
 
-            # flux_dn_direct[jlev + 1] = fluxdndir * trans_dir_dir[jlev,:]
-            fluxdndir =  fluxdndir * trans_dir_dir[jlev,:]
+            fluxdndir =  fluxdndir * T_dir_dir[jlev,:]
+            # Apply cosine correction to direct flux..NOT HERE, already done to TOA incoming flux
+            # flux_dn_direct = fluxdndir * cos_sza
+            Vmat = V[jlev].view(-1,nreg,nreg)
+            fluxdndir   = fluxdndir.view(-1,nreg,1)
+            fluxdndiff  = fluxdndiff.view(-1,nreg,1)
+            fluxdndir   = torch.bmm(Vmat, fluxdndir)
+            fluxdndiff  = torch.bmm(Vmat, fluxdndiff)
+            fluxdndir   = fluxdndir.view(-1)
+            fluxdndiff  = fluxdndiff.view(-1)
+
             flux_dn_direct  += [fluxdndir]
             flux_dn_diffuse += [fluxdndiff]
 
-            # flux_up[jlev+1] =  fluxdndir*albedodir[jlev+1] + fluxdndiff* albedo[jlev + 1]
             fluxup = fluxdndir*albedodir[jlev+1] + fluxdndiff* albedo[jlev + 1]
             flux_up += [fluxup]       
-            # Apply cosine correction to direct flux
-            # flux_dn_direct[:, jlev] = fluxdndir * cos_sza
         
         flux_dn_direct  = torch.stack(flux_dn_direct)
         flux_dn_diffuse = torch.stack(flux_dn_diffuse)
         flux_up = torch.stack(flux_up)
-
-        # Final cosine correction for surface direct flux
-        # flux_dn_direct[:, nlev] = flux_dn_direct[:, nlev] * cos_sza
         
         return flux_up, flux_dn_diffuse, flux_dn_direct
     
@@ -581,3 +587,290 @@ def stratified_sample(p: torch.Tensor, G: int) -> torch.Tensor:
     # x_sampled = torch.gather(x_flat, dim=-1, state_indices)             # (B, G)
 
     return state_indices
+
+"""
+PyTorch port of calc_beta_overlap_matrix and calc_overlap_matrices_nocol
+from Shonk et al. (2010) / Hogan & Illingworth (2000).
+ 
+Conventions
+-----------
+* nreg = 3 (hard-coded; all region loops are fully unrolled).
+* Tensor layout: (nreg, nlev, nbatch)  —  nreg is the innermost logical
+  axis but outermost memory axis so that slices like t[0], t[1], t[2]
+  are contiguous, enabling fast batched arithmetic on GPU.
+* Level index 0 = top-of-atmosphere, index nlev-1 = lowest model level,
+  matching the Fortran convention (1-based there, 0-based here).
+* The output v_matrix has shape (nreg, nreg, nlev+1, nbatch):
+    v_matrix[jlower, jupper, jlev, :] = overlap_matrix[jupper, jlower]
+                                         / frac_upper[jupper]
+  i.e. the same definition as the Fortran.
+"""
+ 
+# ---------------------------------------------------------------------------
+# Internal helper: batched beta overlap matrix
+# ---------------------------------------------------------------------------
+@torch.compile(dynamic=False)
+def _calc_beta_overlap_matrix(
+    op: Tensor,           # (3, nbatch)
+    frac_upper: Tensor,   # (3, nbatch)
+    frac_lower: Tensor,   # (3, nbatch)
+    frac_threshold: float,
+) -> Tensor:
+    """
+    Compute the (3, 3, nbatch) overlap matrix for one interface.
+ 
+    Implements Eq. (A1)-(A2) of Shonk et al. (2010):
+ 
+        overlap_matrix[i, j] =
+            op_x_frac_min[i] * delta(i,j)          (maximum part)
+          + factor * (frac_lower[j] - op_x_frac_min[j])
+                   * (frac_upper[i] - op_x_frac_min[i])  (random part)
+ 
+    where  op_x_frac_min[i] = op[i] * min(frac_upper[i], frac_lower[i])
+    and    factor = 1 / (1 - sum_i op_x_frac_min[i]).
+ 
+    Parameters
+    ----------
+    op, frac_upper, frac_lower : (3, nbatch) tensors
+    frac_threshold : scalar float
+ 
+    Returns
+    -------
+    overlap_matrix : (3, 3, nbatch)  —  first index = jupper, second = jlower
+    """
+    # --- op_x_frac_min[i] = op[i] * min(frac_upper[i], frac_lower[i]) ---
+    # Unrolled for nreg = 3
+    oxm0 = op[0] * torch.minimum(frac_upper[0], frac_lower[0])  # (nbatch,)
+    oxm1 = op[1] * torch.minimum(frac_upper[1], frac_lower[1])
+    oxm2 = op[2] * torch.minimum(frac_upper[2], frac_lower[2])
+ 
+    # --- denominator = 1 - sum(op_x_frac_min) ---
+    denominator = 1.0 - (oxm0 + oxm1 + oxm2)                    # (nbatch,)
+ 
+    # --- random part: factor * outer((frac_upper - oxm), (frac_lower - oxm)) ---
+    valid = denominator >= frac_threshold                         # (nbatch,) bool
+    factor = torch.where(valid, 1.0 / denominator.clamp(min=frac_threshold),
+                         torch.zeros_like(denominator))           # (nbatch,)
+ 
+    # residual fracs for upper and lower (3, nbatch)
+    ru0 = frac_upper[0] - oxm0
+    ru1 = frac_upper[1] - oxm1
+    ru2 = frac_upper[2] - oxm2
+ 
+    rl0 = frac_lower[0] - oxm0
+    rl1 = frac_lower[1] - oxm1
+    rl2 = frac_lower[2] - oxm2
+ 
+    # Random part (9 elements, fully unrolled):
+    # m[jupper, jlower] = factor * ru[jupper] * rl[jlower]
+    # but only where denominator >= frac_threshold (factor is already zeroed)
+    m00 = factor * ru0 * rl0
+    m01 = factor * ru0 * rl1
+    m02 = factor * ru0 * rl2
+    m10 = factor * ru1 * rl0
+    m11 = factor * ru1 * rl1
+    m12 = factor * ru1 * rl2
+    m20 = factor * ru2 * rl0
+    m21 = factor * ru2 * rl1
+    m22 = factor * ru2 * rl2
+ 
+    # Add maximum part on diagonal:
+    # overlap_matrix[jreg, jreg] += op_x_frac_min[jreg]
+    m00 = m00 + oxm0
+    m11 = m11 + oxm1
+    m22 = m22 + oxm2
+ 
+    # Stack into (3, 3, nbatch): first dim = jupper, second = jlower
+    row0 = torch.stack([m00, m01, m02], dim=0)   # (3, nbatch)
+    row1 = torch.stack([m10, m11, m12], dim=0)
+    row2 = torch.stack([m20, m21, m22], dim=0)
+    overlap_matrix = torch.stack([row0, row1, row2], dim=0)      # (3, 3, nbatch)
+ 
+    return overlap_matrix
+ 
+ 
+# ---------------------------------------------------------------------------
+# Public function: batched directional overlap matrices
+# ---------------------------------------------------------------------------
+@torch.compile(dynamic=False)
+def calc_overlap_matrices(
+    region_fracs: Tensor,
+    overlap_param: Tensor,
+    cloud_fraction_threshold: float = 1.0e-20,
+) -> Tensor:
+    """
+    Compute the downward (v) and upward (u) directional overlap matrices
+    for all interfaces in a batched column set.
+ 
+    This is a PyTorch port of ``calc_overlap_matrices_nocol`` (nreg=3,
+    all region loops unrolled).
+ 
+    Parameters
+    ----------
+    region_fracs : Tensor, shape (nlev, 3, nbatch)
+        Area fraction of each region at each model level.
+        Region 0 is clear sky; regions 1 and 2 are cloudy.
+        Level 0 = top-of-atmosphere.
+ 
+    overlap_param : Tensor, shape (nlev-1, nbatch)
+        beta (Shonk et al. 2010) overlap parameter for each interior interface.
+ 
+    cloud_fraction_threshold : float, optional
+        Regions smaller than this fraction are ignored (default 1e-20).
+ 
+    Returns
+    -------
+    v_matrix : Tensor, shape (3, 3, nlev+1, nbatch)
+        Downward directional overlap matrix.
+        ``v_matrix[jlower, jupper, jlev, :]`` gives the fraction of
+        upwelling flux from region ``jupper`` above interface ``jlev``
+        that enters region ``jlower`` below that interface.
+ 
+    Notes
+    -----
+    * Interface ``jlev=0``       is top-of-atmosphere (TOA).
+    * Interface ``jlev=nlev``    is the surface.
+    * The op scaling for cloudy regions (op[1:] = op[0]**2 when op[0]>=0,
+      else op[1:] = op[0]) matches the Fortran exactly.
+    """
+    frac_th = cloud_fraction_threshold
+    nlev, nreg, nbatch = region_fracs.shape
+    assert nreg == 3, "This implementation is hard-coded for nreg=3"
+    assert overlap_param.shape == (nlev - 1, nbatch), (
+        f"overlap_param must be (nlev-1={nlev-1}, nbatch={nbatch}), "
+        f"got {overlap_param.shape}"
+    )
+ 
+    device = region_fracs.device
+    dtype  = region_fracs.dtype
+    nlev_p1 = nlev + 1
+ 
+    v_matrix = torch.zeros(3, 3, nlev_p1, nbatch, device=device, dtype=dtype)
+    zeros_b = torch.zeros(nbatch, device=device, dtype=dtype)
+    zeros_rb = torch.zeros(3, nbatch, device=device, dtype=dtype)
+    # TOA: upper layer = single clear-sky region
+    frac_upper = torch.zeros(3, nbatch, device=device, dtype=dtype)
+    frac_upper[0] = 1.0   # clear-sky region fraction = 1
+ 
+    # op is irrelevant when only one region is present in the upper layer;
+    # setting it to 1 reproduces the Fortran initialisation.
+    op = torch.ones(3, nbatch, device=device, dtype=dtype)
+ 
+    for jlev in range(nlev_p1):
+ 
+        # ---- frac_lower: fraction of each region just below interface ----
+        if jlev < nlev:
+            frac_lower = region_fracs[jlev, :, :]      # (3, nbatch)
+        else:
+            # Surface: single clear-sky region
+            frac_lower = zeros_rb
+            frac_lower[0] = 1.0
+ 
+        # ---- overlap parameter for this interface ----
+        if jlev == 0 or jlev >= nlev:
+            # TOA or surface: op irrelevant → set to 1
+            op = torch.ones(3, nbatch, device=device, dtype=dtype)
+        else:
+            # Interior interface: index into overlap_param (0-based: jlev-1)
+            op0 = overlap_param[jlev - 1]              # (nbatch,)
+            op = torch.empty(3, nbatch, device=device, dtype=dtype)
+            op[0] = op0
+            # Cloudy regions: square when non-negative, same when negative
+            op[1] = torch.where(op0 >= 0.0, op0 * op0, op0)
+            op[2] = op[1]
+ 
+        # ---- (3, 3, nbatch) non-directional overlap matrix ----
+        # overlap_matrix = _calc_beta_overlap_matrix(
+        #     op, frac_upper, frac_lower, frac_th
+        # )
+ 
+        oxm0 = op[0] * torch.minimum(frac_upper[0], frac_lower[0])  # (nbatch,)
+        oxm1 = op[1] * torch.minimum(frac_upper[1], frac_lower[1])
+        oxm2 = op[2] * torch.minimum(frac_upper[2], frac_lower[2])
+    
+        # --- denominator = 1 - sum(op_x_frac_min) ---
+        denominator = 1.0 - (oxm0 + oxm1 + oxm2)                    # (nbatch,)
+    
+        # --- random part: factor * outer((frac_upper - oxm), (frac_lower - oxm)) ---
+        valid = denominator >= frac_th                         # (nbatch,) bool
+        factor = torch.where(valid, 1.0 / denominator.clamp(min=frac_th),
+                            torch.zeros_like(denominator))           # (nbatch,)
+    
+        # residual fracs for upper and lower (3, nbatch)
+        ru0 = frac_upper[0] - oxm0
+        ru1 = frac_upper[1] - oxm1
+        ru2 = frac_upper[2] - oxm2
+    
+        rl0 = frac_lower[0] - oxm0
+        rl1 = frac_lower[1] - oxm1
+        rl2 = frac_lower[2] - oxm2
+    
+        # Random part (9 elements, fully unrolled):
+        # m[jupper, jlower] = factor * ru[jupper] * rl[jlower]
+        # but only where denominator >= frac_th (factor is already zeroed)
+        m00 = factor * ru0 * rl0
+        m01 = factor * ru0 * rl1
+        m02 = factor * ru0 * rl2
+        m10 = factor * ru1 * rl0
+        m11 = factor * ru1 * rl1
+        m12 = factor * ru1 * rl2
+        m20 = factor * ru2 * rl0
+        m21 = factor * ru2 * rl1
+        m22 = factor * ru2 * rl2
+    
+        # Add maximum part on diagonal:
+        # overlap_matrix[jreg, jreg] += op_x_frac_min[jreg]
+        m00 = m00 + oxm0
+        m11 = m11 + oxm1
+        m22 = m22 + oxm2
+    
+        # Stack into (3, 3, nbatch): first dim = jupper, second = jlower
+        row0 = torch.stack([m00, m01, m02], dim=0)   # (3, nbatch)
+        row1 = torch.stack([m10, m11, m12], dim=0)
+        row2 = torch.stack([m20, m21, m22], dim=0)
+        overlap_matrix = torch.stack([row0, row1, row2], dim=0)      # (3, 3, nbatch)
+    
+
+        # ---- convert to directional v_matrix and u_matrix ----
+        # v_matrix[jlower, jupper, jlev] = overlap_matrix[jupper, jlower]
+        #                                  / frac_upper[jupper]
+        # u_matrix[jupper, jlower, jlev] = overlap_matrix[jupper, jlower]
+        #                                  / frac_lower[jlower]
+        #
+        # Fully unrolled (jupper in 0..2, jlower in 0..2):
+ 
+        # for jupper in range(3):
+        #     fu = frac_upper[jupper]                    # (nbatch,) 
+        #     valid_upper = fu >= frac_th                # (nbatch,) bool
+        #     inv_fu = torch.where(valid_upper, 1.0 / fu.clamp(min=frac_th),
+        #                          torch.zeros_like(fu))
+ 
+        #     om_val = overlap_matrix[jupper, 0]  # (nbatch,)
+        #     v_matrix[0, jupper, jlev] = torch.where(valid_upper, om_val * inv_fu, zeros_b)
+        #     om_val = overlap_matrix[jupper, 1]  # (nbatch,)
+        #     v_matrix[1, jupper, jlev] = torch.where(valid_upper, om_val * inv_fu, zeros_b)
+        #     om_val = overlap_matrix[jupper, 2]  # (nbatch,)
+        #     v_matrix[2, jupper, jlev] = torch.where(valid_upper, om_val * inv_fu, zeros_b)          
+        # 
+        jupper=0
+        fu = frac_upper[jupper]                    # (nbatch,) 
+        inv_fu = 1.0 / fu.clamp(min=frac_th)
+        v_matrix[0, jupper, jlev] = overlap_matrix[jupper, 0] * inv_fu
+        v_matrix[1, jupper, jlev] = overlap_matrix[jupper, 1] * inv_fu
+        v_matrix[2, jupper, jlev] = overlap_matrix[jupper, 2] * inv_fu           
+        jupper=1
+        fu = frac_upper[jupper]                    # (nbatch,) 
+        inv_fu = 1.0 / fu.clamp(min=frac_th)
+        v_matrix[0, jupper, jlev] = overlap_matrix[jupper, 0] * inv_fu
+        v_matrix[1, jupper, jlev] = overlap_matrix[jupper, 1] * inv_fu
+        v_matrix[2, jupper, jlev] = overlap_matrix[jupper, 2] * inv_fu     
+        jupper=2
+        fu = frac_upper[jupper]                    # (nbatch,) 
+        inv_fu = 1.0 / fu.clamp(min=frac_th)
+        v_matrix[0, jupper, jlev] = overlap_matrix[jupper, 0] * inv_fu
+        v_matrix[1, jupper, jlev] = overlap_matrix[jupper, 1] * inv_fu
+        v_matrix[2, jupper, jlev] = overlap_matrix[jupper, 2] * inv_fu     
+        # Slide the window down
+        frac_upper = frac_lower
+ 
+    return v_matrix
