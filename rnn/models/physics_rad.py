@@ -370,10 +370,6 @@ def adding_ica_sw_inference(
         albedo   [k + 1] = alb0
         albedodir[k + 1] = adir0
 
-    # albedo   [0]    = surface,  albedo   [nlev] = TOA (bottom-up order)
-    # For downward sweep: albedo below level jlev (0=TOA) = albedo[nlev - jlev]
-    # (same indexing as the fixed Triton kernel)
-
     # --- Downward sweep ---
     flux_up         = torch.empty(nlev + 1, nbatch, dtype=reflectance.dtype,
                                    device=reflectance.device)
@@ -396,8 +392,7 @@ def adding_ica_sw_inference(
         below = nlev - (jlev + 1)
         alb1  = albedo   [below]
         adir1 = albedodir[below]
-        inv_denom  = 1.0 / (1.0 - R * alb1)
-        fluxdndiff = ((T * fluxdndiff  + fluxdndir * (T * adir1 * R + trans_dir_diff[jlev])) * inv_denom)
+        fluxdndiff = ((T * fluxdndiff  + fluxdndir * (T * adir1 * R + trans_dir_diff[jlev])) / (1.0 - R * alb1))
         fluxdndir  = fluxdndir * trans_dir_dir[jlev]
         flux_dn_direct [jlev + 1] = fluxdndir
         flux_dn_diffuse[jlev + 1] = fluxdndiff
@@ -443,9 +438,6 @@ def adding_tc_sw_batchlast_opt(
           incoming_toa[nbatch], albedo_surf_diffuse[nbatch], albedo_surf_diffuse[nbatch],
           R[nlev,nbatch], T[nlev,nbatch], ref_dir[nlev,nbatch], T_dir_diff[nlev,nbatch],
           T_dir_dir[nlev,nbatch], V[nlev,nbatch]
-
-        Not done, this bit is missing!:
-        https://github.com/peterukk/ecrad-opt/blob/clean_no_opt_testing/radiation/radiation_tripleclouds_sw.F90#L624
 
         Returns:
             tuple: (flux_up, flux_dn_diffuse, flux_dn_direct) each of shape [nbatch, nlev+1]
