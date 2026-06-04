@@ -109,6 +109,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         self.outgoing_lw = outgoing_lw
         self.slingo_liq_cloud_optics_sw = slingo_liq_cloud_optics_sw 
         self.ec_ice_optics_sw = ec_ice_optics_sw
+        self.specific_to_relative_humidity_torch_cc = specific_to_relative_humidity_torch_cc
         self.printdebug = False
         # --------- Moist physics options configured in cfg ---------
         # 
@@ -618,7 +619,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         if self.condense_supersaturated_water and self.use_mp_constraint:
             qv_new = self.relu(qv_gcm + 1200*dqv/self.yscale_lev[self.ilev_crm:,1:2].unsqueeze(2))
             temp = self.relu(T_gcm + 1200*dT/self.yscale_lev[self.ilev_crm:,0:1].unsqueeze(2))
-            qv_excess = (1/1200) * specific_to_relative_humidity_torch_cc(qv_new, temp, play[self.ilev_crm:], return_excess=True)
+            qv_excess = (1/1200) * self.specific_to_relative_humidity_torch_cc(qv_new, temp, play[self.ilev_crm:], return_excess=True)
             # print("mean max qv ex", qv_excess.mean().item(), qv_excess.max().item())
             dqv = dqv -  qv_excess*self.yscale_lev[self.ilev_crm:,1:2].unsqueeze(2)
             dqn = dqn +  qv_excess*self.yscale_lev[self.ilev_crm:,2:3].unsqueeze(2)
