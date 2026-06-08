@@ -28,6 +28,46 @@ import types
 from typing import List, Tuple, Final, Optional
 from torchinfo import summary
 
+# Custom NN SW gas optics model in data/sw_gasopt_ng16_nh32_alpha0.10_*.pt
+# Band	Wavenum (cm⁻¹)	Wavelength (µm)	Summary
+# 1	250–4,200	40–2.38		Slingo band 4; thermal NIR, FSCK across weak-sun region
+# 2	4,200–14,500	2.38–0.69	Slingo bands 2+3; H₂O dominated NIR, bulk of solar absorption
+# 3	14,500–16,000	0.69–0.625	~ecCKD boundary; PAR boundary for surface scheme
+# 4	16,000–22,000	0.625–0.45	Chappuis O3, visible, following ecCKD
+# 5	22,000–50,000	0.45–0.20	UV O3, following ecCKD
+RRTMGP_SPLITS = [29, 80, 89, 102]
+WAVENUM_SPLITS = [4200, 14500, 16000, 22000]
+RRTMGP_BOUNDS = [0] + RRTMGP_SPLITS + [112]
+
+rrtmgp_sw_solar_source = np.array([6.12820864e+00, 1.93554282e+00, 1.54319978e+00, 1.27690256e+00,
+       1.40652704e+00, 1.16460764e+00, 7.08927751e-01, 2.38267854e-01,
+       2.80746706e-02, 1.17694791e-02, 4.77334785e+00, 1.41289794e+00,
+       1.27293468e+00, 1.10050285e+00, 9.01854932e-01, 6.76128566e-01,
+       5.17218471e-01, 1.23624638e-01, 2.81381297e+00, 3.00557232e+00,
+       5.66863489e+00, 2.44220829e+00, 2.09293270e+00, 1.71142864e+00,
+       1.28709555e+00, 8.72746885e-01, 2.37142861e-01, 7.54792467e-02,
+       1.25183547e-02, 1.40394878e+01, 2.73803902e+00, 2.34667730e+00,
+       1.90899801e+00, 1.42354560e+00, 9.49162960e-01, 1.84395134e-01,
+       1.53603226e-01, 1.25837536e+01, 2.71180558e+00, 2.37335634e+00,
+       1.95642138e+00, 1.47559214e+00, 1.00123644e+00, 2.00747490e-01,
+       1.24302901e-01, 4.75294888e-02, 2.67113037e+01, 7.30958319e+00,
+       6.03631353e+00, 5.62061834e+00, 4.40609169e+00, 3.24445391e+00,
+       2.19964290e+00, 5.95927954e-01, 1.87860548e-01, 3.17995884e-02,
+       3.11403217e+01, 1.48090706e+01, 1.36785355e+01, 1.23429213e+01,
+       1.07050667e+01, 8.77786350e+00, 6.60867500e+00, 4.48462725e+00,
+       1.21475983e+00, 3.84859681e-01, 6.44040853e-02, 2.31949425e+01,
+       1.04604650e+00, 3.37283015e-01, 4.99171652e-02, 1.98208115e+02,
+       4.07028351e+01, 3.51520119e+01, 2.87725449e+01, 2.16779995e+01,
+       1.48008184e+01, 2.95600963e+00, 1.83643174e+00, 7.06379771e-01,
+       6.58818970e+01, 1.23536774e+02, 1.37265377e+01, 9.39773273e+00,
+       1.87982345e+00, 6.74995661e-01, 4.97291356e-01, 3.21864963e-01,
+       1.38940498e-01, 6.36371384e+01, 5.73344421e+01, 5.15667915e+01,
+       4.37320633e+01, 6.95452805e+01, 2.47851944e+01, 3.38764839e+01,
+       3.05026073e+01, 2.82955513e+01, 2.06681805e+01, 2.53317261e+01,
+       9.47013569e+00, 1.57328901e+01, 1.47178793e+01, 1.07003822e+01,
+       7.69078016e+00, 5.15457249e+00, 3.30269527e+00, 1.45801985e+00,
+       2.81662321e+00, 6.26855314e-01, 6.99905515e-01, 1.50084317e+00], dtype=np.float32)
+
 class model_wrapper(nn.Module):
     qinput_prune: Final[bool]
     rh_prune: Final[bool]
@@ -265,7 +305,210 @@ def ccc(y_true, y_pred):
     ccc = 2 * cov / (var_true + var_pred + (mean_true - mean_pred)**2)
     return ccc
 
-# from pickle import dump
+
+
+
+class mlp_gasopt_inlined_processing(nn.Module):
+    """
+    Gas optics neural networks: differs from GasOpticsMLP in that the post-processing is inlined.
+    Can be used for a pre-trained gas optics model, in which case weights (nn_w1,..) and 
+    solar_source must be provided.
+    Contains the normalisation coefficients for pre-processing the inputs (xmin, xmax), 
+    and if using pre-trained models, also output scaling coefficients ymean, ystd. 
+    If we are training a new model from scratch, ny (number of g-points) and nh (hidden neurons) are hyperparameters.
+    """
+    lock_weights: Final[bool]
+    do_norm: Final[bool]
+    is_rrtmgp: Final[bool]
+    def __init__(self, device, 
+                xmin, xmax, ymean=None, ystd=None,
+                nn_w1=None, nn_w2=None, nn_w3=None,
+                nn_b1=None, nn_b2=None, nn_b3=None, 
+                solar_source=None,
+                lock_weights = True,
+                do_norm=False,
+                ny=16, nh=32,
+                band_bounds=None,
+                rrtmgp_bounds_in=None, 
+                wavenum_splits_in=None):
+        super(mlp_gasopt_inlined_processing, self).__init__()
+        self.nx = xmin.shape[0]
+        self.do_norm = False
+        if ymean is not None:
+          self.ny = ymean.shape[0]
+          self.ng = self.ny
+          ymean = torch.from_numpy(ymean[0:self.ny])
+          ystd  = torch.from_numpy(ystd[0:self.ny])
+          self.register_buffer('ymean', ymean)
+          self.register_buffer('ystd',  ystd)
+          print("Loaded existing y normalisation coefficients")
+          self.do_norm = True
+        else:
+          self.ny = ny 
+          self.ng = self.ny  
+          self.do_norm = do_norm
+          if self.do_norm:
+            self.ymean = 0 # # nn.Parameter(torch.zeros(self.ng)) 
+            self.ystd = 1# 0.00060 # nn.Parameter(torch.zeros(1)) 
+            print("Using learnable y normalisation coefficients (may not work)")
+        if self.ng==112:
+          self.is_rrtmgp=True #
+        else:
+          self.is_rrtmgp=False
+        if band_bounds is not None:
+          print("band bounds:", band_bounds)
+          self.band_bounds = band_bounds
+          if rrtmgp_bounds_in is not None:
+            self.rrtmgp_bounds = rrtmgp_bounds_in
+            self.wavenum_splits = wavenum_splits_in  
+          else:
+            self.rrtmgp_bounds = RRTMGP_BOUNDS
+            self.wavenum_splits = WAVENUM_SPLITS
+          # RRTMGP_BOUNDS = [0, 29, 80, 89, 102, 112]
+          # Band	Wavenum (cm⁻¹)	Wavelength (µm)	Rationale
+          # 1	250–4,200	40–2.38		Slingo band 4; thermal NIR, FSCK across weak-sun region
+          # 2	4,200–14,500	2.38–0.69	Slingo bands 2+3; H₂O dominated NIR, bulk of solar absorption
+          # 3	14,500–16,000	0.69–0.625	~ecCKD boundary; PAR boundary for surface scheme
+          # 4	16,000–22,000	0.625–0.45	Chappuis O₃, visible, following ecCKD
+          # 5	22,000–50,000	0.45–0.20	UV O₃, following ecCKD
+
+          self.num_bands = len(band_bounds) - 1 
+          print("Number of bands: {}".format(self.num_bands))
+          # self.register_buffer("band_bounds", band_bounds)
+        else:
+          self.num_bands = 1
+        print("do norm", do_norm)
+        if nn_w1 is not None:
+          self.nh = nn_w1.shape[1]
+        else:
+          self.nh = nh
+        xmin  = torch.from_numpy(xmin)
+        xmax  = torch.from_numpy(xmax)
+        xdiv = xmax - xmin
+        self.register_buffer('xmin', xmin)
+        self.register_buffer('xmax', xmax)
+        self.register_buffer('xdiv', xdiv)
+        self.softsign =  nn.Softsign()
+        self.softmax = nn.Softmax(dim=-1)
+        self.mlp1 = nn.Linear(self.nx, self.nh)
+        self.mlp2 = nn.Linear(self.nh, self.nh)
+        self.mlp3 = nn.Linear(self.nh, self.ny)
+        self.lock_weights=lock_weights
+        print("gasopt_mlp number of g-points: {}, hidden neurons: {}, inputs: {}".format(self.ng, self.nh, self.nx)) 
+        if solar_source is not None:
+          sw_solar_weights = torch.tensor(solar_source, device=device).unsqueeze(0)
+          self.register_buffer('sw_solar_weights', sw_solar_weights)
+        else:
+          self.sw_solar_weights = nn.Parameter(torch.zeros(1, self.ng)) 
+          self.softmax_dim1 = nn.Softmax(dim=1)
+          rrtmgp_sw_solar_weights = torch.tensor(rrtmgp_sw_solar_source, device=device).unsqueeze(0)
+          self.register_buffer('rrtmgp_sw_solar_weights', rrtmgp_sw_solar_weights)
+
+        if nn_w1 is not None:
+          self.mlp1.weight = torch.nn.Parameter(torch.from_numpy(nn_w1.T))
+          self.mlp2.weight = torch.nn.Parameter(torch.from_numpy(nn_w2.T))
+          self.mlp1.bias = torch.nn.Parameter(torch.from_numpy(nn_b1.T))
+          self.mlp2.bias = torch.nn.Parameter(torch.from_numpy(nn_b2.T))
+          self.mlp3.weight = torch.nn.Parameter(torch.from_numpy(nn_w3.T))
+          self.mlp3.bias = torch.nn.Parameter(torch.from_numpy(nn_b3.T))
+          if self.lock_weights:
+            self.mlp1.weight.requires_grad = False; self.mlp1.bias.requires_grad = False
+            self.mlp2.weight.requires_grad = False; self.mlp2.bias.requires_grad = False
+            self.mlp3.weight.requires_grad = False; self.mlp3.bias.requires_grad = False
+
+        self.to(device)
+
+    def forward(self, x, col_dry):
+        # print("weights locked, ", self.lock_weights)
+        x = self.mlp1(x)
+        x = self.softsign(x)
+        x = self.mlp2(x)
+        x = self.softsign(x)
+        x = self.mlp3(x)
+        tau = x 
+        # print("x shape", x.shape, "coldry", col_dry.shape, "ystd",self.ystd.shape)
+        # print("mean forward x", x.mean().item())
+
+        # print("x shape", x.shape, "coldry", col_dry.shape, "ystd",self.ystd.shape)
+        # Postprocessing inlined: reverse standard scaling and square root scaling, multiply with number of dry air molecules
+        if self.do_norm:
+          tau = col_dry * torch.pow(self.ystd*tau + self.ymean,8)
+        else:
+          tau = col_dry * torch.pow(tau,8)
+          # print("mean tau after coldry, pow8", tau.mean().item())
+
+        coeff=1e-17
+        return tau*coeff
+
+    def get_solar_weights(self):
+        if self.is_rrtmgp:
+          return self.sw_solar_weights
+        else:
+          RRTMGP_SPLITS
+          if self.num_bands==1:
+            solar_weights = torch.softmax(self.sw_solar_weights,dim=-1)
+          else:
+            # Compute target band fractions from RRTMGP solar source
+            # self.rrtmgp_sw_solar_source: (1, 112) or (112,)
+            rrtmgp_src = self.rrtmgp_sw_solar_weights.reshape(-1)  # (112,)
+            total = rrtmgp_src.sum()
+            p_b = torch.stack([
+                rrtmgp_src[self.rrtmgp_bounds[b]:self.rrtmgp_bounds[b+1]].sum() / total
+                for b in range(self.num_bands)
+            ])  # (nband,) — target fraction of total flux for each band
+
+            # For each band: softmax over the raw learned weights within that band,
+            # then scale so the band sums to its RRTMGP target fraction p_b
+            raw = self.sw_solar_weights.reshape(-1)  # (ng,)
+            band_weights = torch.cat([
+                torch.softmax(raw[self.band_bounds[b]:self.band_bounds[b+1]], dim=0) * p_b[b]
+                for b in range(self.num_bands)
+            ], dim=0)  # (ng,) — sums to 1.0 overall
+            # print("shape band weights", band_weights.shape)
+            return band_weights.unsqueeze(0)  # (1, ng) matching RRTMGP format
+        return solar_weights
+
+def load_reduced_gas_optics_model(
+    checkpoint_path: str,
+    device: torch.device,
+) -> mlp_gasopt_inlined_processing:
+    ckpt = torch.load(checkpoint_path, map_location=device)
+    state = ckpt["model_state_dict"]
+
+    # Recover architecture from weight shapes
+    ng = state["mlp3.weight"].shape[0]
+    nh = state["mlp1.weight"].shape[0]
+
+    do_norm     = ckpt.get("do_norm",     False)
+    band_bounds = ckpt.get("band_bounds", None)
+
+    xmin = state["xmin"].cpu().numpy()
+    xmax = state["xmax"].cpu().numpy()
+
+    model = mlp_gasopt_inlined_processing(
+        device=device,
+        xmin=xmin,
+        xmax=xmax,
+        ymean=None,
+        ystd=None,
+        nn_w1=None, nn_w2=None, nn_w3=None,
+        nn_b1=None, nn_b2=None, nn_b3=None,
+        solar_source=None,
+        band_bounds=band_bounds,
+        lock_weights=True,
+        ny=ng,
+        nh=nh,
+        do_norm=do_norm,
+    )
+
+    model.load_state_dict(state)
+    model.eval()
+
+    print(f"Loaded gas optics model from {checkpoint_path}")
+    print(f"  ng={ng}, nh={nh}, do_norm={do_norm}, band_bounds={band_bounds}")
+
+    return model
+    
 
 def load_gas_optics_model(gasopt_file, device, num_outputs_desired):#, lock_weights):
   import xarray as xr
@@ -277,13 +520,13 @@ def load_gas_optics_model(gasopt_file, device, num_outputs_desired):#, lock_weig
   else: 
       is_longwave=False 
 
-  nn_lw_w1 = ds['nn_weights_1'][:].values
-  nn_lw_w2 = ds['nn_weights_2'][:].values
-  nn_lw_w3 = ds['nn_weights_3'][:].values
+  nn_w1 = ds['nn_weights_1'][:].values
+  nn_w2 = ds['nn_weights_2'][:].values
+  nn_w3 = ds['nn_weights_3'][:].values
 
-  nn_lw_b1 = ds['nn_bias_1'][:].values
-  nn_lw_b2 = ds['nn_bias_2'][:].values
-  nn_lw_b3 = ds['nn_bias_3'][:].values
+  nn_b1 = ds['nn_bias_1'][:].values
+  nn_b2 = ds['nn_bias_2'][:].values
+  nn_b3 = ds['nn_bias_3'][:].values
 
   ynorm_lw_mean = ds['nn_output_coeffs_mean'][:].values 
   ynorm_lw_std =  ds['nn_output_coeffs_std'][:].values 
@@ -291,12 +534,12 @@ def load_gas_optics_model(gasopt_file, device, num_outputs_desired):#, lock_weig
   xnorm_lw_max = ds['nn_input_coeffs_max'][:].values 
   xnorm_lw_min =  ds['nn_input_coeffs_min'][:].values 
   # ng = 32
-  nn_lw = gasopt_mlp(device, xnorm_lw_min, xnorm_lw_max, 
+  nn = gasopt_mlp(device, xnorm_lw_min, xnorm_lw_max, 
                       ynorm_lw_mean, ynorm_lw_std,
-                      nn_lw_w1, nn_lw_w2, nn_lw_w3,
-                      nn_lw_b1, nn_lw_b2, nn_lw_b3, num_outputs_desired=num_outputs_desired, is_longwave=is_longwave)#, lock_weights=lock_weights)
-  infostr = summary(nn_lw)
-  return nn_lw 
+                      nn_w1, nn_w2, nn_w3,
+                      nn_b1, nn_b2, nn_b3, num_outputs_desired=num_outputs_desired, is_longwave=is_longwave)#, lock_weights=lock_weights)
+  infostr = summary(nn)
+  return nn 
 
 def eliq(T):
     """
@@ -573,7 +816,7 @@ class train_or_eval_one_epoch:
             if self.cfg.do_semi_online_training:
               x_pred = torch.zeros(self.batch_size*self.cfg.ensemble_size, self.model.nlev, 6, device=device)
               
-            loss_update_start_index = 60
+            loss_update_start_index = 0# 60
         else:
             loss_update_start_index = 0
             
@@ -1145,7 +1388,8 @@ class train_or_eval_one_epoch:
                             sfc_true = yto_sfc.reshape(-1,self.model.ny_sfc).cpu().numpy().transpose()
 
                             # for isfc in np.arange(self.model.ny_sfc):
-                            #   print("i=", isfc,"mean", sfc_pred[isfc].mean(), "max", sfc_pred[isfc].max())
+                            #   print("i=", isfc,"PRED mean", sfc_pred[isfc].mean(), "max", sfc_pred[isfc].max())
+                            #   print("i=", isfc,"TRUE mean", sfc_true[isfc].mean(), "max", sfc_true[isfc].max())
 
                             epoch_R2netsw += np.corrcoef((sfc_pred[0,:],sfc_true[0,:]))[0,1]**2
                             epoch_R2flwds += np.corrcoef((sfc_pred[1,:],sfc_true[1,:]))[0,1]**2

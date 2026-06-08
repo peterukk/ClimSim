@@ -56,7 +56,7 @@ print(device)
 
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from utils import train_or_eval_one_epoch, generator_xy, BatchSampler, plot_bias_diff,  load_gas_optics_model, model_wrapper
+from utils import train_or_eval_one_epoch, generator_xy, BatchSampler, plot_bias_diff,  load_gas_optics_model,load_reduced_gas_optics_model, model_wrapper
 import metrics as metrics
 from torchmetrics.regression import R2Score
 import wandb
@@ -522,28 +522,37 @@ def main(cfg: DictConfig):
         # torch._functorch.config.donated_buffer=False
 
         # Option 1: use full pretrained model + another MLP to reduce the number of g-points to desired
-        ng_lw = 128
-        ng_sw = 112 
-        # Option 2 - change the last layer of the pre-trained gas optics models so we can directly have a smaller spectral resolution
-        # without a separate decoder. Doesn't seem to really work
-        # ng_lw = cfg.ng_lw  
-        # ng_sw = cfg.ng_sw
+        # ng_lw = 128
+        # ng_sw = 112 
         mlp_gasopt_model_lw, mlp_gasopt_model_sw, mlp_gasopt_model_sw2  = None,None,None
         if cfg.existing_gasopt_file_lw != "None" and cfg.use_physrad:
           print("Loading pre-existing longwave gas optics model from {}".format(cfg.existing_gasopt_file_lw))
-          # from norm_coefficients import gasopt_lw_inp_max, gasopt_lw_inp_min, gasopt_lw_outp_mean, gasopt_lw_outp_std
-          # ng = 16
-          mlp_gasopt_model_lw = load_gas_optics_model(cfg.existing_gasopt_file_lw, device, num_outputs_desired=ng_lw)#, lock_weights=True)
-          # infostr = summary(mlp_gasopt_model_lw)
-          # print(infostr)
+
+          if "rrtmgp" in cfg.existing_gasopt_file_lw:
+            # from norm_coefficients import gasopt_lw_inp_max, gasopt_lw_inp_min, gasopt_lw_outp_mean, gasopt_lw_outp_std
+            # ng = 16
+            ng_lw = 128
+            mlp_gasopt_model_lw = load_gas_optics_model(cfg.existing_gasopt_file_lw, device, num_outputs_desired=ng_lw)#, lock_weights=True)
+            # infostr = summary(mlp_gasopt_model_lw)
+            # print(infostr)
 
         if cfg.existing_gasopt_file_sw != "None" and cfg.use_physrad:
           print("Loading pre-existing shortwave !ABSORPTION! gas optics model from {}".format(cfg.existing_gasopt_file_sw))
-          mlp_gasopt_model_sw = load_gas_optics_model(cfg.existing_gasopt_file_sw, device, num_outputs_desired=ng_sw)
-          existing_gasopt_file_sw2 = cfg.existing_gasopt_file_sw.replace('absorption', 'rayleigh')
-        # if cfg.existing_gasopt_file_sw2 != "None":
-          print("Loading pre-existing shortwave !RAYLEIGH! gas optics model from {}".format(existing_gasopt_file_sw2))
-          mlp_gasopt_model_sw2 = load_gas_optics_model(existing_gasopt_file_sw2, device, num_outputs_desired=ng_sw)
+          if "rrtmgp" in cfg.existing_gasopt_file_sw:
+            # Load older (Ukkonen & Hogan 2023) RRTMGP emulators from netCDF file
+            ng_sw = 112 
+            mlp_gasopt_model_sw = load_gas_optics_model(cfg.existing_gasopt_file_sw, device, num_outputs_desired=ng_sw)
+            existing_gasopt_file_sw2 = cfg.existing_gasopt_file_sw.replace('absorption', 'rayleigh')
+            print("Loading pre-existing shortwave !RAYLEIGH! gas optics model from {}".format(existing_gasopt_file_sw2))
+            mlp_gasopt_model_sw2 = load_gas_optics_model(existing_gasopt_file_sw2, device, num_outputs_desired=ng_sw)
+
+          else:
+            # Load newer, spectrally reduced (ng = 16) gas optics models with custom bands from a statedict
+            mlp_gasopt_model_sw  = load_reduced_gas_optics_model(
+                cfg.existing_gasopt_file_sw, device)#, model_key="gas_optics_model_sw_abs")
+            mlp_gasopt_model_sw2 = load_reduced_gas_optics_model(
+                cfg.existing_gasopt_file_sw2, device)#, model_key="gas_optics_model_sw_ray")
+            ng_sw = mlp_gasopt_model_sw.ng
 
         from models.models_phys import physical_RNN_autoreg
         model = physical_RNN_autoreg(cfg, coeffs, device,

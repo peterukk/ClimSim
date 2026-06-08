@@ -95,7 +95,15 @@ def reltab(
         return rel
 
 def slingo_liq_cloud_optics_sw(rel:torch.Tensor, ng:int=4):
+    # Input: rel (cloud liquid effective radius), ng (number of g-points/bands)
+    # Here we compute cloud optical properties using the Slingo scheme, which uses 4 different bands 
+    # We also inline the mapping of the cloud optical properties in these 4 bands to our g-point discretization
+    # If our gas optics model equals RRTMGP, then this function should give similar results as original E3SM code (links below)
+    # Note the McICA sampling is done outside - here we compute "normalized" cloud optical properties which are later multiplied 
+    # with cloud water paths which are sampled using McICA
     # Adapted from https://github.com/NVlabs/E3SM/blob/main/components/eam/src/physics/rrtmgp/slingo.F90#L32
+    # https://github.com/NVlabs/E3SM/blob/c92b443306bd8e7c3796ccc9966d43190da992d5/components/eam/src/physics/rrtmgp/radiation.F90#L1290
+    # Slingo look-up-table coefficients in vector form (length 4 equals number of bands)
     coeffs1 = torch.tensor([2.817e-02, 2.682e-02, 2.264e-02, 1.281e-02], dtype=rel.dtype, device=rel.device)  # A: extinction OD
     coeffs2 = torch.tensor([1.305,     1.346,     1.454,     1.641    ], dtype=rel.dtype, device=rel.device)  # B: extinction OD
     coeffs3 = torch.tensor([-5.62e-08, -6.94e-06, 4.64e-04,  0.201    ], dtype=rel.dtype, device=rel.device)  # C: single scat albedo
@@ -104,27 +112,43 @@ def slingo_liq_cloud_optics_sw(rel:torch.Tensor, ng:int=4):
     coeffs6 = torch.tensor([2.482e-03, 4.226e-03, 6.560e-03, 4.353e-03], dtype=rel.dtype, device=rel.device)  # F: asymmetry parameter
 
     re_um   = rel.clamp(4.2, 16.0)
-
+    # RRTMGP bands and g-points:
     # bnd_limits_gpt
-    # 1,10 | 11,18 | 19,29 | 30,37 | 38,46 | 47,56 | 57,67 | 68,71 | 72,80 | 81,89 | 90, 96 | 97, 102 | 103, 109 | 110, 112 
+    # 1,10     | 11,18    | 19,29    | 30,37   | 38,46     | 47,56     | 57,67     | 68,71      | 72,80      |  81,89    | 90, 96    | 97, 102   | 103, 109 | 110, 112 
     # bnd_limits_wavenumber
-    # 820, 2680 | 2680, 3250 | 3250, 4000 | 4000, 4650 | 4650, 5150  | 5150, 6150 | 6150, 7700 | 7700, 8050  | 12850, 16000 | 
-    # 16000, 22650 | 22650, 29000 | 29000, 38000 | 38000, 50000 |
-
-    # if ng=4 (default argument), we just output the original bands 
-    # if ng=112, we map to RRTMGP's g-points using knowledge of in which bands the 112 g-points are 
-    # if ng is anything else, we use a similar band allocation as RRTMGP (assuming N g-points are divided into the same bands)
-    if ng != 4:
-        i_lim1 = int(round((29/112)*ng))
-        i_lim2 = int(round((37/112)*ng))
-        i_lim3 = int(round((67/112)*ng))
-        i_lim4 = int(round((71/112)*ng))
-        i_lim5 = int(round((80/112)*ng))
-        i_lim6 = int(round((89/112)*ng))
-
+    # 820,2680 | 2680,3250 | 3250,4k | 4k,4650 | 4650,5150 | 5150,6150 | 6150,7700 | 7700,8050  | 8050,12850 | 12850,16k | 16k,22650 | 22650,29k | 29k,38k  | 38k,50k 
+    # in micrometers 
+    # 12.2,3.73| 3.73,3.08 | 3.08,2.5| 2.5,2.15| 2.15,1.94 | 1.94,1.63 | 1.63,1.3  | 1.3,1.24   | 1.24,0.78  | 0.78,0.62 | 0.62,0.44 | 0.44,0.34 | 0.34,0.26| 0.26  0.2 ]
+    # band 1        2         3           4           5         6             7         8              9           10         11          12         13         14
+    if ng == 4:
+        # if ng=4 (default argument), we just output the original bands (but reversed as RRTMGP uses different order as coeffs1, coeffs2..)
+        # We can then map to a custom gas optics scheme by a learned mapping
+        k       = (coeffs1 + coeffs2 / re_um)
+        ssa     = (1.0 - coeffs3 - re_um * coeffs4).clamp(max=0.999999)
+        g       = coeffs5 + re_um * coeffs6
+    else:
+        # if ng is not 4: 
+        #  For ng=112, we map to RRTMGP's g-points using knowledge of in which bands its 112 g-points are (should be equivalent to E3SM code)
+        #  if ng is anything else, we use a similar band allocation as RRTMGP (assuming N g-points are divided into the same bands as RRTMGP, just with fewer g-points in each)
         x = torch.stack([coeffs1, coeffs2, coeffs3, coeffs4, coeffs5, coeffs6])  
         y = torch.empty(6, ng, dtype=rel.dtype, device=rel.device)
 
+        i_lim_b4 = int(round((29/112)*ng))   # g-points 0..i_lim_b4      → Slingo band 4 (coeffs index 3)
+        i_lim_b3 = int(round((71/112)*ng))   # g-points i_lim_b4..i_lim_b3 → Slingo band 3 (coeffs index 2)
+        i_lim_b2 = int(round((80/112)*ng))   # g-points i_lim_b3..i_lim_b2 → Slingo band 2 (coeffs index 1)
+        #                                      g-points i_lim_b2..        → Slingo band 1 (coeffs index 0)
+
+        y[:, 0:i_lim_b4]         = x[:, 3:4]   # Slingo band 4
+        y[:, i_lim_b4:i_lim_b3]  = x[:, 2:3]   # Slingo band 3
+        y[:, i_lim_b3:i_lim_b2]  = x[:, 1:2]   # Slingo band 2
+        y[:, i_lim_b2:]          = x[:, 0:1]   # Slingo band 1
+
+        # i_lim1 = int(round((29/112)*ng))
+        # i_lim2 = int(round((37/112)*ng))
+        # i_lim3 = int(round((67/112)*ng))
+        # i_lim4 = int(round((71/112)*ng))
+        # i_lim5 = int(round((80/112)*ng))
+        # i_lim6 = int(round((89/112)*ng))
         # y[:, 0:i_lim1]      = x[:, 3:4]
         # y[:, i_lim1:i_lim2] = 0.5 * (x[:, 2:3] + x[:, 3:4])
         # y[:, i_lim2:i_lim3] = x[:, 2:3]
@@ -132,19 +156,60 @@ def slingo_liq_cloud_optics_sw(rel:torch.Tensor, ng:int=4):
         # y[:, i_lim4:i_lim5] = x[:, 1:2]
         # y[:, i_lim5:i_lim6] = 0.5 * (x[:, 0:1] + x[:, 1:2])
         # y[:, i_lim6:]       = x[:, 0:1]
-        y[:, 0:i_lim2]      = x[:, 3:4]   # band 4
-        y[:, i_lim2:i_lim4] = x[:, 2:3]   # band 3
-        y[:, i_lim4:i_lim5] = x[:, 1:2]   # band 2
-        y[:, i_lim5:]       = x[:, 0:1]   # band 1
-                
+        
+        # Original Fortran code for Slingo cloud optics computations in 4 specific bands commented out below:
+        # if(wavmax(ns) <= 0.7_r8) then
+        #     indxsl = 1
+        #  else if(wavmax(ns) <= 1.25_r8) then
+        #     indxsl = 2
+        #  else if(wavmax(ns) <= 2.38_r8) then
+        #     indxsl = 3
+        #  else if(wavmax(ns) > 2.38_r8) then
+        #     indxsl = 4
+        # end if
+        
+        # cld_tau_bnd_sw(ico,ilay,indxsl) = ....
+
+        # ! Fortran code for mapping from these bands to RRTMGP:
+        # real(r8),parameter :: wavenum_low(nbndsw) = & ! in cm^-1
+        # (/2600._r8, 3250._r8, 4000._r8, 4650._r8, 5150._r8, 6150._r8, 7700._r8, 8050._r8,12850._r8,16000._r8,22650._r8,29000._r8,38000._r8,  820._r8/)
+        # real(r8),parameter :: wavenum_high(nbndsw) = & ! in cm^-1
+        # (/3250._r8, 4000._r8, 4650._r8, 5150._r8, 6150._r8, 7700._r8, 8050._r8, 12850._r8,16000._r8,22650._r8,29000._r8,38000._r8,50000._r8, 2600._r8/)
+        # ! Mapping from old RRTMG sw bands to new band ordering in RRTMGP
+        # integer, parameter, dimension(14), public :: rrtmg_to_rrtmgp_swbands = (/ 14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 /)
+        
+        # ! We need to reorder the spectral bounds since we store them in RRTMG order in radconstants!
+        # lower_bounds = reordered(wavenum_low, rrtmg_to_rrtmgp_swbands)
+        # upper_bounds = reordered(wavenum_high, rrtmg_to_rrtmgp_swbands)
+
+        # ! Utility function to reorder an array given a new indexing
+        # function reordered(array_in, new_indexing) result(array_out)
+        #     ...
+        #     ! Reorder array based on input index mapping, which maps old indices to new
+        #     do ii = 1,size(new_indexing)
+        #         array_out(ii) = array_in(new_indexing(ii))
+        #     end do
+        # end function reordered
+        
+        # ! Do mapping from Slingo cloud optics bands to RRTMGP
+        # do icol = 1,size(cld_tau_bnd_sw,1)
+        #     do ilay = 1,size(cld_tau_bnd_sw,2)
+        #        cld_tau_bnd_sw(icol,ilay,:) = reordered(cld_tau_bnd_sw(icol,ilay,:), rrtmg_to_rrtmgp_swbands)
+        #        cld_ssa_bnd_sw(icol,ilay,:) = reordered(cld_ssa_bnd_sw(icol,ilay,:), rrtmg_to_rrtmgp_swbands)
+        #        cld_asm_bnd_sw(icol,ilay,:) = reordered(cld_asm_bnd_sw(icol,ilay,:), rrtmg_to_rrtmgp_swbands)
+        #     end do
+        #  end do
+        #  ! And now do the MCICA sampling to get cloud optical properties by gpoint/cloud state
+        #  call get_gpoint_bands_sw(gpoint_bands_sw)
+        #  call sample_cloud_optics_sw( &
+        #     ncol, pver, nswgpts, gpoint_bands_sw, &
+        #     state%pmid, cld, cldfsnow, &
+        #     cld_tau_bnd_sw, cld_ssa_bnd_sw, cld_asm_bnd_sw, &
+        #     cld_tau_gpt_sw, cld_ssa_gpt_sw, cld_asm_gpt_sw &
+        #  )          
         k       = (y[0] + y[1] / re_um)
         ssa     = (1.0 - y[2] - re_um * y[3]).clamp(max=0.999999)
         g       = y[4] + re_um * y[5]   
-    else:
-
-        k       = (coeffs1 + coeffs2 / re_um)
-        ssa     = (1.0 - coeffs3 - re_um * coeffs4).clamp(max=0.999999)
-        g       = coeffs5 + re_um * coeffs6
     return k, ssa, g 
 
 def ec_ice_optics_sw(rei:torch.Tensor, ng:int=4):
@@ -159,21 +224,18 @@ def ec_ice_optics_sw(rei:torch.Tensor, ng:int=4):
     re_um   = rei.clamp(13.0, 130.0)
 
     if ng != 4:
-        i_lim1 = int(round((29/112)*ng))
-        i_lim2 = int(round((37/112)*ng))
-        i_lim3 = int(round((67/112)*ng))
-        i_lim4 = int(round((71/112)*ng))
-        i_lim5 = int(round((80/112)*ng))
-        i_lim6 = int(round((89/112)*ng))
-
         x = torch.stack([coeffs1, coeffs2, coeffs3, coeffs4, coeffs5, coeffs6])  
         y = torch.empty(6, ng, dtype=rei.dtype, device=rei.device)
 
-        y[:, 0:i_lim2]      = x[:, 3:4]   # band 4
-        y[:, i_lim2:i_lim4] = x[:, 2:3]   # band 3
-        y[:, i_lim4:i_lim5] = x[:, 1:2]   # band 2
-        y[:, i_lim5:]       = x[:, 0:1]   # band 1
-        
+        i_lim_b4 = int(round((29/112)*ng))   # g-points 0..i_lim_b4      → Slingo band 4 (coeffs index 3)
+        i_lim_b3 = int(round((71/112)*ng))   # g-points i_lim_b4..i_lim_b3 → Slingo band 3 (coeffs index 2)
+        i_lim_b2 = int(round((80/112)*ng))   # g-points i_lim_b3..i_lim_b2 → Slingo band 2 (coeffs index 1)
+        #                                      g-points i_lim_b2..        → Slingo band 1 (coeffs index 0)
+        y[:, 0:i_lim_b4]         = x[:, 3:4]   # Slingo band 4
+        y[:, i_lim_b4:i_lim_b3]  = x[:, 2:3]   # Slingo band 3
+        y[:, i_lim_b3:i_lim_b2]  = x[:, 1:2]   # Slingo band 2
+        y[:, i_lim_b2:]          = x[:, 0:1]   # Slingo band 1
+
         k       = (y[0] + y[1] / re_um)
         ssa     = (1.0 - y[2] - re_um * y[3]).clamp(max=0.999999)
         g       = y[4] + re_um * y[5]   

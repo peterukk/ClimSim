@@ -124,6 +124,7 @@ use_e3sm_cloud_optics: true
 map_e3sm_cloud_optics: true
 existing_gasopt_file_lw: None
 existing_gasopt_file_sw: None 
+existing_gasopt_file_sw2: None 
 ng_lw: 16 
 ng_sw: 16
 
