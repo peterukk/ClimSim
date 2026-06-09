@@ -306,8 +306,6 @@ def ccc(y_true, y_pred):
     return ccc
 
 
-
-
 class mlp_gasopt_inlined_processing(nn.Module):
     """
     Gas optics neural networks: differs from GasOpticsMLP in that the post-processing is inlined.
@@ -356,7 +354,8 @@ class mlp_gasopt_inlined_processing(nn.Module):
         else:
           self.is_rrtmgp=False
         if band_bounds is not None:
-          print("band bounds:", band_bounds)
+          print("mlp_gasopt_inlined_processing band bounds:", band_bounds)
+          print("mlp_gasopt_inlined_processing RRTMGP bounds:",rrtmgp_bounds_in )
           self.band_bounds = band_bounds
           if rrtmgp_bounds_in is not None:
             self.rrtmgp_bounds = rrtmgp_bounds_in
@@ -364,19 +363,90 @@ class mlp_gasopt_inlined_processing(nn.Module):
           else:
             self.rrtmgp_bounds = RRTMGP_BOUNDS
             self.wavenum_splits = WAVENUM_SPLITS
-          # RRTMGP_BOUNDS = [0, 29, 80, 89, 102, 112]
-          # Band	Wavenum (cm⁻¹)	Wavelength (µm)	Rationale
-          # 1	250–4,200	40–2.38		Slingo band 4; thermal NIR, FSCK across weak-sun region
-          # 2	4,200–14,500	2.38–0.69	Slingo bands 2+3; H₂O dominated NIR, bulk of solar absorption
-          # 3	14,500–16,000	0.69–0.625	~ecCKD boundary; PAR boundary for surface scheme
-          # 4	16,000–22,000	0.625–0.45	Chappuis O₃, visible, following ecCKD
-          # 5	22,000–50,000	0.45–0.20	UV O₃, following ecCKD
 
           self.num_bands = len(band_bounds) - 1 
           print("Number of bands: {}".format(self.num_bands))
           # self.register_buffer("band_bounds", band_bounds)
         else:
           self.num_bands = 1
+
+        # if band_bounds is not None:
+        #     # RRTMGP band wavenumber limits, in the same g-point order as RRTMGP_BOUNDS
+        #     # Band 1: 820-2680, Band 2: 2680-3250, ..., Band 14: 38000-50000
+        #     # Plus a leading entry for the start of band 1 (820 cm-1) and 
+        #     # the SW lower limit (250 cm-1 is used conventionally but RRTMGP starts at 820)
+        #     RRTMGP_WAVENUM_LOW  = [820, 2680, 3250, 4000, 4650, 5150, 6150, 7700, 8050, 12850, 16000, 22650, 29000, 38000]
+        #     RRTMGP_WAVENUM_HIGH = [2680, 3250, 4000, 4650, 5150, 6150, 7700, 8050, 12850, 16000, 22650, 29000, 38000, 50000]
+        #     # Map from g-point index to RRTMGP band index (0-based)
+        #     # rrtmgp_bounds = [0, 29, 80, 89, 102, 112] means:
+        #     #   g-pts 0:29   → RRTMGP bands 0-2  (820–4000   cm-1)
+        #     #   g-pts 29:80  → RRTMGP bands 3-8  (4000–12850 cm-1)
+        #     #   g-pts 80:89  → RRTMGP band  9    (12850–16000 cm-1)
+        #     #   g-pts 89:102 → RRTMGP bands 10-11 (16000–29000 cm-1)
+        #     #   g-pts 102:112→ RRTMGP bands 12-13 (29000–50000 cm-1)
+        #     # Build a lookup: for each RRTMGP g-point boundary, what is the wavenumber?
+        #     # RRTMGP g-point band assignments (cumulative, 0-based band index):
+        #     RRTMGP_GPT_BOUNDS = [0, 10, 18, 29, 37, 46, 56, 67, 71, 80, 89, 96, 102, 109, 112]
+        #     # RRTMGP_GPT_BOUNDS[b]:RRTMGP_GPT_BOUNDS[b+1] are g-points of RRTMGP band b
+
+        #     def gpt_to_wavenum_low(gpt: int) -> int:
+        #         """Return the lower wavenumber of the RRTMGP band containing g-point gpt."""
+        #         for b in range(14):
+        #             if gpt <= RRTMGP_GPT_BOUNDS[b + 1]:
+        #                 return RRTMGP_WAVENUM_LOW[b]
+        #         return RRTMGP_WAVENUM_LOW[13]
+
+        #     def gpt_to_wavenum_high(gpt: int) -> int:
+        #         """Return the upper wavenumber of the RRTMGP band containing g-point gpt."""
+        #         for b in range(14):
+        #             if gpt <= RRTMGP_GPT_BOUNDS[b + 1]:
+        #                 return RRTMGP_WAVENUM_HIGH[b]
+        #         return RRTMGP_WAVENUM_HIGH[13]
+
+        #     # Derive wavenumber bounds for each custom band from rrtmgp_bounds
+        #     # rrtmgp_bounds[0]=0 → lower wavenumber of the band containing g-pt 0 = 820
+        #     # rrtmgp_bounds[1]=29 → g-pt 29 is the first g-pt of the next band, so upper wavenum
+        #     #                        of custom band 1 = lower wavenum of the band containing g-pt 29
+        #     # rrtmgp_bounds[-1]=112 → upper wavenumber = 50000
+        #     rb = self.rrtmgp_bounds  # e.g. [0, 29, 80, 89, 102, 112]
+        #     wavenum_bounds: List[int] = []
+        #     wavenum_bounds.append(RRTMGP_WAVENUM_LOW[0])   # start of first band = 820 cm-1
+        #     for i in range(1, len(rb) - 1):
+        #         # rb[i] is the first g-point of the next custom band
+        #         # so the boundary wavenumber is the lower limit of the RRTMGP band it starts in
+        #         wavenum_bounds.append(gpt_to_wavenum_low(rb[i]))
+        #     wavenum_bounds.append(RRTMGP_WAVENUM_HIGH[13])  # end of last band = 50000 cm-1
+
+        #     self.wavenum_bounds: List[int] = wavenum_bounds
+        #     print(f"Derived wavenumber bounds: {self.wavenum_bounds}")
+
+        #     # Precompute NIR/visible split for surface flux computation
+        #     # E3SM NIR/visible boundary: 0.7 µm = 14286 cm-1
+        #     NIR_VIS_BOUNDARY: int = 14286
+        #     self.wavenum_nir_vis_boundary: int = NIR_VIS_BOUNDARY
+        #     self.i_gpt_nir_end: int = 0
+        #     self.i_gpt_vis_start: int = self.ng
+        #     self.vis_transition_fraction: float = 0.0
+
+        #     for b in range(self.num_bands):
+        #         wlo = self.wavenum_bounds[b]
+        #         whi = self.wavenum_bounds[b + 1]
+        #         if whi <= NIR_VIS_BOUNDARY:
+        #             self.i_gpt_nir_end = band_bounds[b + 1]
+        #         elif wlo >= NIR_VIS_BOUNDARY:
+        #             if self.i_gpt_vis_start == self.ng:  # first fully visible band
+        #                 self.i_gpt_vis_start = band_bounds[b]
+        #         else:
+        #             # Transition band straddles the boundary
+        #             self.i_gpt_nir_end = band_bounds[b]
+        #             self.i_gpt_vis_start = band_bounds[b + 1]
+        #             self.vis_transition_fraction = float(whi - NIR_VIS_BOUNDARY) / float(whi - wlo)
+
+        #     print(f"NIR g-points: 0:{self.i_gpt_nir_end}, "
+        #           f"transition: {self.i_gpt_nir_end}:{self.i_gpt_vis_start} "
+        #           f"(vis fraction={self.vis_transition_fraction:.3f}), "
+        #           f"visible: {self.i_gpt_vis_start}:{self.ng}")
+    
         print("do norm", do_norm)
         if nn_w1 is not None:
           self.nh = nn_w1.shape[1]
@@ -419,16 +489,12 @@ class mlp_gasopt_inlined_processing(nn.Module):
         self.to(device)
 
     def forward(self, x, col_dry):
-        # print("weights locked, ", self.lock_weights)
         x = self.mlp1(x)
         x = self.softsign(x)
         x = self.mlp2(x)
         x = self.softsign(x)
         x = self.mlp3(x)
         tau = x 
-        # print("x shape", x.shape, "coldry", col_dry.shape, "ystd",self.ystd.shape)
-        # print("mean forward x", x.mean().item())
-
         # print("x shape", x.shape, "coldry", col_dry.shape, "ystd",self.ystd.shape)
         # Postprocessing inlined: reverse standard scaling and square root scaling, multiply with number of dry air molecules
         if self.do_norm:
@@ -444,7 +510,6 @@ class mlp_gasopt_inlined_processing(nn.Module):
         if self.is_rrtmgp:
           return self.sw_solar_weights
         else:
-          RRTMGP_SPLITS
           if self.num_bands==1:
             solar_weights = torch.softmax(self.sw_solar_weights,dim=-1)
           else:
@@ -468,12 +533,14 @@ class mlp_gasopt_inlined_processing(nn.Module):
             return band_weights.unsqueeze(0)  # (1, ng) matching RRTMGP format
         return solar_weights
 
+
 def load_reduced_gas_optics_model(
     checkpoint_path: str,
     device: torch.device,
 ) -> mlp_gasopt_inlined_processing:
     ckpt = torch.load(checkpoint_path, map_location=device)
     state = ckpt["model_state_dict"]
+    # print(ckpt)
 
     # Recover architecture from weight shapes
     ng = state["mlp3.weight"].shape[0]
@@ -481,6 +548,21 @@ def load_reduced_gas_optics_model(
 
     do_norm     = ckpt.get("do_norm",     False)
     band_bounds = ckpt.get("band_bounds", None)
+    rrtmgp_band_bounds = ckpt.get("rrtmgp_band_bounds", None)
+
+    if rrtmgp_band_bounds == None:
+      import re
+
+      match = re.search(r"bnd([0-9-]+)_ng", checkpoint_path)
+
+      if match:
+          rrtmgp_band_bounds = [int(x) for x in match.group(1).split("-")]
+          rrtmgp_band_bounds = [0] + rrtmgp_band_bounds + [112]
+      else:
+          rrtmgp_band_bounds = []
+      
+      
+    print("BAND BOUNDS", band_bounds, "RRTMGP BANDS", rrtmgp_band_bounds)
 
     xmin = state["xmin"].cpu().numpy()
     xmax = state["xmax"].cpu().numpy()
@@ -495,6 +577,7 @@ def load_reduced_gas_optics_model(
         nn_b1=None, nn_b2=None, nn_b3=None,
         solar_source=None,
         band_bounds=band_bounds,
+        rrtmgp_bounds_in=rrtmgp_band_bounds,
         lock_weights=True,
         ny=ng,
         nh=nh,

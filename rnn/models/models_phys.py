@@ -712,29 +712,70 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         """
         bb = self.gas_optics_model_sw1.band_bounds  # [0, 4, 11, 13, 15, 16] for ng=16
 
-        # Slingo band 3/2 boundary within your band 2
-        # i_b32 = bb[1] + int(round(((8000 - 4200) / (14500 - 4200)) * (bb[2] - bb[1])))
-        # For ng=16: 4 + round(0.369 * 7) = 4 + 3 = 7
-
         shape = x4.shape[:-1]
         out = torch.empty(*shape, self.ng_sw, dtype=x4.dtype, device=x4.device)
 
-        # Your band 1 (250–4200) ← Slingo band 4 (index 3)
-        out[..., bb[0]:bb[1]] = x4[..., 3:4].expand(*shape, bb[1] - bb[0])
+        if self.gas_optics_model_sw1.num_bands==6:
+          # Band 1 → Slingo band 4 (index 3)
+          out[..., bb[0]:bb[1]] = x4[..., 3:4].expand(*shape, bb[1] - bb[0])
+          # Band 2 → Slingo band 3 (index 2)
+          out[..., bb[1]:bb[2]] = x4[..., 2:3].expand(*shape, bb[2] - bb[1])
+          # Band 3 → Slingo band 2 (index 1)
+          out[..., bb[2]:bb[3]] = x4[..., 1:2].expand(*shape, bb[3] - bb[2])
+          # Bands 4+5+6 → Slingo band 1 (index 0)
+          out[..., bb[3]:bb[6]] = x4[..., 0:1].expand(*shape, bb[6] - bb[3])   
+        elif self.gas_optics_model_sw1.num_bands==5:
+          # Slingo band 3/2 boundary within your band 2
+          # i_b32 = bb[1] + int(round(((8000 - 4200) / (14500 - 4200)) * (bb[2] - bb[1])))
+          # For ng=16: 4 + round(0.369 * 7) = 4 + 3 = 7
 
-        # # Your band 2 lower (4200–8000) ← Slingo band 3 (index 2)
-        # out[..., bb[1]:i_b32] = x4[..., 2:3].expand(*shape, i_b32 - bb[1])
+          # Your band 1 (250–4200) ← Slingo band 4 (index 3)
+          out[..., bb[0]:bb[1]] = x4[..., 3:4].expand(*shape, bb[1] - bb[0])
 
-        # # Your band 2 upper (8000–14500) ← Slingo band 2 (index 1)
-        # out[..., i_b32:bb[2]] = x4[..., 1:2].expand(*shape, bb[2] - i_b32)
+          # # Your band 2 lower (4200–8000) ← Slingo band 3 (index 2)
+          # out[..., bb[1]:i_b32] = x4[..., 2:3].expand(*shape, i_b32 - bb[1])
 
-        slingo_mix =  0.5*(x4[..., 2:3] + x4[..., 1:2]).expand(*shape, bb[2] - bb[1])
-        out[..., bb[1]:bb[2]] = 0.5*slingo_mix
+          # # Your band 2 upper (8000–14500) ← Slingo band 2 (index 1)
+          # out[..., i_b32:bb[2]] = x4[..., 1:2].expand(*shape, bb[2] - i_b32)
 
-        # Your bands 3+4+5 (14500–50000) ← Slingo band 1 (index 0)
-        out[..., bb[2]:bb[5]] = x4[..., 0:1].expand(*shape, bb[5] - bb[2])
+          slingo_mix =  0.5*(x4[..., 2:3] + x4[..., 1:2]).expand(*shape, bb[2] - bb[1])
+          out[..., bb[1]:bb[2]] = 0.5*slingo_mix
 
+          # Your bands 3+4+5 (14500–50000) ← Slingo band 1 (index 0)
+          out[..., bb[2]:bb[5]] = x4[..., 0:1].expand(*shape, bb[5] - bb[2])
+        else:
+          raise NotImplementedError("Only 5 or 6 band ML-GasOptics supported")
+  
         return out
+
+    def _expand_slingo_to_bands_6(self, x4: torch.Tensor) -> torch.Tensor:
+        """
+        Map Slingo 4-band optical property (..., 4) to ng g-points (..., ng)
+        for the 6-band model with WAVENUM_SPLITS = [4200, 8000, 14286, 16000, 22000].
+
+        Band boundaries align exactly with Slingo boundaries so no blending needed:
+          band 1 (bb[0]:bb[1])  820–4200   cm-1 → Slingo index 3
+          band 2 (bb[1]:bb[2]) 4200–8000   cm-1 → Slingo index 2
+          band 3 (bb[2]:bb[3]) 8000–14286  cm-1 → Slingo index 1
+          band 4 (bb[3]:bb[4]) 14286–16000 cm-1 → Slingo index 0
+          band 5 (bb[4]:bb[5]) 16000–22000 cm-1 → Slingo index 0
+          band 6 (bb[5]:bb[6]) 22000–50000 cm-1 → Slingo index 0
+        """
+        bb    = self.gas_optics_model_sw1.band_bounds  # length 7 for 6-band model
+        shape = x4.shape[:-1]
+        ng    = self.ng_sw
+        out   = torch.empty(*shape, ng, dtype=x4.dtype, device=x4.device)
+
+        # Band 1 → Slingo band 4 (index 3)
+        out[..., bb[0]:bb[1]] = x4[..., 3:4].expand(*shape, bb[1] - bb[0])
+        # Band 2 → Slingo band 3 (index 2)
+        out[..., bb[1]:bb[2]] = x4[..., 2:3].expand(*shape, bb[2] - bb[1])
+        # Band 3 → Slingo band 2 (index 1)
+        out[..., bb[2]:bb[3]] = x4[..., 1:2].expand(*shape, bb[3] - bb[2])
+        # Bands 4+5+6 → Slingo band 1 (index 0)
+        out[..., bb[3]:bb[6]] = x4[..., 0:1].expand(*shape, bb[6] - bb[3])
+
+        return out    
 
     @torch.compile(dynamic=False)
     def rad_optical_props(self, inputs_main, inputs_aux0, inputs_denorm, play, plev, delta_plev, rnn_mem, 
@@ -1298,22 +1339,28 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         #   band 5 (bb[4]:bb[5]): 22000–50000 cm-1 → pure UV    → asdir/asdif
         bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
 
-        ng_b1  = bb[1] - bb[0]
-        ng_b2  = bb[2] - bb[1]
-        ng_b3  = bb[3] - bb[2]
-        ng_b4  = bb[4] - bb[3]
-        ng_b5  = bb[5] - bb[4]
-
-        # Bands 1+2: near-IR
-        albedo_surf_dir_sw [bb[0]:bb[2]] = aldir.expand(ng_b1 + ng_b2, -1)
-        albedo_surf_diff_sw[bb[0]:bb[2]] = aldif.expand(ng_b1 + ng_b2, -1)
-        # Band 3: transition — blend 50/50, matching the 0.7 µm boundary intent
-        albedo_surf_dir_sw [bb[2]:bb[3]] = 0.5 * (aldir.expand(ng_b3, -1) + asdir.expand(ng_b3, -1))
-        albedo_surf_diff_sw[bb[2]:bb[3]] = 0.5 * (aldif.expand(ng_b3, -1) + asdif.expand(ng_b3, -1))
-        # Bands 4+5: visible/UV
-        albedo_surf_dir_sw [bb[3]:bb[5]] = asdir.expand(ng_b4 + ng_b5, -1)
-        albedo_surf_diff_sw[bb[3]:bb[5]] = asdif.expand(ng_b4 + ng_b5, -1)
-
+        if self.gas_optics_model_sw1.num_bands==6:
+          # Bands 1+2+3 (820–14286 cm-1): near-IR
+          albedo_surf_dir_sw [bb[0]:bb[3]] = aldir.expand(bb[3] - bb[0], -1)
+          albedo_surf_diff_sw[bb[0]:bb[3]] = aldif.expand(bb[3] - bb[0], -1)
+          # Bands 4+5+6 (14286–50000 cm-1): visible/UV
+          albedo_surf_dir_sw [bb[3]:bb[6]] = asdir.expand(bb[6] - bb[3], -1)
+          albedo_surf_diff_sw[bb[3]:bb[6]] = asdif.expand(bb[6] - bb[3], -1)
+        else:
+          ng_b1  = bb[1] - bb[0]
+          ng_b2  = bb[2] - bb[1]
+          ng_b3  = bb[3] - bb[2]
+          ng_b4  = bb[4] - bb[3]
+          ng_b5  = bb[5] - bb[4]
+          # Bands 1+2: near-IR
+          albedo_surf_dir_sw [bb[0]:bb[2]] = aldir.expand(ng_b1 + ng_b2, -1)
+          albedo_surf_diff_sw[bb[0]:bb[2]] = aldif.expand(ng_b1 + ng_b2, -1)
+          # Band 3: transition — blend 50/50, matching the 0.7 µm boundary intent
+          albedo_surf_dir_sw [bb[2]:bb[3]] = 0.5 * (aldir.expand(ng_b3, -1) + asdir.expand(ng_b3, -1))
+          albedo_surf_diff_sw[bb[2]:bb[3]] = 0.5 * (aldif.expand(ng_b3, -1) + asdif.expand(ng_b3, -1))
+          # Bands 4+5: visible/UV
+          albedo_surf_dir_sw [bb[3]:bb[5]] = asdir.expand(ng_b4 + ng_b5, -1)
+          albedo_surf_diff_sw[bb[3]:bb[5]] = asdif.expand(ng_b4 + ng_b5, -1)
         # print("mean albedo_surf_dir_sw", albedo_surf_dir_sw.mean().item(), "albedo_surf_diff_sw ", albedo_surf_diff_sw.mean().item())
       else:
         # ------- COMPUTE SURFACE SPECTRAL ALBEDO TO DIRECT AND DIFFUSE RADIATION --
@@ -1404,14 +1451,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                     incoming_toa, albedo_surf_diff_sw, albedo_surf_dir_sw, 
                     ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir)
             
-      # print("Min max inc",incoming_toa.min().item(), incoming_toa.max().item())
-      # print("Min max albedo_surf_diff_sw",albedo_surf_diff_sw.min().item(), albedo_surf_diff_sw.max().item())
-      # print("Min max albedo_surf_dir_sw",albedo_surf_dir_sw.min().item(), albedo_surf_dir_sw.max().item())
-      # print("Min max ref_diff",ref_diff.min().item(), ref_diff.max().item())
-      # print("Min max flux_sw_up",flux_sw_up.min().item(), flux_sw_up.max().item())
-      # print("Min max flux_sw_dn_diffuse",flux_sw_dn_diffuse.min().item(), flux_sw_dn_diffuse.max().item())
-      # print("Min max albedo_surf_dir_sw",albedo_surf_dir_sw.min().item(), albedo_surf_dir_sw.max().item())
-
       del ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir
 
       if self.experimental_rad:
@@ -1428,18 +1467,48 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       if self.use_new_sw_gas_optics:
         bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
 
-        # Band 3 is the transition band (~0.69–0.625 µm), split 50/50 into NIR and visible
-        sw_dir_dn_mixband  = torch.sum(flux_sw_dn_direct [-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
-        sw_diff_dn_mixband = torch.sum(flux_sw_dn_diffuse[-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
+        if self.gas_optics_model_sw1.num_bands==6:
+          
+          # For 6-band model the 14286 cm-1 NIR/vis boundary falls exactly at bb[3],
+          # so no transition blending needed
+          SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[3]], dim=-1, keepdim=True)
+          SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[3]], dim=-1, keepdim=True)
+          SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[6]], dim=-1, keepdim=True)
+          SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[6]], dim=-1, keepdim=True)
 
-        # SOLL/SOLLD: near-IR (bands 1+2 + half of band 3)
-        SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
-        SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
+        elif self.gas_optics_model_sw1.num_bands==5:
+          # Band 3 is the transition band (~0.69–0.625 µm), split 50/50 into NIR and visible
+          sw_dir_dn_mixband  = torch.sum(flux_sw_dn_direct [-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
+          sw_diff_dn_mixband = torch.sum(flux_sw_dn_diffuse[-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
 
-        # SOLS/SOLSD: visible/UV (bands 4+5 + half of band 3)
-        SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
-        SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
+          # SOLL/SOLLD: near-IR (bands 1+2 + half of band 3)
+          SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
+          SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
 
+          # SOLS/SOLSD: visible/UV (bands 4+5 + half of band 3)
+          SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
+          SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
+        else:
+          raise NotImplementedError("Only 5 or 6 band ML-GasOptics supported")
+
+      # if self.use_new_sw_gas_optics:
+      #     gas = self.gas_optics_model_sw1
+      #     i_nir_end  = gas.i_gpt_nir_end          # e.g. 4  for 5-band
+      #     i_vis_start = gas.i_gpt_vis_start       # e.g. 13 for 5-band
+      #     vis_frac   = gas.vis_transition_fraction # e.g. ~0.87 for 5-band
+
+      #     # Transition band g-points (may be empty if boundary falls exactly on band edge)
+      #     sw_dir_dn_trans  = torch.sum(flux_sw_dn_direct [-1, :, i_nir_end:i_vis_start],  dim=-1, keepdim=True)
+      #     sw_diff_dn_trans = torch.sum(flux_sw_dn_diffuse[-1, :, i_nir_end:i_vis_start], dim=-1, keepdim=True)
+
+      #     SOLL  = torch.sum(flux_sw_dn_direct [-1, :, :i_nir_end], dim=-1, keepdim=True) \
+      #             + (1.0 - vis_frac) * sw_dir_dn_trans
+      #     SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, :i_nir_end], dim=-1, keepdim=True) \
+      #             + (1.0 - vis_frac) * sw_diff_dn_trans
+      #     SOLS  = torch.sum(flux_sw_dn_direct [-1, :, i_vis_start:], dim=-1, keepdim=True) \
+      #             + vis_frac * sw_dir_dn_trans
+      #     SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, i_vis_start:], dim=-1, keepdim=True) \
+      #             + vis_frac * sw_diff_dn_trans
       else:
         sw_dir_dn_mixband  = torch.sum(flux_sw_dn_direct [-1, :, iend_ir:iend_mix], dim=-1, keepdim=True)
         SOLL  = torch.sum(flux_sw_dn_direct [-1, :, 0:iend_ir],   dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
