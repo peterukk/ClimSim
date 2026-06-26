@@ -711,71 +711,41 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         (8000-4200)/(14500-4200) = 0.369 through your band 2.
         """
         bb = self.gas_optics_model_sw1.band_bounds  # [0, 4, 11, 13, 15, 16] for ng=16
-
-        shape = x4.shape[:-1]
-        out = torch.empty(*shape, self.ng_sw, dtype=x4.dtype, device=x4.device)
+        nlev, nb, nd  = x4.shape
+        out   = torch.empty(nlev, nb, self.ng_sw, dtype=x4.dtype, device=x4.device)
 
         if self.gas_optics_model_sw1.num_bands==6:
           # Band 1 → Slingo band 4 (index 3)
-          out[..., bb[0]:bb[1]] = x4[..., 3:4].expand(*shape, bb[1] - bb[0])
+          out[:,:, bb[0]:bb[1]] = x4[..., 3:4].expand(nlev, nb, bb[1] - bb[0])
           # Band 2 → Slingo band 3 (index 2)
-          out[..., bb[1]:bb[2]] = x4[..., 2:3].expand(*shape, bb[2] - bb[1])
+          out[:,:, bb[1]:bb[2]] = x4[..., 2:3].expand(nlev, nb, bb[2] - bb[1])
           # Band 3 → Slingo band 2 (index 1)
-          out[..., bb[2]:bb[3]] = x4[..., 1:2].expand(*shape, bb[3] - bb[2])
+          out[:,:, bb[2]:bb[3]] = x4[..., 1:2].expand(nlev, nb, bb[3] - bb[2])
           # Bands 4+5+6 → Slingo band 1 (index 0)
-          out[..., bb[3]:bb[6]] = x4[..., 0:1].expand(*shape, bb[6] - bb[3])   
+          out[:,:, bb[3]:bb[6]] = x4[..., 0:1].expand(nlev, nb, bb[6] - bb[3])   
         elif self.gas_optics_model_sw1.num_bands==5:
           # Slingo band 3/2 boundary within your band 2
           # i_b32 = bb[1] + int(round(((8000 - 4200) / (14500 - 4200)) * (bb[2] - bb[1])))
           # For ng=16: 4 + round(0.369 * 7) = 4 + 3 = 7
 
           # Your band 1 (250–4200) ← Slingo band 4 (index 3)
-          out[..., bb[0]:bb[1]] = x4[..., 3:4].expand(*shape, bb[1] - bb[0])
+          out[:,:, bb[0]:bb[1]] = x4[..., 3:4].expand(nlev, nb, bb[1] - bb[0])
 
           # # Your band 2 lower (4200–8000) ← Slingo band 3 (index 2)
-          # out[..., bb[1]:i_b32] = x4[..., 2:3].expand(*shape, i_b32 - bb[1])
+          # out[..., bb[1]:i_b32] = x4[..., 2:3].expand(nlev, nb, i_b32 - bb[1])
 
           # # Your band 2 upper (8000–14500) ← Slingo band 2 (index 1)
-          # out[..., i_b32:bb[2]] = x4[..., 1:2].expand(*shape, bb[2] - i_b32)
+          # out[..., i_b32:bb[2]] = x4[..., 1:2].expand(nlev, nb, bb[2] - i_b32)
 
-          slingo_mix =  0.5*(x4[..., 2:3] + x4[..., 1:2]).expand(*shape, bb[2] - bb[1])
-          out[..., bb[1]:bb[2]] = 0.5*slingo_mix
+          slingo_mix =  0.5*(x4[..., 2:3] + x4[..., 1:2]).expand(nlev, nb, bb[2] - bb[1])
+          out[:,:, bb[1]:bb[2]] = 0.5*slingo_mix
 
           # Your bands 3+4+5 (14500–50000) ← Slingo band 1 (index 0)
-          out[..., bb[2]:bb[5]] = x4[..., 0:1].expand(*shape, bb[5] - bb[2])
+          out[:,:, bb[2]:bb[5]] = x4[..., 0:1].expand(nlev, nb, bb[5] - bb[2])
         else:
           raise NotImplementedError("Only 5 or 6 band ML-GasOptics supported")
   
         return out
-
-    def _expand_slingo_to_bands_6(self, x4: torch.Tensor) -> torch.Tensor:
-        """
-        Map Slingo 4-band optical property (..., 4) to ng g-points (..., ng)
-        for the 6-band model with WAVENUM_SPLITS = [4200, 8000, 14286, 16000, 22000].
-
-        Band boundaries align exactly with Slingo boundaries so no blending needed:
-          band 1 (bb[0]:bb[1])  820–4200   cm-1 → Slingo index 3
-          band 2 (bb[1]:bb[2]) 4200–8000   cm-1 → Slingo index 2
-          band 3 (bb[2]:bb[3]) 8000–14286  cm-1 → Slingo index 1
-          band 4 (bb[3]:bb[4]) 14286–16000 cm-1 → Slingo index 0
-          band 5 (bb[4]:bb[5]) 16000–22000 cm-1 → Slingo index 0
-          band 6 (bb[5]:bb[6]) 22000–50000 cm-1 → Slingo index 0
-        """
-        bb    = self.gas_optics_model_sw1.band_bounds  # length 7 for 6-band model
-        shape = x4.shape[:-1]
-        ng    = self.ng_sw
-        out   = torch.empty(*shape, ng, dtype=x4.dtype, device=x4.device)
-
-        # Band 1 → Slingo band 4 (index 3)
-        out[..., bb[0]:bb[1]] = x4[..., 3:4].expand(*shape, bb[1] - bb[0])
-        # Band 2 → Slingo band 3 (index 2)
-        out[..., bb[1]:bb[2]] = x4[..., 2:3].expand(*shape, bb[2] - bb[1])
-        # Band 3 → Slingo band 2 (index 1)
-        out[..., bb[2]:bb[3]] = x4[..., 1:2].expand(*shape, bb[3] - bb[2])
-        # Bands 4+5+6 → Slingo band 1 (index 0)
-        out[..., bb[3]:bb[6]] = x4[..., 0:1].expand(*shape, bb[6] - bb[3])
-
-        return out    
 
     @torch.compile(dynamic=False)
     def rad_optical_props(self, inputs_main, inputs_aux0, inputs_denorm, play, plev, delta_plev, rnn_mem, 
@@ -984,11 +954,11 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             tau_sw2     = self.gas_optics_model_sw1(x_gas_2, col_dry_crm_2)
             tau_sw_scat2= self.gas_optics_model_sw2(x_gas_2, col_dry_crm_2)
 
-            # mask          = torch.rand_like(tau_sw1) < 0.5
-            # tau_sw        = torch.where(mask, tau_sw1, tau_sw2)
-            # tau_sw_scat   = torch.where(mask, tau_sw_scat1, tau_sw_scat2)
-            tau_sw        = 0.5*(tau_sw1+tau_sw2)
-            tau_sw_scat   = 0.5*(tau_sw_scat1+tau_sw_scat2)
+            mask          = torch.rand_like(tau_sw1) < 0.5
+            tau_sw        = torch.where(mask, tau_sw1, tau_sw2)
+            tau_sw_scat   = torch.where(mask, tau_sw_scat1, tau_sw_scat2)
+            # tau_sw        = 0.5*(tau_sw1+tau_sw2)
+            # tau_sw_scat   = 0.5*(tau_sw_scat1+tau_sw_scat2)
 
           else:
 
@@ -1466,7 +1436,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       # Sum over whole / parts of spectral dimension to get broadband / band-wise fluxes
       if self.use_new_sw_gas_optics:
         bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
-
         if self.gas_optics_model_sw1.num_bands==6:
           
           # For 6-band model the 14286 cm-1 NIR/vis boundary falls exactly at bb[3],
@@ -1733,7 +1702,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           qv    = inputs_denorm[:,:,-1:]
 
           if self.update_states_for_rad:
-
+          # if False:
             if self.training: 
               out_denorm    = torch.transpose(out_new_true,0,1) / self.yscale_lev.unsqueeze(1)
             else:
