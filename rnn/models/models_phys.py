@@ -697,55 +697,67 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         return out_new, precc, precsc, rnn_mem, liq_frac_crm, qv_crm, qn_crm, area_frac, prec_negative
 
     @torch.compile(dynamic=False)
-    def expand_slingo_to_bands(self,x4):
-        """
-        Map Slingo 4-band optical property (..., 4) to ng g-points (..., ng).
+    def expand_slingo_to_bands(self, x4):
+        bb = self.gas_optics_model_sw1.band_bounds
+        w  = self.gas_optics_model_sw1.slingo_weights   # (num_bands, 4)
 
-        Slingo coeffs index mapping (from wavmax Fortran cutoffs):
-          index 3 (band 4): < 4,200   cm-1  → your band 1: bb[0]:bb[1]
-          index 2 (band 3): 4,200–8,000 cm-1  → your band 2 lower half: bb[1]:i_b32
-          index 1 (band 2): 8,000–14,286 cm-1 → your band 2 upper half: i_b32:bb[2]
-          index 0 (band 1): > 14,286 cm-1     → your bands 3+4+5: bb[2]:bb[5]
+        band_vals = torch.matmul(x4, w.T)   # (nlev, nb, num_bands)
 
-        The Slingo band 3/2 boundary at 8,000 cm-1 sits at fraction
-        (8000-4200)/(14500-4200) = 0.369 through your band 2.
-        """
-        bb = self.gas_optics_model_sw1.band_bounds  # [0, 4, 11, 13, 15, 16] for ng=16
-        nlev, nb, nd  = x4.shape
-        out   = torch.empty(nlev, nb, self.ng_sw, dtype=x4.dtype, device=x4.device)
-
-        if self.gas_optics_model_sw1.num_bands==6:
-          # Band 1 → Slingo band 4 (index 3)
-          out[:,:, bb[0]:bb[1]] = x4[..., 3:4].expand(nlev, nb, bb[1] - bb[0])
-          # Band 2 → Slingo band 3 (index 2)
-          out[:,:, bb[1]:bb[2]] = x4[..., 2:3].expand(nlev, nb, bb[2] - bb[1])
-          # Band 3 → Slingo band 2 (index 1)
-          out[:,:, bb[2]:bb[3]] = x4[..., 1:2].expand(nlev, nb, bb[3] - bb[2])
-          # Bands 4+5+6 → Slingo band 1 (index 0)
-          out[:,:, bb[3]:bb[6]] = x4[..., 0:1].expand(nlev, nb, bb[6] - bb[3])   
-        elif self.gas_optics_model_sw1.num_bands==5:
-          # Slingo band 3/2 boundary within your band 2
-          # i_b32 = bb[1] + int(round(((8000 - 4200) / (14500 - 4200)) * (bb[2] - bb[1])))
-          # For ng=16: 4 + round(0.369 * 7) = 4 + 3 = 7
-
-          # Your band 1 (250–4200) ← Slingo band 4 (index 3)
-          out[:,:, bb[0]:bb[1]] = x4[..., 3:4].expand(nlev, nb, bb[1] - bb[0])
-
-          # # Your band 2 lower (4200–8000) ← Slingo band 3 (index 2)
-          # out[..., bb[1]:i_b32] = x4[..., 2:3].expand(nlev, nb, i_b32 - bb[1])
-
-          # # Your band 2 upper (8000–14500) ← Slingo band 2 (index 1)
-          # out[..., i_b32:bb[2]] = x4[..., 1:2].expand(nlev, nb, bb[2] - i_b32)
-
-          slingo_mix =  0.5*(x4[..., 2:3] + x4[..., 1:2]).expand(nlev, nb, bb[2] - bb[1])
-          out[:,:, bb[1]:bb[2]] = 0.5*slingo_mix
-
-          # Your bands 3+4+5 (14500–50000) ← Slingo band 1 (index 0)
-          out[:,:, bb[2]:bb[5]] = x4[..., 0:1].expand(nlev, nb, bb[5] - bb[2])
-        else:
-          raise NotImplementedError("Only 5 or 6 band ML-GasOptics supported")
-  
+        repeats = torch.tensor(
+            [bb[i+1] - bb[i] for i in range(self.gas_optics_model_sw1.num_bands)],
+            device=x4.device,
+        )
+        out = torch.repeat_interleave(band_vals, repeats, dim=-1)  # (nlev, nb, ng_sw)
         return out
+    # def expand_slingo_to_bands(self,x4):
+    #     """
+    #     Map Slingo 4-band optical property (..., 4) to ng g-points (..., ng).
+
+    #     Slingo coeffs index mapping (from wavmax Fortran cutoffs):
+    #       index 3 (band 4): < 4,200   cm-1  → your band 1: bb[0]:bb[1]
+    #       index 2 (band 3): 4,200–8,000 cm-1  → your band 2 lower half: bb[1]:i_b32
+    #       index 1 (band 2): 8,000–14,286 cm-1 → your band 2 upper half: i_b32:bb[2]
+    #       index 0 (band 1): > 14,286 cm-1     → your bands 3+4+5: bb[2]:bb[5]
+
+    #     The Slingo band 3/2 boundary at 8,000 cm-1 sits at fraction
+    #     (8000-4200)/(14500-4200) = 0.369 through your band 2.
+    #     """
+    #     bb = self.gas_optics_model_sw1.band_bounds  # [0, 4, 11, 13, 15, 16] for ng=16
+    #     nlev, nb, nd  = x4.shape
+    #     out   = torch.empty(nlev, nb, self.ng_sw, dtype=x4.dtype, device=x4.device)
+
+    #     if self.gas_optics_model_sw1.num_bands==6:
+    #       # Band 1 → Slingo band 4 (index 3)
+    #       out[:,:, bb[0]:bb[1]] = x4[..., 3:4].expand(nlev, nb, bb[1] - bb[0])
+    #       # Band 2 → Slingo band 3 (index 2)
+    #       out[:,:, bb[1]:bb[2]] = x4[..., 2:3].expand(nlev, nb, bb[2] - bb[1])
+    #       # Band 3 → Slingo band 2 (index 1)
+    #       out[:,:, bb[2]:bb[3]] = x4[..., 1:2].expand(nlev, nb, bb[3] - bb[2])
+    #       # Bands 4+5+6 → Slingo band 1 (index 0)
+    #       out[:,:, bb[3]:bb[6]] = x4[..., 0:1].expand(nlev, nb, bb[6] - bb[3])   
+    #     elif self.gas_optics_model_sw1.num_bands==5:
+    #       # Slingo band 3/2 boundary within your band 2
+    #       # i_b32 = bb[1] + int(round(((8000 - 4200) / (14500 - 4200)) * (bb[2] - bb[1])))
+    #       # For ng=16: 4 + round(0.369 * 7) = 4 + 3 = 7
+
+    #       # Your band 1 (250–4200) ← Slingo band 4 (index 3)
+    #       out[:,:, bb[0]:bb[1]] = x4[..., 3:4].expand(nlev, nb, bb[1] - bb[0])
+
+    #       # # Your band 2 lower (4200–8000) ← Slingo band 3 (index 2)
+    #       # out[..., bb[1]:i_b32] = x4[..., 2:3].expand(nlev, nb, i_b32 - bb[1])
+
+    #       # # Your band 2 upper (8000–14500) ← Slingo band 2 (index 1)
+    #       # out[..., i_b32:bb[2]] = x4[..., 1:2].expand(nlev, nb, bb[2] - i_b32)
+
+    #       slingo_mix =  0.5*(x4[..., 2:3] + x4[..., 1:2]).expand(nlev, nb, bb[2] - bb[1])
+    #       out[:,:, bb[1]:bb[2]] = 0.5*slingo_mix
+
+    #       # Your bands 3+4+5 (14500–50000) ← Slingo band 1 (index 0)
+    #       out[:,:, bb[2]:bb[5]] = x4[..., 0:1].expand(nlev, nb, bb[5] - bb[2])
+    #     else:
+    #       raise NotImplementedError("Only 5 or 6 band ML-GasOptics supported")
+  
+    #     return out
 
     @torch.compile(dynamic=False)
     def rad_optical_props(self, inputs_main, inputs_aux0, inputs_denorm, play, plev, delta_plev, rnn_mem, 
@@ -1301,37 +1313,69 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       albedo_surf_diff_sw = torch.ones(self.ng_sw, batch_size, device=device)
 
       if self.use_new_sw_gas_optics:
-        # New 5-band gas optics with exact spectral boundaries:
-        #   band 1 (bb[0]:bb[1]): 250–4200   cm-1  → pure NIR  → aldir/aldif
-        #   band 2 (bb[1]:bb[2]): 4200–14500 cm-1  → pure NIR  → aldir/aldif
-        #   band 3 (bb[2]:bb[3]): 14500–16000 cm-1 → transition (~0.69–0.625 µm) → blend
-        #   band 4 (bb[3]:bb[4]): 16000–22000 cm-1 → pure vis   → asdir/asdif
-        #   band 5 (bb[4]:bb[5]): 22000–50000 cm-1 → pure UV    → asdir/asdif
-        bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
 
-        if self.gas_optics_model_sw1.num_bands==6:
-          # Bands 1+2+3 (820–14286 cm-1): near-IR
-          albedo_surf_dir_sw [bb[0]:bb[3]] = aldir.expand(bb[3] - bb[0], -1)
-          albedo_surf_diff_sw[bb[0]:bb[3]] = aldif.expand(bb[3] - bb[0], -1)
-          # Bands 4+5+6 (14286–50000 cm-1): visible/UV
-          albedo_surf_dir_sw [bb[3]:bb[6]] = asdir.expand(bb[6] - bb[3], -1)
-          albedo_surf_diff_sw[bb[3]:bb[6]] = asdif.expand(bb[6] - bb[3], -1)
-        else:
-          ng_b1  = bb[1] - bb[0]
-          ng_b2  = bb[2] - bb[1]
-          ng_b3  = bb[3] - bb[2]
-          ng_b4  = bb[4] - bb[3]
-          ng_b5  = bb[5] - bb[4]
-          # Bands 1+2: near-IR
-          albedo_surf_dir_sw [bb[0]:bb[2]] = aldir.expand(ng_b1 + ng_b2, -1)
-          albedo_surf_diff_sw[bb[0]:bb[2]] = aldif.expand(ng_b1 + ng_b2, -1)
-          # Band 3: transition — blend 50/50, matching the 0.7 µm boundary intent
-          albedo_surf_dir_sw [bb[2]:bb[3]] = 0.5 * (aldir.expand(ng_b3, -1) + asdir.expand(ng_b3, -1))
-          albedo_surf_diff_sw[bb[2]:bb[3]] = 0.5 * (aldif.expand(ng_b3, -1) + asdif.expand(ng_b3, -1))
-          # Bands 4+5: visible/UV
-          albedo_surf_dir_sw [bb[3]:bb[5]] = asdir.expand(ng_b4 + ng_b5, -1)
-          albedo_surf_diff_sw[bb[3]:bb[5]] = asdif.expand(ng_b4 + ng_b5, -1)
-        # print("mean albedo_surf_dir_sw", albedo_surf_dir_sw.mean().item(), "albedo_surf_diff_sw ", albedo_surf_diff_sw.mean().item())
+
+        # bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
+
+        # if self.gas_optics_model_sw1.num_bands==6:
+        #   # Bands 1+2+3 (820–14286 cm-1): near-IR
+        #   albedo_surf_dir_sw [bb[0]:bb[3]] = aldir.expand(bb[3] - bb[0], -1)
+        #   albedo_surf_diff_sw[bb[0]:bb[3]] = aldif.expand(bb[3] - bb[0], -1)
+        #   # Bands 4+5+6 (14286–50000 cm-1): visible/UV
+        #   albedo_surf_dir_sw [bb[3]:bb[6]] = asdir.expand(bb[6] - bb[3], -1)
+        #   albedo_surf_diff_sw[bb[3]:bb[6]] = asdif.expand(bb[6] - bb[3], -1)
+        # else:
+        #   # New 5-band gas optics with exact spectral boundaries:
+        #   #   band 1 (bb[0]:bb[1]): 250–4200   cm-1  → pure NIR  → aldir/aldif
+        #   #   band 2 (bb[1]:bb[2]): 4200–14500 cm-1  → pure NIR  → aldir/aldif
+        #   #   band 3 (bb[2]:bb[3]): 14500–16000 cm-1 → transition (~0.69–0.625 µm) → blend
+        #   #   band 4 (bb[3]:bb[4]): 16000–22000 cm-1 → pure vis   → asdir/asdif
+        #   #   band 5 (bb[4]:bb[5]): 22000–50000 cm-1 → pure UV    → asdir/asdif
+        #   print("got here, bb", bb, "wavenums", self.gas_optics_model_sw1.wavenum_bounds)
+
+        #   ng_b1  = bb[1] - bb[0]
+        #   ng_b2  = bb[2] - bb[1]
+        #   ng_b3  = bb[3] - bb[2]
+        #   ng_b4  = bb[4] - bb[3]
+        #   ng_b5  = bb[5] - bb[4]
+        #   # Bands 1+2: near-IR
+        #   albedo_surf_dir_sw [bb[0]:bb[2]] = aldir.expand(ng_b1 + ng_b2, -1)
+        #   albedo_surf_diff_sw[bb[0]:bb[2]] = aldif.expand(ng_b1 + ng_b2, -1)
+        #   # Band 3: transition — blend 50/50, matching the 0.7 µm boundary intent
+        #   albedo_surf_dir_sw [bb[2]:bb[3]] = 0.5 * (aldir.expand(ng_b3, -1) + asdir.expand(ng_b3, -1))
+        #   albedo_surf_diff_sw[bb[2]:bb[3]] = 0.5 * (aldif.expand(ng_b3, -1) + asdif.expand(ng_b3, -1))
+        #   # Bands 4+5: visible/UV
+        #   albedo_surf_dir_sw [bb[3]:bb[5]] = asdir.expand(ng_b4 + ng_b5, -1)
+        #   albedo_surf_diff_sw[bb[3]:bb[5]] = asdif.expand(ng_b4 + ng_b5, -1)
+        # # print("mean albedo_surf_dir_sw", albedo_surf_dir_sw.mean().item(), "albedo_surf_diff_sw ", albedo_surf_diff_sw.mean().item())
+
+        gas = self.gas_optics_model_sw1
+        i_nir_end   = gas.i_gpt_nir_end          # last g-point fully NIR (exclusive)
+        i_vis_start = gas.i_gpt_vis_start        # first g-point fully visible (inclusive)
+        vis_frac    = gas.vis_transition_fraction # fraction of transition g-points that are visible
+
+        # Fully NIR g-points
+        n_nir = i_nir_end
+        if n_nir > 0:
+            albedo_surf_dir_sw [0:i_nir_end] = aldir.expand(n_nir, -1)
+            albedo_surf_diff_sw[0:i_nir_end] = aldif.expand(n_nir, -1)
+
+        # Transition g-points (may be empty if i_nir_end == i_vis_start)
+        n_trans = i_vis_start - i_nir_end
+        if n_trans > 0:
+            albedo_surf_dir_sw [i_nir_end:i_vis_start] = (
+                (1.0 - vis_frac) * aldir.expand(n_trans, -1) + vis_frac * asdir.expand(n_trans, -1)
+            )
+            albedo_surf_diff_sw[i_nir_end:i_vis_start] = (
+                (1.0 - vis_frac) * aldif.expand(n_trans, -1) + vis_frac * asdif.expand(n_trans, -1)
+            )
+
+        # Fully visible g-points
+        n_vis = self.ng_sw - i_vis_start
+        if n_vis > 0:
+            albedo_surf_dir_sw [i_vis_start:] = asdir.expand(n_vis, -1)
+            albedo_surf_diff_sw[i_vis_start:] = asdif.expand(n_vis, -1)
+            
       else:
         # ------- COMPUTE SURFACE SPECTRAL ALBEDO TO DIRECT AND DIFFUSE RADIATION --
         # 
@@ -1434,50 +1478,50 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         flux_sw_dn_direct = torch.reshape(flux_sw_dn_direct, (nlev+1, batch_size, self.ng_sw))
                 
       # Sum over whole / parts of spectral dimension to get broadband / band-wise fluxes
-      if self.use_new_sw_gas_optics:
-        bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
-        if self.gas_optics_model_sw1.num_bands==6:
-          
-          # For 6-band model the 14286 cm-1 NIR/vis boundary falls exactly at bb[3],
-          # so no transition blending needed
-          SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[3]], dim=-1, keepdim=True)
-          SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[3]], dim=-1, keepdim=True)
-          SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[6]], dim=-1, keepdim=True)
-          SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[6]], dim=-1, keepdim=True)
-
-        elif self.gas_optics_model_sw1.num_bands==5:
-          # Band 3 is the transition band (~0.69–0.625 µm), split 50/50 into NIR and visible
-          sw_dir_dn_mixband  = torch.sum(flux_sw_dn_direct [-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
-          sw_diff_dn_mixband = torch.sum(flux_sw_dn_diffuse[-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
-
-          # SOLL/SOLLD: near-IR (bands 1+2 + half of band 3)
-          SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
-          SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
-
-          # SOLS/SOLSD: visible/UV (bands 4+5 + half of band 3)
-          SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
-          SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
-        else:
-          raise NotImplementedError("Only 5 or 6 band ML-GasOptics supported")
-
       # if self.use_new_sw_gas_optics:
-      #     gas = self.gas_optics_model_sw1
-      #     i_nir_end  = gas.i_gpt_nir_end          # e.g. 4  for 5-band
-      #     i_vis_start = gas.i_gpt_vis_start       # e.g. 13 for 5-band
-      #     vis_frac   = gas.vis_transition_fraction # e.g. ~0.87 for 5-band
+      #   bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
+      #   if self.gas_optics_model_sw1.num_bands==6:
+          
+      #     # For 6-band model the 14286 cm-1 NIR/vis boundary falls exactly at bb[3],
+      #     # so no transition blending needed
+      #     SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[3]], dim=-1, keepdim=True)
+      #     SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[3]], dim=-1, keepdim=True)
+      #     SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[6]], dim=-1, keepdim=True)
+      #     SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[6]], dim=-1, keepdim=True)
 
-      #     # Transition band g-points (may be empty if boundary falls exactly on band edge)
-      #     sw_dir_dn_trans  = torch.sum(flux_sw_dn_direct [-1, :, i_nir_end:i_vis_start],  dim=-1, keepdim=True)
-      #     sw_diff_dn_trans = torch.sum(flux_sw_dn_diffuse[-1, :, i_nir_end:i_vis_start], dim=-1, keepdim=True)
+      #   elif self.gas_optics_model_sw1.num_bands==5:
+      #     # Band 3 is the transition band (~0.69–0.625 µm), split 50/50 into NIR and visible
+      #     sw_dir_dn_mixband  = torch.sum(flux_sw_dn_direct [-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
+      #     sw_diff_dn_mixband = torch.sum(flux_sw_dn_diffuse[-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
 
-      #     SOLL  = torch.sum(flux_sw_dn_direct [-1, :, :i_nir_end], dim=-1, keepdim=True) \
-      #             + (1.0 - vis_frac) * sw_dir_dn_trans
-      #     SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, :i_nir_end], dim=-1, keepdim=True) \
-      #             + (1.0 - vis_frac) * sw_diff_dn_trans
-      #     SOLS  = torch.sum(flux_sw_dn_direct [-1, :, i_vis_start:], dim=-1, keepdim=True) \
-      #             + vis_frac * sw_dir_dn_trans
-      #     SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, i_vis_start:], dim=-1, keepdim=True) \
-      #             + vis_frac * sw_diff_dn_trans
+      #     # SOLL/SOLLD: near-IR (bands 1+2 + half of band 3)
+      #     SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
+      #     SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
+
+      #     # SOLS/SOLSD: visible/UV (bands 4+5 + half of band 3)
+      #     SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
+      #     SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
+      #   else:
+      #     raise NotImplementedError("Only 5 or 6 band ML-GasOptics supported")
+
+      if self.use_new_sw_gas_optics:
+          gas = self.gas_optics_model_sw1
+          i_nir_end  = gas.i_gpt_nir_end          # e.g. 4  for 5-band
+          i_vis_start = gas.i_gpt_vis_start       # e.g. 13 for 5-band
+          vis_frac   = gas.vis_transition_fraction # e.g. ~0.87 for 5-band
+
+          # Transition band g-points (may be empty if boundary falls exactly on band edge)
+          sw_dir_dn_trans  = torch.sum(flux_sw_dn_direct [-1, :, i_nir_end:i_vis_start],  dim=-1, keepdim=True)
+          sw_diff_dn_trans = torch.sum(flux_sw_dn_diffuse[-1, :, i_nir_end:i_vis_start], dim=-1, keepdim=True)
+
+          SOLL  = torch.sum(flux_sw_dn_direct [-1, :, :i_nir_end], dim=-1, keepdim=True) \
+                  + (1.0 - vis_frac) * sw_dir_dn_trans
+          SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, :i_nir_end], dim=-1, keepdim=True) \
+                  + (1.0 - vis_frac) * sw_diff_dn_trans
+          SOLS  = torch.sum(flux_sw_dn_direct [-1, :, i_vis_start:], dim=-1, keepdim=True) \
+                  + vis_frac * sw_dir_dn_trans
+          SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, i_vis_start:], dim=-1, keepdim=True) \
+                  + vis_frac * sw_diff_dn_trans
       else:
         sw_dir_dn_mixband  = torch.sum(flux_sw_dn_direct [-1, :, iend_ir:iend_mix], dim=-1, keepdim=True)
         SOLL  = torch.sum(flux_sw_dn_direct [-1, :, 0:iend_ir],   dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
@@ -1702,7 +1746,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           qv    = inputs_denorm[:,:,-1:]
 
           if self.update_states_for_rad:
-          # if False:
             if self.training: 
               out_denorm    = torch.transpose(out_new_true,0,1) / self.yscale_lev.unsqueeze(1)
             else:
