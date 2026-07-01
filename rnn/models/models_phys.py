@@ -57,6 +57,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     update_states_for_rad: Final[bool] # 
     use_e3sm_cloud_optics: Final[bool] 
     map_e3sm_cloud_optics: Final[bool]
+    general_band_mapping: Final[bool]
     use_existing_gas_optics_lw: Final[bool] # Use existing RRTMGP-NN-LW
     use_existing_gas_optics_sw: Final[bool] # Use existing RRTMGP-NN-SW
     reduce_lw_gas_optics: Final[bool] # ...which may be combined with another MLP to shrink the spectral dim to e.g. 16 (otherwise expensive)
@@ -234,6 +235,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           self.update_states_for_rad  = True
           self.use_e3sm_cloud_optics  = cfg.use_e3sm_cloud_optics
           self.map_e3sm_cloud_optics  = cfg.map_e3sm_cloud_optics
+          self.general_band_mapping  = False
           # When using separate gas optics module, include water vapor variability by sampling from sub-grid states and doing two passes? 
           self.include_qv_variability = True
           # Option for using TripleClouds-style solver where fluxes are computed in each sub-grid region (nreg) and g-point,
@@ -258,8 +260,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           if not (self.use_existing_gas_optics_lw or self.use_existing_gas_optics_sw):
             self.use_e3sm_cloud_optics = False
 
-          print("use_e3sm_cld: {}, exp_rad {}, mcica: {}, include_qv_var: {}, updstates4rad {} liqfracmlp: {}".format(self.use_e3sm_cloud_optics, 
-                          self.experimental_rad, self.use_mcica, self.include_qv_variability, self.update_states_for_rad, self.pred_subgrid_liq_frac))
+          print("use_e3sm_cld: {}, exp_rad {}, mcica: {}, include_qv_var: {}, updstates4rad {} liqfracmlp: {}, generalband: {}".format(self.use_e3sm_cloud_optics, 
+                          self.experimental_rad, self.use_mcica, self.include_qv_variability, self.update_states_for_rad, self.pred_subgrid_liq_frac, self.general_band_mapping))
           
           self.ny_sw_optprops     = 3  # tau_abs, tau_sca, g
           self.ny_lw_optprops     = 2  # tau_abs, planck_fraction (Fraction of Planck source associated with each g-point)
@@ -322,6 +324,9 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           if not (self.use_existing_gas_optics_sw and (not self.reduce_sw_gas_optics)): 
             # self.sw_solar_weights   = nn.Parameter(torch.randn(1, self.ng_sw))
             self.sw_solar_weights = nn.Parameter(torch.zeros(1, self.ng_sw)) 
+
+          if self.use_new_sw_gas_optics:
+            self.vis_frac = nn.Parameter(torch.zeros(1)) 
 
           if not self.use_existing_gas_optics_sw:
             # self.mlp_sw_optprops    = nn.Linear(self.nx_sw_optprops, self.ny_sw_optprops*self.ng_sw)
@@ -1314,68 +1319,66 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
       if self.use_new_sw_gas_optics:
 
+        if self.general_band_mapping:
+          gas = self.gas_optics_model_sw1
+          i_nir_end   = gas.i_gpt_nir_end          # last g-point fully NIR (exclusive)
+          i_vis_start = gas.i_gpt_vis_start        # first g-point fully visible (inclusive)
+          # vis_frac    = gas.vis_transition_fraction # fraction of transition g-points that are visible
+          vis_frac = self.sigmoid(self.vis_frac)
+          # Fully NIR g-points
+          n_nir = i_nir_end
+          if n_nir > 0:
+              albedo_surf_dir_sw [0:i_nir_end] = aldir.expand(n_nir, -1)
+              albedo_surf_diff_sw[0:i_nir_end] = aldif.expand(n_nir, -1)
 
-        # bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
+          # Transition g-points (may be empty if i_nir_end == i_vis_start)
+          n_trans = i_vis_start - i_nir_end
+          if n_trans > 0:
+              albedo_surf_dir_sw [i_nir_end:i_vis_start] = (
+                  (1.0 - vis_frac) * aldir.expand(n_trans, -1) + vis_frac * asdir.expand(n_trans, -1)
+              )
+              albedo_surf_diff_sw[i_nir_end:i_vis_start] = (
+                  (1.0 - vis_frac) * aldif.expand(n_trans, -1) + vis_frac * asdif.expand(n_trans, -1)
+              )
+          # Fully visible g-points
+          n_vis = self.ng_sw - i_vis_start
+          if n_vis > 0:
+              albedo_surf_dir_sw [i_vis_start:] = asdir.expand(n_vis, -1)
+              albedo_surf_diff_sw[i_vis_start:] = asdif.expand(n_vis, -1)
+        else:
+          bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
 
-        # if self.gas_optics_model_sw1.num_bands==6:
-        #   # Bands 1+2+3 (820–14286 cm-1): near-IR
-        #   albedo_surf_dir_sw [bb[0]:bb[3]] = aldir.expand(bb[3] - bb[0], -1)
-        #   albedo_surf_diff_sw[bb[0]:bb[3]] = aldif.expand(bb[3] - bb[0], -1)
-        #   # Bands 4+5+6 (14286–50000 cm-1): visible/UV
-        #   albedo_surf_dir_sw [bb[3]:bb[6]] = asdir.expand(bb[6] - bb[3], -1)
-        #   albedo_surf_diff_sw[bb[3]:bb[6]] = asdif.expand(bb[6] - bb[3], -1)
-        # else:
-        #   # New 5-band gas optics with exact spectral boundaries:
-        #   #   band 1 (bb[0]:bb[1]): 250–4200   cm-1  → pure NIR  → aldir/aldif
-        #   #   band 2 (bb[1]:bb[2]): 4200–14500 cm-1  → pure NIR  → aldir/aldif
-        #   #   band 3 (bb[2]:bb[3]): 14500–16000 cm-1 → transition (~0.69–0.625 µm) → blend
-        #   #   band 4 (bb[3]:bb[4]): 16000–22000 cm-1 → pure vis   → asdir/asdif
-        #   #   band 5 (bb[4]:bb[5]): 22000–50000 cm-1 → pure UV    → asdir/asdif
-        #   print("got here, bb", bb, "wavenums", self.gas_optics_model_sw1.wavenum_bounds)
+          if self.gas_optics_model_sw1.num_bands==6:
+            # Bands 1+2+3 (820–14286 cm-1): near-IR
+            albedo_surf_dir_sw [bb[0]:bb[3]] = aldir.expand(bb[3] - bb[0], -1)
+            albedo_surf_diff_sw[bb[0]:bb[3]] = aldif.expand(bb[3] - bb[0], -1)
+            # Bands 4+5+6 (14286–50000 cm-1): visible/UV
+            albedo_surf_dir_sw [bb[3]:bb[6]] = asdir.expand(bb[6] - bb[3], -1)
+            albedo_surf_diff_sw[bb[3]:bb[6]] = asdif.expand(bb[6] - bb[3], -1)
+          else:
+            # New 5-band gas optics with exact spectral boundaries:
+            #   band 1 (bb[0]:bb[1]): 250–4200   cm-1  → pure NIR  → aldir/aldif
+            #   band 2 (bb[1]:bb[2]): 4200–14500 cm-1  → pure NIR  → aldir/aldif
+            #   band 3 (bb[2]:bb[3]): 14500–16000 cm-1 → transition (~0.69–0.625 µm) → blend
+            #   band 4 (bb[3]:bb[4]): 16000–22000 cm-1 → pure vis   → asdir/asdif
+            #   band 5 (bb[4]:bb[5]): 22000–50000 cm-1 → pure UV    → asdir/asdif
+            # print("got here, bb", bb, "wavenums", self.gas_optics_model_sw1.wavenum_bounds)
 
-        #   ng_b1  = bb[1] - bb[0]
-        #   ng_b2  = bb[2] - bb[1]
-        #   ng_b3  = bb[3] - bb[2]
-        #   ng_b4  = bb[4] - bb[3]
-        #   ng_b5  = bb[5] - bb[4]
-        #   # Bands 1+2: near-IR
-        #   albedo_surf_dir_sw [bb[0]:bb[2]] = aldir.expand(ng_b1 + ng_b2, -1)
-        #   albedo_surf_diff_sw[bb[0]:bb[2]] = aldif.expand(ng_b1 + ng_b2, -1)
-        #   # Band 3: transition — blend 50/50, matching the 0.7 µm boundary intent
-        #   albedo_surf_dir_sw [bb[2]:bb[3]] = 0.5 * (aldir.expand(ng_b3, -1) + asdir.expand(ng_b3, -1))
-        #   albedo_surf_diff_sw[bb[2]:bb[3]] = 0.5 * (aldif.expand(ng_b3, -1) + asdif.expand(ng_b3, -1))
-        #   # Bands 4+5: visible/UV
-        #   albedo_surf_dir_sw [bb[3]:bb[5]] = asdir.expand(ng_b4 + ng_b5, -1)
-        #   albedo_surf_diff_sw[bb[3]:bb[5]] = asdif.expand(ng_b4 + ng_b5, -1)
-        # # print("mean albedo_surf_dir_sw", albedo_surf_dir_sw.mean().item(), "albedo_surf_diff_sw ", albedo_surf_diff_sw.mean().item())
-
-        gas = self.gas_optics_model_sw1
-        i_nir_end   = gas.i_gpt_nir_end          # last g-point fully NIR (exclusive)
-        i_vis_start = gas.i_gpt_vis_start        # first g-point fully visible (inclusive)
-        vis_frac    = gas.vis_transition_fraction # fraction of transition g-points that are visible
-
-        # Fully NIR g-points
-        n_nir = i_nir_end
-        if n_nir > 0:
-            albedo_surf_dir_sw [0:i_nir_end] = aldir.expand(n_nir, -1)
-            albedo_surf_diff_sw[0:i_nir_end] = aldif.expand(n_nir, -1)
-
-        # Transition g-points (may be empty if i_nir_end == i_vis_start)
-        n_trans = i_vis_start - i_nir_end
-        if n_trans > 0:
-            albedo_surf_dir_sw [i_nir_end:i_vis_start] = (
-                (1.0 - vis_frac) * aldir.expand(n_trans, -1) + vis_frac * asdir.expand(n_trans, -1)
-            )
-            albedo_surf_diff_sw[i_nir_end:i_vis_start] = (
-                (1.0 - vis_frac) * aldif.expand(n_trans, -1) + vis_frac * asdif.expand(n_trans, -1)
-            )
-
-        # Fully visible g-points
-        n_vis = self.ng_sw - i_vis_start
-        if n_vis > 0:
-            albedo_surf_dir_sw [i_vis_start:] = asdir.expand(n_vis, -1)
-            albedo_surf_diff_sw[i_vis_start:] = asdif.expand(n_vis, -1)
-            
+            ng_b1  = bb[1] - bb[0]
+            ng_b2  = bb[2] - bb[1]
+            ng_b3  = bb[3] - bb[2]
+            ng_b4  = bb[4] - bb[3]
+            ng_b5  = bb[5] - bb[4]
+            # Bands 1+2: near-IR
+            albedo_surf_dir_sw [bb[0]:bb[2]] = aldir.expand(ng_b1 + ng_b2, -1)
+            albedo_surf_diff_sw[bb[0]:bb[2]] = aldif.expand(ng_b1 + ng_b2, -1)
+            # Band 3: transition — blend 50/50, matching the 0.7 µm boundary intent
+            albedo_surf_dir_sw [bb[2]:bb[3]] = 0.5 * (aldir.expand(ng_b3, -1) + asdir.expand(ng_b3, -1))
+            albedo_surf_diff_sw[bb[2]:bb[3]] = 0.5 * (aldif.expand(ng_b3, -1) + asdif.expand(ng_b3, -1))
+            # Bands 4+5: visible/UV
+            albedo_surf_dir_sw [bb[3]:bb[5]] = asdir.expand(ng_b4 + ng_b5, -1)
+            albedo_surf_diff_sw[bb[3]:bb[5]] = asdif.expand(ng_b4 + ng_b5, -1)
+              
       else:
         # ------- COMPUTE SURFACE SPECTRAL ALBEDO TO DIRECT AND DIFFUSE RADIATION --
         # 
@@ -1476,52 +1479,62 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         flux_sw_up = torch.reshape(flux_sw_up, (nlev+1, batch_size, self.ng_sw))
         flux_sw_dn_diffuse = torch.reshape(flux_sw_dn_diffuse, (nlev+1, batch_size, self.ng_sw))
         flux_sw_dn_direct = torch.reshape(flux_sw_dn_direct, (nlev+1, batch_size, self.ng_sw))
-                
-      # Sum over whole / parts of spectral dimension to get broadband / band-wise fluxes
-      # if self.use_new_sw_gas_optics:
-      #   bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
-      #   if self.gas_optics_model_sw1.num_bands==6:
-          
-      #     # For 6-band model the 14286 cm-1 NIR/vis boundary falls exactly at bb[3],
-      #     # so no transition blending needed
-      #     SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[3]], dim=-1, keepdim=True)
-      #     SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[3]], dim=-1, keepdim=True)
-      #     SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[6]], dim=-1, keepdim=True)
-      #     SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[6]], dim=-1, keepdim=True)
 
-      #   elif self.gas_optics_model_sw1.num_bands==5:
-      #     # Band 3 is the transition band (~0.69–0.625 µm), split 50/50 into NIR and visible
-      #     sw_dir_dn_mixband  = torch.sum(flux_sw_dn_direct [-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
-      #     sw_diff_dn_mixband = torch.sum(flux_sw_dn_diffuse[-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
-
-      #     # SOLL/SOLLD: near-IR (bands 1+2 + half of band 3)
-      #     SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
-      #     SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
-
-      #     # SOLS/SOLSD: visible/UV (bands 4+5 + half of band 3)
-      #     SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
-      #     SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
-      #   else:
-      #     raise NotImplementedError("Only 5 or 6 band ML-GasOptics supported")
 
       if self.use_new_sw_gas_optics:
-          gas = self.gas_optics_model_sw1
-          i_nir_end  = gas.i_gpt_nir_end          # e.g. 4  for 5-band
-          i_vis_start = gas.i_gpt_vis_start       # e.g. 13 for 5-band
-          vis_frac   = gas.vis_transition_fraction # e.g. ~0.87 for 5-band
+          if self.general_band_mapping:
+            gas = self.gas_optics_model_sw1
+            i_nir_end  = gas.i_gpt_nir_end          # e.g. 4  for 5-band
+            i_vis_start = gas.i_gpt_vis_start       # e.g. 13 for 5-band
+            # vis_frac   = gas.vis_transition_fraction # e.g. ~0.87 for 5-band
+            vis_frac = self.sigmoid(self.vis_frac)
+            # print("vis frac", vis_frac.item())
 
-          # Transition band g-points (may be empty if boundary falls exactly on band edge)
-          sw_dir_dn_trans  = torch.sum(flux_sw_dn_direct [-1, :, i_nir_end:i_vis_start],  dim=-1, keepdim=True)
-          sw_diff_dn_trans = torch.sum(flux_sw_dn_diffuse[-1, :, i_nir_end:i_vis_start], dim=-1, keepdim=True)
+            # Transition band g-points (may be empty if boundary falls exactly on band edge)
+            sw_dir_dn_trans  = torch.sum(flux_sw_dn_direct [-1, :, i_nir_end:i_vis_start],  dim=-1, keepdim=True)
+            sw_diff_dn_trans = torch.sum(flux_sw_dn_diffuse[-1, :, i_nir_end:i_vis_start], dim=-1, keepdim=True)
 
-          SOLL  = torch.sum(flux_sw_dn_direct [-1, :, :i_nir_end], dim=-1, keepdim=True) \
-                  + (1.0 - vis_frac) * sw_dir_dn_trans
-          SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, :i_nir_end], dim=-1, keepdim=True) \
-                  + (1.0 - vis_frac) * sw_diff_dn_trans
-          SOLS  = torch.sum(flux_sw_dn_direct [-1, :, i_vis_start:], dim=-1, keepdim=True) \
-                  + vis_frac * sw_dir_dn_trans
-          SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, i_vis_start:], dim=-1, keepdim=True) \
-                  + vis_frac * sw_diff_dn_trans
+            SOLL  = torch.sum(flux_sw_dn_direct [-1, :, :i_nir_end], dim=-1, keepdim=True) \
+                    + (1.0 - vis_frac) * sw_dir_dn_trans
+            SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, :i_nir_end], dim=-1, keepdim=True) \
+                    + (1.0 - vis_frac) * sw_diff_dn_trans
+            SOLS  = torch.sum(flux_sw_dn_direct [-1, :, i_vis_start:], dim=-1, keepdim=True) \
+                    + vis_frac * sw_dir_dn_trans
+            SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, i_vis_start:], dim=-1, keepdim=True) \
+                    + vis_frac * sw_diff_dn_trans
+          else:
+
+            # print("1 mean SOLL", SOLL.mean().item(), "SOLLD", SOLLD.mean().item())
+            # print("1 mean SOLS", SOLS.mean().item(), "SOLSD", SOLSD.mean().item())
+
+            # Sum over whole / parts of spectral dimension to get broadband / band-wise fluxes
+            bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
+            if self.gas_optics_model_sw1.num_bands==6:
+              
+              # For 6-band model the 14286 cm-1 NIR/vis boundary falls exactly at bb[3],
+              # so no transition blending needed
+              SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[3]], dim=-1, keepdim=True)
+              SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[3]], dim=-1, keepdim=True)
+              SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[6]], dim=-1, keepdim=True)
+              SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[6]], dim=-1, keepdim=True)
+
+            elif self.gas_optics_model_sw1.num_bands==5:
+              # Band 3 is the transition band (~0.69–0.625 µm), split 50/50 into NIR and visible
+              sw_dir_dn_mixband  = torch.sum(flux_sw_dn_direct [-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
+              sw_diff_dn_mixband = torch.sum(flux_sw_dn_diffuse[-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
+
+              # SOLL/SOLLD: near-IR (bands 1+2 + half of band 3)
+              SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
+              SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
+
+              # SOLS/SOLSD: visible/UV (bands 4+5 + half of band 3)
+              SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
+              SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
+              # print("2 mean SOLL", SOLL.mean().item(), "SOLLD", SOLLD.mean().item())
+              # print("2 mean SOLS", SOLS.mean().item(), "SOLSD", SOLSD.mean().item())
+     
+            else:
+              raise NotImplementedError("Only 5 or 6 band ML-GasOptics supported")
       else:
         sw_dir_dn_mixband  = torch.sum(flux_sw_dn_direct [-1, :, iend_ir:iend_mix], dim=-1, keepdim=True)
         SOLL  = torch.sum(flux_sw_dn_direct [-1, :, 0:iend_ir],   dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
