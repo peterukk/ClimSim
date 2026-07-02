@@ -1561,25 +1561,18 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       flux_sw_dn_diffuse  = torch.sum(flux_sw_dn_diffuse,dim=2)
       flux_sw_dn_direct   = torch.sum(flux_sw_dn_direct,dim=2)
       
-      flux_sw_dn          = flux_sw_dn_diffuse + flux_sw_dn_direct
-      flux_sw_dn_sfc      = flux_sw_dn[-1,:].unsqueeze(1)             # NETSW  
+      flux_sw_dn      = flux_sw_dn_diffuse + flux_sw_dn_direct
+      flux_sw_net     = flux_sw_dn - flux_sw_up
+      NETSW           = flux_sw_net[-1,:].unsqueeze(1)     # net SW radiation at surface        
 
-      flux_sw_net = flux_sw_dn - flux_sw_up
       # We did SW computations in all columns, so now we need to zero out nighttime columns
       inds_zero = inputs_aux[:,6] < min_mu
       flux_sw_net[:,inds_zero] = 0.0
-      flux_sw_dn_sfc[inds_zero] = 0.0
+      NETSW[inds_zero] = 0.0
       SOLL[inds_zero] = 0.0
       SOLS[inds_zero] = 0.0
       SOLLD[inds_zero] = 0.0
       SOLSD[inds_zero] = 0.0
-
-      # print("SOLL", SOLL.mean().item(), "SOLLD", SOLLD.mean().item(), "SOLS", SOLS.mean().item(), "SOLSD", SOLSD.mean().item())
-      # SOLL[:] = 0.0 
-      # SOLLD[:] = 0.0 
-      # SOLS[:] = 0.0
-      # SOLSD[:] = 0.0
-      
 
       if self.printdebug:
         print("flux sw dn ", flux_sw_dn.mean(dim=1))
@@ -1587,14 +1580,14 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         print("flux sw up ", flux_sw_up.mean(dim=1))
         # print("mu0", inputs_aux[500,6:7])
 
-      flux_lw_dn_sfc  = flux_lw_dn[-1,:].unsqueeze(1)             # FLWDS 
+      FLWDS           = flux_lw_dn[-1,:].unsqueeze(1)   # downwelling longwave radiation at surface 
       flux_lw_net     = flux_lw_dn - flux_lw_up
       flux_net        = flux_lw_net + flux_sw_net
       flux_diff       = flux_net[1:,:] - flux_net[0:-1,:]
       dT_rad          = -(flux_diff / delta_plev.squeeze()) * 0.009761357302 # * g/cp = 9.80665 / 1004.64
       dT_rad          = dT_rad * self.yscale_lev[:,0:1] # scaling (physical computations gave us unscaled tendency, but target outputs are scaled)
       
-      out_sfc_rad = torch.cat((flux_sw_dn_sfc, flux_lw_dn_sfc,  SOLS, SOLL, SOLSD, SOLLD ), dim=1)
+      out_sfc_rad = torch.cat((NETSW, FLWDS,  SOLS, SOLL, SOLSD, SOLLD ), dim=1)
       out_sfc_rad = out_sfc_rad * self.yscale_sca_rad
 
       return dT_rad, out_sfc_rad
