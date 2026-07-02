@@ -14,8 +14,9 @@ from models_torch_kernels import *
 from .physics_rad import outgoing_lw, reftrans_lw, lw_solver_noscat_batchlast, calc_overlap_matrices
 from .physics_rad import calc_ref_trans_sw, adding_ica_sw_batchlast_opt, adding_ica_sw, adding_tc_sw_batchlast_opt
 from .physics_rad import stratified_sample, interpolate_tlev_batchfirst, interpolate_tlev_batchlast
-from .physics_rad_e3sm import reitab, reltab, slingo_liq_cloud_optics_sw, ec_ice_optics_sw
+from .physics_rad_e3sm import reitab, reltab, slingo_liq_cloud_optics_sw, ec_ice_optics_sw, e3sm_cloud_optics_sw
 from metrics import specific_to_relative_humidity_torch_cc
+from norm_coefficients import rrtmgp_sw_solar_source
 import numpy as np 
 from typing import Final 
 import time
@@ -111,6 +112,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         self.outgoing_lw = outgoing_lw
         self.slingo_liq_cloud_optics_sw = slingo_liq_cloud_optics_sw 
         self.ec_ice_optics_sw = ec_ice_optics_sw
+        self.e3sm_cloud_optics_sw = e3sm_cloud_optics_sw
         self.specific_to_relative_humidity_torch_cc = specific_to_relative_humidity_torch_cc
         self.printdebug = False
         # --------- Moist physics options configured in cfg ---------
@@ -301,7 +303,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
                 self.reduce_sw_gas_optics = True 
               elif self.ng_sw==112: # RRTMGP-NN 
-                from norm_coefficients import rrtmgp_sw_solar_source
                 rrtmgp_sw_solar_source = rrtmgp_sw_solar_source/np.sum(rrtmgp_sw_solar_source)
                 sw_solar_weights = torch.tensor(rrtmgp_sw_solar_source, device=device).unsqueeze(0)
                 self.register_buffer('sw_solar_weights', sw_solar_weights)
@@ -1029,23 +1030,36 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             elif self.use_new_sw_gas_optics:
                 # Get cloud optics in Slingo's native 4 bands (no learned mapping needed)
                 # slingo returns (k, ssa, g) each of shape (..., 4)
-                k_sw_cld_liq4,   ssa_sw_cld_liq4,   g_sw_cld_liq4   = self.slingo_liq_cloud_optics_sw(liq_eff_rad, ng=4)
-                k_sw_cld_ice4,   ssa_sw_cld_ice4,   g_sw_cld_ice4   = self.ec_ice_optics_sw(ice_eff_rad, ng=4)
+                if False:
+                  k_sw_cld_liq4,   ssa_sw_cld_liq4,   g_sw_cld_liq4   = self.slingo_liq_cloud_optics_sw(liq_eff_rad, ng=4)
+                  k_sw_cld_ice4,   ssa_sw_cld_ice4,   g_sw_cld_ice4   = self.ec_ice_optics_sw(ice_eff_rad, ng=4)
+                  # print("mean ksw", k_sw_cld_liq4.mean().item(), "shape", k_sw_cld_liq4.shape)
+            
+                  k_sw_cld_liq   = self.expand_slingo_to_bands(k_sw_cld_liq4)
+                  ssa_sw_cld_liq = self.expand_slingo_to_bands(ssa_sw_cld_liq4)
+                  g_sw_cld_liq   = self.expand_slingo_to_bands(g_sw_cld_liq4)
+                  ksca_sw_cld_liq  = k_sw_cld_liq  * ssa_sw_cld_liq
+                  kscag_sw_cld_liq = ksca_sw_cld_liq * g_sw_cld_liq
 
-                bb = self.gas_optics_model_sw1.band_bounds  # [0, b1, b2, b3, b4, ng_sw]
-                ng = self.ng_sw
+                  k_sw_cld_ice   = self.expand_slingo_to_bands(k_sw_cld_ice4)
+                  ssa_sw_cld_ice = self.expand_slingo_to_bands(ssa_sw_cld_ice4)
+                  g_sw_cld_ice   = self.expand_slingo_to_bands(g_sw_cld_ice4)
+                  ksca_sw_cld_ice  = k_sw_cld_ice  * ssa_sw_cld_ice
+                  kscag_sw_cld_ice = ksca_sw_cld_ice * g_sw_cld_ice
+                else:
+                  wb = self.gas_optics_model_sw1.wavenum_bounds
+                  bb = self.gas_optics_model_sw1.band_bounds  # [0, b1, b2, b3, b4, ng_sw]
+                  ng = self.ng_sw
 
-                k_sw_cld_liq   = self.expand_slingo_to_bands(k_sw_cld_liq4)
-                ssa_sw_cld_liq = self.expand_slingo_to_bands(ssa_sw_cld_liq4)
-                g_sw_cld_liq   = self.expand_slingo_to_bands(g_sw_cld_liq4)
-                ksca_sw_cld_liq  = k_sw_cld_liq  * ssa_sw_cld_liq
-                kscag_sw_cld_liq = ksca_sw_cld_liq * g_sw_cld_liq
+                  k_sw_cld_liq,   ssa_sw_cld_liq,   g_sw_cld_liq   = self.e3sm_cloud_optics_sw(liq_eff_rad, wavenum_bounds=wb,band_bounds=bb,type="liquid")
+                  ksca_sw_cld_liq  = k_sw_cld_liq  * ssa_sw_cld_liq
+                  kscag_sw_cld_liq = ksca_sw_cld_liq * g_sw_cld_liq
 
-                k_sw_cld_ice   = self.expand_slingo_to_bands(k_sw_cld_ice4)
-                ssa_sw_cld_ice = self.expand_slingo_to_bands(ssa_sw_cld_ice4)
-                g_sw_cld_ice   = self.expand_slingo_to_bands(g_sw_cld_ice4)
-                ksca_sw_cld_ice  = k_sw_cld_ice  * ssa_sw_cld_ice
-                kscag_sw_cld_ice = ksca_sw_cld_ice * g_sw_cld_ice
+                  k_sw_cld_ice,   ssa_sw_cld_ice,   g_sw_cld_ice  =  self.e3sm_cloud_optics_sw(liq_eff_rad, wavenum_bounds=wb,band_bounds=bb,type="ice")
+                  ksca_sw_cld_ice  = k_sw_cld_ice  * ssa_sw_cld_ice
+                  kscag_sw_cld_ice = ksca_sw_cld_ice * g_sw_cld_ice
+                  # print("2mean ksw", k_sw_cld_liq4.mean().item(), "shape", k_sw_cld_liq4.shape)
+
             else:
               k_sw_cld_liq, ksca_sw_cld_liq, kscag_sw_cld_liq = self.slingo_liq_cloud_optics_sw(liq_eff_rad, self.ng_sw)
               ksca_sw_cld_liq  = k_sw_cld_liq*ksca_sw_cld_liq # ksca_sw_cld_liq is ssa before this line
@@ -1487,7 +1501,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             i_nir_end  = gas.i_gpt_nir_end          # e.g. 4  for 5-band
             i_vis_start = gas.i_gpt_vis_start       # e.g. 13 for 5-band
             # vis_frac   = gas.vis_transition_fraction # e.g. ~0.87 for 5-band
-            vis_frac = self.sigmoid(self.vis_frac)
+            # vis_frac = self.sigmoid(self.vis_frac)
             # print("vis frac", vis_frac.item())
 
             # Transition band g-points (may be empty if boundary falls exactly on band edge)

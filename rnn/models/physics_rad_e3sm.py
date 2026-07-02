@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.parameter as Parameter
 import torch.nn.functional as F
 from torch import Tensor
+from typing import Sequence, Optional, List
 
 def reitab(t: torch.Tensor) -> torch.Tensor:
     """
@@ -158,19 +159,69 @@ def slingo_liq_cloud_optics_sw(rel:torch.Tensor, ng:int=4):
         # y[:, i_lim6:]       = x[:, 0:1]
         
         # Original Fortran code for Slingo cloud optics computations in 4 specific bands commented out below:
-        # if(wavmax(ns) <= 0.7_r8) then
-        #     indxsl = 1
-        #  else if(wavmax(ns) <= 1.25_r8) then
-        #     indxsl = 2
-        #  else if(wavmax(ns) <= 2.38_r8) then
-        #     indxsl = 3
-        #  else if(wavmax(ns) > 2.38_r8) then
-        #     indxsl = 4
-        # end if
-        
-        # cld_tau_bnd_sw(ico,ilay,indxsl) = ....
+        # subroutine slingo_liq_optics_sw(ncol, nlev, cldn, cliqwp, rel, liq_tau, liq_tau_w, liq_tau_w_g, liq_tau_w_f)
 
-        # ! Fortran code for mapping from these bands to RRTMGP:
+        # integer, intent(in) :: ncol, nlev
+
+        # ! Inputs have dimension ncol,nlev
+        # real(r8), intent(in), dimension(:,:) :: rel
+        # real(r8), intent(in), dimension(:,:) :: cldn
+        # real(r8), intent(in), dimension(:,:) :: cliqwp 
+
+        # ! Outputs have dimension nbnd,ncol,nlev
+        # real(r8),intent(out) :: liq_tau    (:,:,:) ! extinction optical depth
+        # real(r8),intent(out) :: liq_tau_w  (:,:,:) ! single scattering albedo * tau
+        # real(r8),intent(out) :: liq_tau_w_g(:,:,:) ! assymetry parameter * tau * w
+        # real(r8),intent(out) :: liq_tau_w_f(:,:,:) ! forward scattered fraction * tau * w
+
+        # real(r8), dimension(nswbands)     :: wavmin
+        # real(r8), dimension(nswbands)     :: wavmax
+
+        # ...
+
+        # call get_sw_spectral_boundaries(wavmin,wavmax,'microns')
+        # do ns = 1, nswbands
+        #     ! Set index for cloud particle properties based on the wavelength,
+        #     ! according to A. Slingo (1989) equations 1-3:
+        #     ! Use index 1 (0.25 to 0.69 micrometers) for visible
+        #     ! Use index 2 (0.69 - 1.19 micrometers) for near-infrared
+        #     ! Use index 3 (1.19 to 2.38 micrometers) for near-infrared
+        #     ! Use index 4 (2.38 to 4.00 micrometers) for near-infrared
+        #     if(wavmax(ns) <= 0.7_r8) then
+        #     indxsl = 1
+        #     else if(wavmax(ns) <= 1.25_r8) then
+        #     indxsl = 2
+        #     else if(wavmax(ns) <= 2.38_r8) then
+        #     indxsl = 3
+        #     else if(wavmax(ns) > 2.38_r8) then
+        #     indxsl = 4
+        #     end if
+        #     ! Set cloud extinction optical depth, single scatter albedo,
+        #     ! asymmetry parameter, and forward scattered fraction:
+        #     abarli = abarl(indxsl)
+        #     bbarli = bbarl(indxsl)
+        #     cbarli = cbarl(indxsl)
+        #     dbarli = dbarl(indxsl)
+        #     ebarli = ebarl(indxsl)
+        #     fbarli = fbarl(indxsl)
+
+        #     do k=1,nlev
+        #         do i=1,ncol
+
+        #         ! note that optical properties for liquid valid only
+        #         ! in range of 4.2 > rel > 16 micron (Slingo 89)
+        #         if (cldn(i,k) >= cldmin .and. cldn(i,k) >= cldeps) then
+        #             tmp1l = abarli + bbarli/min(max(rel_min,rel(i,k)),rel_max)
+        #             liq_tau(ns,i,k) = 1000._r8*cliqwp(i,k)*tmp1l
+        #         else
+        #             liq_tau(ns,i,k) = 0.0_r8
+        #         endif
+
+        #         tmp2l = 1._r8 - cbarli - dbarli*min(max(rel_min,rel(i,k)),rel_max)
+        #         tmp3l = fbarli*min(max(rel_min,rel(i,k)),rel_max)
+        #     ...
+
+        # ! Fortran code for reordering from RRTMG order to RRTMGP
         # real(r8),parameter :: wavenum_low(nbndsw) = & ! in cm^-1
         # (/2600._r8, 3250._r8, 4000._r8, 4650._r8, 5150._r8, 6150._r8, 7700._r8, 8050._r8,12850._r8,16000._r8,22650._r8,29000._r8,38000._r8,  820._r8/)
         # real(r8),parameter :: wavenum_high(nbndsw) = & ! in cm^-1
@@ -191,7 +242,6 @@ def slingo_liq_cloud_optics_sw(rel:torch.Tensor, ng:int=4):
         #     end do
         # end function reordered
         
-        # ! Do mapping from Slingo cloud optics bands to RRTMGP
         # do icol = 1,size(cld_tau_bnd_sw,1)
         #     do ilay = 1,size(cld_tau_bnd_sw,2)
         #        cld_tau_bnd_sw(icol,ilay,:) = reordered(cld_tau_bnd_sw(icol,ilay,:), rrtmg_to_rrtmgp_swbands)
@@ -245,7 +295,98 @@ def ec_ice_optics_sw(rei:torch.Tensor, ng:int=4):
         ssa     = (1.0 - coeffs3 - re_um * coeffs4).clamp(max=0.999999)
         g       = coeffs5 + re_um * coeffs6
     return k, ssa, g 
+
+
+
+
+def e3sm_cloud_optics_sw(
+    re: torch.Tensor,
+    wavenum_bounds: List[int],
+    band_bounds: List[int],
+    type: str,
+):
     
+    # Input: rel (cloud liquid effective radius), ng (number of g-points/bands)
+    # Here we compute cloud optical properties using the Slingo scheme, which uses 4 different bands 
+    # We also inline the mapping of the cloud optical properties in these 4 bands to our g-point discretization
+    # If our gas optics model equals RRTMGP, then this function should give similar results as original E3SM code (links below)
+    # Note the McICA sampling is done outside - here we compute "normalized" cloud optical properties which are later multiplied 
+    # with cloud water paths which are sampled using McICA
+    # Adapted from https://github.com/NVlabs/E3SM/blob/main/components/eam/src/physics/rrtmgp/slingo.F90#L32
+    # https://github.com/NVlabs/E3SM/blob/c92b443306bd8e7c3796ccc9966d43190da992d5/components/eam/src/physics/rrtmgp/radiation.F90#L1290
+    # Slingo look-up-table coefficients in vector form (length 4 equals number of bands)
+    if type=="liquid":
+        coeffs1 = torch.tensor([2.817e-02, 2.682e-02, 2.264e-02, 1.281e-02], dtype=re.dtype, device=re.device)  # A: extinction OD
+        coeffs2 = torch.tensor([1.305,     1.346,     1.454,     1.641    ], dtype=re.dtype, device=re.device)  # B: extinction OD
+        coeffs3 = torch.tensor([-5.62e-08, -6.94e-06, 4.64e-04,  0.201    ], dtype=re.dtype, device=re.device)  # C: single scat albedo
+        coeffs4 = torch.tensor([1.63e-07,  2.35e-05,  1.24e-03,  7.56e-03 ], dtype=re.dtype, device=re.device)  # D: single scat albedo
+        coeffs5 = torch.tensor([0.829,     0.794,     0.754,     0.826    ], dtype=re.dtype, device=re.device)  # E: asymmetry parameter
+        coeffs6 = torch.tensor([2.482e-03, 4.226e-03, 6.560e-03, 4.353e-03], dtype=re.dtype, device=re.device)  # F: asymmetry parameter
+        # print("liq")
+        re_um   = re.clamp(4.2, 16.0)
+    elif type=="ice":
+        coeffs1 = torch.tensor([3.448e-03, 3.448e-03, 3.448e-03, 3.448e-03], dtype=re.dtype, device=re.device)  # a: extinction OD
+        coeffs2 = torch.tensor([2.431,     2.431,     2.431,     2.431    ], dtype=re.dtype, device=re.device)  # b: extinction OD
+        coeffs3 = torch.tensor([1.00e-05,  1.10e-04,  1.861e-02, 0.46658  ], dtype=re.dtype, device=re.device)  # c: single scat albedo
+        coeffs4 = torch.tensor([0.0,       1.405e-05, 8.328e-04, 2.05e-05 ], dtype=re.dtype, device=re.device)  # d: single scat albedo
+        coeffs5 = torch.tensor([0.7661,    0.7730,    0.794,     0.9595   ], dtype=re.dtype, device=re.device)  # e: asymmetry parameter
+        coeffs6 = torch.tensor([5.851e-04, 5.665e-04, 7.267e-04, 1.076e-04], dtype=re.dtype, device=re.device)  # f: asymmetry parameter
+        re_um   = re.clamp(13.0, 130.0)
+        # print("ice")
+    else:
+        raise NotImplementedError("invalid type arg to e3sm_cloud_optics_sw")
+
+    # RRTMGP bands and g-points:
+    # bnd_limits_gpt
+    # 1,10     | 11,18    | 19,29    | 30,37   | 38,46     | 47,56     | 57,67     | 68,71      | 72,80      |  81,89    | 90, 96    | 97, 102   | 103, 109 | 110, 112 
+    # bnd_limits_wavenumber
+    # 820,2680 | 2680,3250 | 3250,4k | 4k,4650 | 4650,5150 | 5150,6150 | 6150,7700 | 7700,8050  | 8050,12850 | 12850,16k | 16k,22650 | 22650,29k | 29k,38k  | 38k,50k 
+    # in micrometers 
+    # 12.2,3.73| 3.73,3.08 | 3.08,2.5| 2.5,2.15| 2.15,1.94 | 1.94,1.63 | 1.63,1.3  | 1.3,1.24   | 1.24,0.78  | 0.78,0.62 | 0.62,0.44 | 0.44,0.34 | 0.34,0.26| 0.26  0.2 ]
+    # band 1        2         3           4           5         6             7         8              9           10         11          12         13         14
+
+    n_bands = len(wavenum_bounds) - 1
+    # gpt_counts = band_bounds[1:] - band_bounds[0:]
+    bb = band_bounds
+    # ng = int(sum(gpt_counts))
+
+    # Convert increasing wavenumber boundaries to gas-band lower edges.
+    # For each gas band [nu_low, nu_high], maximum wavelength is
+    # lambda_max = 10000 / nu_low, with nu in cm^-1 and lambda in micron.
+    nu_low = torch.tensor(
+        list(wavenum_bounds[:-1]),
+        dtype=re.dtype,
+        device=re.device,
+    )
+    wavmax_um = 10000.0 / nu_low
+
+    slingo_idx = torch.bucketize(
+        wavmax_um,
+        torch.tensor([0.7, 1.25, 2.38], dtype=re.dtype, device=re.device),
+        right=True,
+    )
+
+
+    # Expand gas-band mapping to g-points if requested.
+    # This preserves the user's gas-optics ordering, assumed to be
+    # increasing wavenumber / decreasing wavelength.
+    repeats = torch.tensor(
+        [bb[i + 1] - bb[i] for i in range(len(bb) - 1)],
+        dtype=torch.long,
+        device=re.device,
+    )
+
+    band_to_gpt = torch.repeat_interleave(slingo_idx, repeats)
+
+    x = torch.stack([coeffs1, coeffs2, coeffs3, coeffs4, coeffs5, coeffs6])
+    y = x[:, band_to_gpt]
+
+    k = y[0] + y[1] / re_um
+    ssa = (1.0 - y[2] - re_um * y[3]).clamp(max=0.999999)
+    g = y[4] + re_um * y[5]
+
+    return k, ssa, g     
+
 
 # class slingo_style_general_liq_cloud_optics_sw:
 #     def __init__(self, ng:int=16):
