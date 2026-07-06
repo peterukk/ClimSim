@@ -201,8 +201,7 @@ def main(cfg: DictConfig):
     
     dims = hf['output_sca'].shape; ny_sfc = dims[-1]
     vars_1D_outp = hf['output_sca'].attrs.get('varnames').tolist()
-    #1D (scalar) Output variables: ['cam_out_NETSW', 'cam_out_FLWDS', 'cam_out_PRECSC', 
-    #'cam_out_PRECC', 'cam_out_SOLS', 'cam_out_SOLL', 'cam_out_SOLSD', 'cam_out_SOLLD']
+    #1D (scalar) Output variables: ['NETSW', 'FLWDS', 'PRECSC', 'PRECC', 'SOLS', 'SOLL', 'SOLSD', 'SOLLD']
     
     hf.close()
     
@@ -252,7 +251,8 @@ def main(cfg: DictConfig):
     if cfg.use_rh_loss:
         if not (cfg.include_q_input or cfg.rh_input_to_q):
             raise NotImplementedError("use_rh_loss was on, need q input, setting include_q_input or rh_input_to_q to true")
-    if cfg.model_type=="physRNN": cfg.predict_fluxes = True 
+    if cfg.model_type=="physRNN": 
+      cfg.predict_fluxes = True 
     print("ns", ns, "nloc", nloc, "nlev", nlev,  "nx", nx, "nx_sfc", nx_sfc, "ny", ny, "ny_sfc", ny, flush=True)
 
     yscale_sca = output_scale[vars_1D_outp].to_dataarray(dim='features', name='outputs_sca').transpose().values
@@ -288,13 +288,7 @@ def main(cfg: DictConfig):
             raise NotImplementedError()
             
         if cfg.predict_fluxes:
-            # scaleval = 1.0
-            # scaleval = 1.0e8
             scaleval = 1.58e8
-            # scalelev = scaleval*np.ones((nlev),dtype=np.float32)
-            # yscale_lev[:,1] = scalelev
-            # yscale_lev[:,2] = scalelev
-
             if cfg.mp_mode==-1:
                 yscale_lev_new = np.repeat(np.array([1.87819e+04, scaleval, scaleval, 1.0,  5.00182e+04, 6.21923e+04], dtype=np.float32).reshape((1,-1)),nlev,axis=0)
             elif cfg.mp_mode==-2: #                                         cld_water_frac
@@ -869,7 +863,7 @@ def main(cfg: DictConfig):
                  qinput_prune=cfg.qinput_prune, rh_prune=cfg.rh_prune,
                  rh_to_q=cfg.rh_input_to_q, include_q_input=cfg.include_q_input, use_ar_noise=False, 
                  snowhice_fix=cfg.snowhice_fix, v5_input=cfg.v4_to_v5_inputs, is_stochastic=is_stochastic, add_stochastic_layer=model.add_stochastic_layer,
-                 perturb=False, return_det=False)
+                 predict_fluxes=cfg.predict_fluxes,perturb=False, return_det=False)
       scripted_model_wrapped_gpu = scripted_model_wrapped_gpu.to(device)
       scripted_model_wrapped_gpu = torch.jit.script(scripted_model_wrapped_gpu)
       scripted_model_wrapped_gpu = scripted_model_wrapped_gpu.eval()
@@ -882,7 +876,7 @@ def main(cfg: DictConfig):
                  qinput_prune=cfg.qinput_prune, rh_prune=cfg.rh_prune,
                  rh_to_q=cfg.rh_input_to_q, include_q_input=cfg.include_q_input, use_ar_noise=False, 
                  snowhice_fix=cfg.snowhice_fix, v5_input=cfg.v4_to_v5_inputs,  is_stochastic=is_stochastic, add_stochastic_layer=model.add_stochastic_layer,
-                 perturb=False, return_det=False)
+                 predict_fluxes=cfg.predict_fluxes,perturb=False, return_det=False)
       scripted_model_wrapped_cpu = torch.jit.script(scripted_model_wrapped_cpu)
       scripted_model_wrapped_cpu = scripted_model_wrapped_cpu.eval()
       scripted_model_wrapped_cpu = torch.jit.optimize_for_inference(scripted_model_wrapped_cpu)
@@ -1012,7 +1006,7 @@ def main(cfg: DictConfig):
                  qinput_prune=cfg.qinput_prune, rh_prune=cfg.rh_prune,
                  rh_to_q=cfg.rh_input_to_q, include_q_input=cfg.include_q_input, use_ar_noise=False, 
                  snowhice_fix=cfg.snowhice_fix, v5_input=cfg.v4_to_v5_inputs, is_stochastic=is_stochastic, add_stochastic_layer=model.add_stochastic_layer,
-                 perturb=False, return_det=False)
+                 predict_fluxes=cfg.predict_fluxes,perturb=False, return_det=False)
                 scripted_model_wrapped_gpu = scripted_model_wrapped_gpu.to(device)
                 scripted_model_wrapped_gpu = torch.jit.script(scripted_model_wrapped_gpu)
                 scripted_model_wrapped_gpu = scripted_model_wrapped_gpu.eval()
@@ -1025,7 +1019,7 @@ def main(cfg: DictConfig):
                             qinput_prune=cfg.qinput_prune, rh_prune=cfg.rh_prune,
                             rh_to_q=cfg.rh_input_to_q, include_q_input=cfg.include_q_input, use_ar_noise=False, 
                             snowhice_fix=cfg.snowhice_fix, v5_input=cfg.v4_to_v5_inputs,  is_stochastic=is_stochastic, add_stochastic_layer=model.add_stochastic_layer,
-                            perturb=False, return_det=False)
+                            predict_fluxes=cfg.predict_fluxes,perturb=False, return_det=False)
                 scripted_model_wrapped_cpu = torch.jit.script(scripted_model_wrapped_cpu)
                 scripted_model_wrapped_cpu = scripted_model_wrapped_cpu.eval()
                 scripted_model_wrapped_cpu = torch.jit.optimize_for_inference(scripted_model_wrapped_cpu)

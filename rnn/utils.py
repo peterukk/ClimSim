@@ -84,6 +84,7 @@ class model_wrapper(nn.Module):
     nlev_mem: Final[int]
     is_stochastic: Final[bool]
     add_stochastic_layer: Final[bool]
+    predict_fluxes: Final[bool]
 
     qinput_prune, snowhice_fix, v5_input, perturb, rh_prune = False, True, False, False, False
 
@@ -91,7 +92,7 @@ class model_wrapper(nn.Module):
                  qinput_prune=False, rh_prune=False,
                  rh_to_q=False, include_q_input=True, use_ar_noise=False, 
                  snowhice_fix=True, v5_input=False,  is_stochastic=False, add_stochastic_layer=False, 
-                 perturb=False, return_det=False):
+                 predict_fluxes=True, perturb=False, return_det=False,):
         
         super(model_wrapper, self).__init__()
         self.original_model = original_model
@@ -119,6 +120,7 @@ class model_wrapper(nn.Module):
         self.rh_prune       = rh_prune
         self.snowhice_fix   = snowhice_fix
         self.v5_input       = v5_input
+        self.predict_fluxes = predict_fluxes
         self.perturb        = perturb
         self.return_det     = return_det
         self.add_stochastic_layer = add_stochastic_layer 
@@ -233,6 +235,8 @@ class model_wrapper(nn.Module):
         inp_list = [x_main, x_sfc]
         inp_list.append(rnn1_mem)
         inp_list.append(eps_prev)
+        if self.predict_fluxes:
+            inp_list.append(x_main0)
         inp_list.append(x_main0)
         
         if self.perturb:
@@ -274,7 +278,8 @@ class model_wrapper(nn.Module):
         else:
             inp_list = [x_main, x_sfc]
             inp_list.append(rnn1_mem)
-            inp_list.append(x_main0)
+            if self.predict_fluxes:
+                inp_list.append(x_main0)
             out_lev, out_sfc, rnn1_mem = self.original_model(inp_list)
     
         out_lev, out_sfc = self.original_model.postprocessing(out_lev, out_sfc, x_main0)
@@ -369,11 +374,8 @@ class mlp_gasopt_inlined_processing(nn.Module):
           # self.register_buffer("band_bounds", band_bounds)
         else:
           self.num_bands = 1
-
-        # if band_bounds is not None:
-        if band_bounds is None:
-            raise NotImplementedError()
-
+          raise NotImplementedError()
+        
         print("band bounds is {} and rrtmgp_bounds is {}, now deriving wavenumber bounds from these".format(band_bounds, self.rrtmgp_bounds))
     
         # self.wavenum_bounds: List[int] = wavenum_bounds

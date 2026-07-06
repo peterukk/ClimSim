@@ -100,12 +100,16 @@ class PositiveLinear(nn.Module):
 
 class LayerPressure(nn.Module):
     def __init__(self,hyam, hybm, name='LayerPressure',
-                 norm=True,
+                 norm=True, batch_first=False,
                  ):
         super(LayerPressure, self).__init__()
         self.nlev = hyam.shape[0]
-        hyam = torch.reshape(hyam,(self.nlev,1,1))
-        hybm = torch.reshape(hybm,(self.nlev,1,1))
+        if batch_first:
+          hyam = torch.reshape(hyam,(1,self.nlev,1))
+          hybm = torch.reshape(hybm,(1,self.nlev,1))
+        else:
+          hyam = torch.reshape(hyam,(self.nlev,1,1))
+          hybm = torch.reshape(hybm,(self.nlev,1,1))
         self.register_buffer('hyam', hyam)
         self.register_buffer('hybm', hybm)
         self.norm = norm
