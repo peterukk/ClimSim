@@ -237,7 +237,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           self.update_states_for_rad  = True
           self.use_e3sm_cloud_optics  = cfg.use_e3sm_cloud_optics
           self.map_e3sm_cloud_optics  = cfg.map_e3sm_cloud_optics
-          self.general_band_mapping  = False
+          self.general_band_mapping  = True
           # When using separate gas optics module, include water vapor variability by sampling from sub-grid states and doing two passes? 
           self.include_qv_variability = True
           # Option for using TripleClouds-style solver where fluxes are computed in each sub-grid region (nreg) and g-point,
