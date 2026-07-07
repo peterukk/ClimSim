@@ -229,8 +229,8 @@ class Base_RNN_autoreg(nn.Module):
         nx = cfg.nx
         if self.add_pres:
             self.preslay = LayerPressure(self.hyam, self.hybm, batch_first=batch_first)
-            # self.preslay_nonorm = LayerPressure(self.hyam, self.hybm, norm=False)
-            # self.preslev_nonorm = LevelPressure(self.hyai, self.hybi)
+            self.preslay_nonorm = LayerPressure(self.hyam, self.hybm, norm=False)
+            self.preslev_nonorm = LevelPressure(self.hyai, self.hybi)
             nx = nx +1
         self.nx = nx
 
