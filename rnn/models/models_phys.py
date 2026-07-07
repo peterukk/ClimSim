@@ -1771,17 +1771,19 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             else:
               out_denorm    = out_new / self.yscale_lev.unsqueeze(1)
             dT = 1200*out_denorm[:,:,0:1]
-            dqv = 1200*out_denorm[:,:,1:2]
             if self.use_ensemble:
-                nens = int(qv.shape[0] // dqv.shape[0])
-                # dT = torch.repeat_interleave(dT,repeats=nens,dim=1)
-                dqv = torch.repeat_interleave(dqv,repeats=nens,dim=1)
+              nens = int(qv.shape[0] // dqv.shape[0])
+              dT = torch.repeat_interleave(dT,repeats=nens,dim=1)
             T   = self.relu(T + dT)
-            qv  = self.relu(qv + dqv)
-            if self.use_mp_constraint:
-              dqn = 1200*out_denorm[:,:,2:3]
-              qn = self.relu(qn + dqn)
-
+            if not (self.use_existing_gas_optics_sw and self.use_existing_gas_optics_lw): 
+              dqv = 1200*out_denorm[:,:,1:2]
+              if self.use_ensemble:
+                  dqv = torch.repeat_interleave(dqv,repeats=nens,dim=1)   
+              qv  = self.relu(qv + dqv)
+              if self.use_mp_constraint:
+                dqn = 1200*out_denorm[:,:,2:3]
+                dqn = torch.repeat_interleave(dqn,repeats=nens,dim=1)
+                qn = self.relu(qn + dqn)
           # t0 = time.time()
           tau_lw, source_lev, source_sfc, tau_sw, ssa_sw, g_sw = self.rad_optical_props(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
                                       rnn_mem, liq_frac_crm, qv_crm, qn_crm, T, qv, qn, area_frac, rnn2out)
