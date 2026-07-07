@@ -1772,7 +1772,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
               out_denorm    = out_new / self.yscale_lev.unsqueeze(1)
             dT = 1200*out_denorm[:,:,0:1]
             if self.use_ensemble:
-              nens = int(qv.shape[0] // dqv.shape[0])
+              nens = int(T.shape[1] // dT.shape[1])
               dT = torch.repeat_interleave(dT,repeats=nens,dim=1)
             T   = self.relu(T + dT)
             if not (self.use_existing_gas_optics_sw and self.use_existing_gas_optics_lw): 
