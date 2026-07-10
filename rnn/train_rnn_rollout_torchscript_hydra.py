@@ -764,8 +764,11 @@ def main(cfg: DictConfig):
           model.load_state_dict(checkpoint['model_state_dict'],strict=False)
           # all_layers = list(model.named_children())
           all_layers = [name for name, _ in model.named_children()]
-          all_layers.remove("rnn3")
+          # all_layers.remove("rnn3")
           # all_layers.remove("mlp_output")
+          unfreeze_layers = ["rnn3","mlp_output","mlp_latent","gas_optics_lw_reduce1","gas_optics_lw_reduce2"]
+          for layer in unfreeze_layers:
+            all_layers.remove(layer)
           print("Freezing weights of all layers except stochastic RNN")
           for name, param in model.named_parameters():
               # Get the top-level parent layer name (e.g., 'layer1' from 'layer1.0.weight')
@@ -773,7 +776,9 @@ def main(cfg: DictConfig):
               
               if base_layer_name in all_layers:
                   param.requires_grad = False
-                  # print("froze ", base_layer_name)
+                  print("froze layer", base_layer_name)
+              else:
+                  print("did not freeze layer:", base_layer_name)
           infostr = summary(model)
 
         else:
@@ -976,7 +981,7 @@ def main(cfg: DictConfig):
             labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
             # if True:
             if cfg.save_model:
-              if val_loss < best_val_loss or epoch in [5,11,19,39,49,59,69]:
+              if val_loss < best_val_loss or epoch in [3,5,7,11,19,39,49,59,69]:
                 if val_loss < best_val_loss:
                   SAVE_PATH       = "saved_models/" + MODEL_STR + "_BEST.pt"
                 else:

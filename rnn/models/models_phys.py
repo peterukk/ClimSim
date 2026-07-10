@@ -1699,7 +1699,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # h_final = h_final + 0.01*h_final_perturb
           # h_sfc   = h_sfc + 0.01*h_sfc_perturb
           rnn2out = rnn2out*h_final_perturb
-          # h_sfc   = h_sfc*h_sfc_perturb
+
+          #last_h   = last_h*h_sfc_perturb
           last_h   = h_sfc_perturb
   
         if self.use_intermediate_mlp: 
@@ -1782,7 +1783,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
               qv  = self.relu(qv + dqv)
               if self.use_mp_constraint:
                 dqn = 1200*out_denorm[:,:,2:3]
-                dqn = torch.repeat_interleave(dqn,repeats=nens,dim=1)
+                if self.use_ensemble:
+                  dqn = torch.repeat_interleave(dqn,repeats=nens,dim=1)
                 qn = self.relu(qn + dqn)
           # t0 = time.time()
           tau_lw, source_lev, source_sfc, tau_sw, ssa_sw, g_sw = self.rad_optical_props(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
