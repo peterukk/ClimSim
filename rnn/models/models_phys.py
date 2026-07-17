@@ -12,7 +12,7 @@ from .models import Base_RNN_autoreg
 from models_torch_kernels import GLU
 from models_torch_kernels import *
 from .physics_rad import outgoing_lw, reftrans_lw, lw_solver_noscat_batchlast, calc_overlap_matrices
-from .physics_rad import calc_ref_trans_sw, adding_ica_sw_batchlast_opt, adding_ica_sw, adding_tc_sw_batchlast_opt
+from .physics_rad import calc_ref_trans_sw, adding_ica_sw_batchlast_opt, adding_ica_sw, adding_tc_sw_batchlast_opt, adding_ica_sw_reduced
 from .physics_rad import stratified_sample, interpolate_tlev_batchfirst, interpolate_tlev_batchlast
 from .physics_rad_e3sm import reitab, reltab, slingo_liq_cloud_optics_sw, ec_ice_optics_sw, e3sm_cloud_optics_sw
 from metrics import specific_to_relative_humidity_torch_cc
@@ -59,6 +59,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     use_e3sm_cloud_optics: Final[bool] 
     map_e3sm_cloud_optics: Final[bool]
     general_band_mapping: Final[bool]
+    use_ksca_kscag: Final[bool]
     use_existing_gas_optics_lw: Final[bool] # Use existing RRTMGP-NN-LW
     use_existing_gas_optics_sw: Final[bool] # Use existing RRTMGP-NN-SW
     reduce_lw_gas_optics: Final[bool] # ...which may be combined with another MLP to shrink the spectral dim to e.g. 16 (otherwise expensive)
@@ -246,6 +247,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           self.experimental_rad       = False   
           # McICA-style sampling of sub-grid cloud states for each g-point
           self.use_mcica              = cfg.use_mcica # False 
+
+          self.use_ksca_kscag = self.map_e3sm_cloud_optics or self.experimental_rad
           if self.experimental_rad:
             self.use_mcica=False
             if not (self.use_existing_gas_optics_sw and self.use_existing_gas_optics_lw):
@@ -1010,90 +1013,80 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                 zeroes = torch.zeros(10, batch_size, self.ng_sw, device=device)
             
           if self.use_e3sm_cloud_optics:
-            # E3SM uses cloud optics in 4 bands. Here we need to map them to our spectral discretization. 
 
-            if self.map_e3sm_cloud_optics: 
-              # use an MLP to map E3SM cloud optics to our spectral discretization. This option is used when
-              # training new gas optics on the fly.
-              k_sw_cld_liq0, ssa_sw_cld_liq0, g_sw_cld_liq0 = self.slingo_liq_cloud_optics_sw(liq_eff_rad)
-              ksca_sw_cld_liq0  = k_sw_cld_liq0*ssa_sw_cld_liq0
-              kscag_sw_cld_liq0 = ksca_sw_cld_liq0*g_sw_cld_liq0
-              k_sw_cld_liq      = self.cloud_optics_sw_expand(k_sw_cld_liq0)
-              ksca_sw_cld_liq   = self.cloud_optics_sw_expand(ksca_sw_cld_liq0) # / k_sw_cld_liq 
-              kscag_sw_cld_liq  = self.cloud_optics_sw_expand(kscag_sw_cld_liq0) # / (k_sw_cld_liq*ssa_sw_cld_liq)
-              k_sw_cld_ice0, ssa_sw_cld_ice0, g_sw_cld_ice0 = self.ec_ice_optics_sw(ice_eff_rad)
-              ksca_sw_cld_ice0  = k_sw_cld_ice0*ssa_sw_cld_ice0
-              kscag_sw_cld_ice0 = ksca_sw_cld_ice0*g_sw_cld_ice0
-              k_sw_cld_ice    = self.cloud_optics_sw_expand(k_sw_cld_ice0)
-              ksca_sw_cld_ice = self.cloud_optics_sw_expand(ksca_sw_cld_ice0)
-              kscag_sw_cld_ice  = self.cloud_optics_sw_expand(kscag_sw_cld_ice0)
+            if self.map_e3sm_cloud_optics:
+                k_sw_cld_liq0, ssa_sw_cld_liq0, g_sw_cld_liq0 = self.slingo_liq_cloud_optics_sw(liq_eff_rad)
+                ksca_sw_cld_liq0  = k_sw_cld_liq0 * ssa_sw_cld_liq0
+                kscag_sw_cld_liq0 = ksca_sw_cld_liq0 * g_sw_cld_liq0
+                k_sw_cld_liq      = self.cloud_optics_sw_expand(k_sw_cld_liq0)
+                ksca_sw_cld_liq   = self.cloud_optics_sw_expand(ksca_sw_cld_liq0)
+                kscag_sw_cld_liq  = self.cloud_optics_sw_expand(kscag_sw_cld_liq0)
+
+                k_sw_cld_ice0, ssa_sw_cld_ice0, g_sw_cld_ice0 = self.ec_ice_optics_sw(ice_eff_rad)
+                ksca_sw_cld_ice0  = k_sw_cld_ice0 * ssa_sw_cld_ice0
+                kscag_sw_cld_ice0 = ksca_sw_cld_ice0 * g_sw_cld_ice0
+                k_sw_cld_ice     = self.cloud_optics_sw_expand(k_sw_cld_ice0)
+                ksca_sw_cld_ice  = self.cloud_optics_sw_expand(ksca_sw_cld_ice0)
+                kscag_sw_cld_ice = self.cloud_optics_sw_expand(kscag_sw_cld_ice0)
+
             elif self.use_new_sw_gas_optics:
-                # Get cloud optics in Slingo's native 4 bands (no learned mapping needed)
-                # slingo returns (k, ssa, g) each of shape (..., 4)
-                if False:
-                  k_sw_cld_liq4,   ssa_sw_cld_liq4,   g_sw_cld_liq4   = self.slingo_liq_cloud_optics_sw(liq_eff_rad, ng=4)
-                  k_sw_cld_ice4,   ssa_sw_cld_ice4,   g_sw_cld_ice4   = self.ec_ice_optics_sw(ice_eff_rad, ng=4)
-                  # print("mean ksw", k_sw_cld_liq4.mean().item(), "shape", k_sw_cld_liq4.shape)
-            
-                  k_sw_cld_liq   = self.expand_slingo_to_bands(k_sw_cld_liq4)
-                  ssa_sw_cld_liq = self.expand_slingo_to_bands(ssa_sw_cld_liq4)
-                  g_sw_cld_liq   = self.expand_slingo_to_bands(g_sw_cld_liq4)
-                  ksca_sw_cld_liq  = k_sw_cld_liq  * ssa_sw_cld_liq
-                  kscag_sw_cld_liq = ksca_sw_cld_liq * g_sw_cld_liq
+                wb = self.gas_optics_model_sw1.wavenum_bounds
+                bb = self.gas_optics_model_sw1.band_bounds
+                ng = self.ng_sw
 
-                  k_sw_cld_ice   = self.expand_slingo_to_bands(k_sw_cld_ice4)
-                  ssa_sw_cld_ice = self.expand_slingo_to_bands(ssa_sw_cld_ice4)
-                  g_sw_cld_ice   = self.expand_slingo_to_bands(g_sw_cld_ice4)
-                  ksca_sw_cld_ice  = k_sw_cld_ice  * ssa_sw_cld_ice
-                  kscag_sw_cld_ice = ksca_sw_cld_ice * g_sw_cld_ice
-                else:
-                  wb = self.gas_optics_model_sw1.wavenum_bounds
-                  bb = self.gas_optics_model_sw1.band_bounds  # [0, b1, b2, b3, b4, ng_sw]
-                  ng = self.ng_sw
+                k_sw_cld_liq, ssa_sw_cld_liq, g_sw_cld_liq = self.e3sm_cloud_optics_sw(
+                    liq_eff_rad, wavenum_bounds=wb, band_bounds=bb, type="liquid")
+                k_sw_cld_ice, ssa_sw_cld_ice, g_sw_cld_ice = self.e3sm_cloud_optics_sw(
+                    ice_eff_rad, wavenum_bounds=wb, band_bounds=bb, type="ice")
 
-                  k_sw_cld_liq,   ssa_sw_cld_liq,   g_sw_cld_liq   = self.e3sm_cloud_optics_sw(liq_eff_rad, wavenum_bounds=wb,band_bounds=bb,type="liquid")
-                  ksca_sw_cld_liq  = k_sw_cld_liq  * ssa_sw_cld_liq
-                  kscag_sw_cld_liq = ksca_sw_cld_liq * g_sw_cld_liq
-
-                  k_sw_cld_ice,   ssa_sw_cld_ice,   g_sw_cld_ice  =  self.e3sm_cloud_optics_sw(liq_eff_rad, wavenum_bounds=wb,band_bounds=bb,type="ice")
-                  ksca_sw_cld_ice  = k_sw_cld_ice  * ssa_sw_cld_ice
-                  kscag_sw_cld_ice = ksca_sw_cld_ice * g_sw_cld_ice
-                  # print("2mean ksw", k_sw_cld_liq4.mean().item(), "shape", k_sw_cld_liq4.shape)
-
+                if self.use_ksca_kscag:  # only needed pre-expand for experimental_rad
+                    ksca_sw_cld_liq  = k_sw_cld_liq * ssa_sw_cld_liq
+                    kscag_sw_cld_liq = ksca_sw_cld_liq * g_sw_cld_liq
+                    ksca_sw_cld_ice  = k_sw_cld_ice * ssa_sw_cld_ice
+                    kscag_sw_cld_ice = ksca_sw_cld_ice * g_sw_cld_ice
             else:
-              k_sw_cld_liq, ksca_sw_cld_liq, kscag_sw_cld_liq = self.slingo_liq_cloud_optics_sw(liq_eff_rad, self.ng_sw)
-              ksca_sw_cld_liq  = k_sw_cld_liq*ksca_sw_cld_liq # ksca_sw_cld_liq is ssa before this line
-              kscag_sw_cld_liq = ksca_sw_cld_liq*kscag_sw_cld_liq # kscag_sw_cld_liq is g before this line
-              k_sw_cld_ice, ksca_sw_cld_ice, kscag_sw_cld_ice = self.ec_ice_optics_sw(ice_eff_rad, self.ng_sw)
-              ksca_sw_cld_ice  = k_sw_cld_ice*ksca_sw_cld_ice
-              kscag_sw_cld_ice = ksca_sw_cld_ice*kscag_sw_cld_ice
-              
+                k_sw_cld_liq, ssa_sw_cld_liq, g_sw_cld_liq = self.slingo_liq_cloud_optics_sw(liq_eff_rad, self.ng_sw)
+                k_sw_cld_ice, ssa_sw_cld_ice, g_sw_cld_ice = self.ec_ice_optics_sw(ice_eff_rad, self.ng_sw)
 
-            if self.experimental_rad: 
-                cldpath_liq = torch.repeat_interleave(cldpath_liq.unsqueeze(2), self.ng_sw,dim=2)
-                cldpath_ice = torch.repeat_interleave(cldpath_ice.unsqueeze(2), self.ng_sw,dim=2)
-                k_sw_cld_liq = torch.repeat_interleave(k_sw_cld_liq.unsqueeze(3), self.nreg,dim=3)
-                k_sw_cld_ice = torch.repeat_interleave(k_sw_cld_ice.unsqueeze(3), self.nreg,dim=3)
-                ksca_sw_cld_liq = torch.repeat_interleave(ksca_sw_cld_liq.unsqueeze(3), self.nreg,dim=3)
-                ksca_sw_cld_ice = torch.repeat_interleave(ksca_sw_cld_ice.unsqueeze(3), self.nreg,dim=3)
-                kscag_sw_cld_liq = torch.repeat_interleave(kscag_sw_cld_liq.unsqueeze(3), self.nreg,dim=3)
-                kscag_sw_cld_ice = torch.repeat_interleave(kscag_sw_cld_ice.unsqueeze(3), self.nreg,dim=3)
+                if self.use_ksca_kscag:
+                    ksca_sw_cld_liq  = k_sw_cld_liq * ssa_sw_cld_liq
+                    kscag_sw_cld_liq = ksca_sw_cld_liq * g_sw_cld_liq
+                    ksca_sw_cld_ice  = k_sw_cld_ice * ssa_sw_cld_ice
+                    kscag_sw_cld_ice = ksca_sw_cld_ice * g_sw_cld_ice
+
+            if self.experimental_rad:
+                cldpath_liq = torch.repeat_interleave(cldpath_liq.unsqueeze(2), self.ng_sw, dim=2)
+                cldpath_ice = torch.repeat_interleave(cldpath_ice.unsqueeze(2), self.ng_sw, dim=2)
+                k_sw_cld_liq = torch.repeat_interleave(k_sw_cld_liq.unsqueeze(3), self.nreg, dim=3)
+                k_sw_cld_ice = torch.repeat_interleave(k_sw_cld_ice.unsqueeze(3), self.nreg, dim=3)
+                ksca_sw_cld_liq = torch.repeat_interleave(ksca_sw_cld_liq.unsqueeze(3), self.nreg, dim=3)
+                ksca_sw_cld_ice = torch.repeat_interleave(ksca_sw_cld_ice.unsqueeze(3), self.nreg, dim=3)
+                kscag_sw_cld_liq = torch.repeat_interleave(kscag_sw_cld_liq.unsqueeze(3), self.nreg, dim=3)
+                kscag_sw_cld_ice = torch.repeat_interleave(kscag_sw_cld_ice.unsqueeze(3), self.nreg, dim=3)
 
             cldeps = 1e-7
-            # optical depth (dimensionless) = cldpath (1000 kg/m2) *  k (m2/g) =  (kg/m2) *  k (1000 g/kg m2/g)
-            tau_sw_cld_liq  = cldpath_liq*k_sw_cld_liq
-            tau_sw_cld_ice  = cldpath_ice*k_sw_cld_ice
-            tau_sw_scat_cld_liq  = cldpath_liq*ksca_sw_cld_liq
-            tau_sw_scat_cld_ice  = cldpath_ice*ksca_sw_cld_ice
-            g_tau_scat_sw_cld_liq  = cldpath_liq*kscag_sw_cld_liq
-            g_tau_scat_sw_cld_ice  = cldpath_ice*kscag_sw_cld_ice
+            # optical depth (dimensionless) = cldpath (1000 kg/m2) * k (m2/g) = (kg/m2) * k (1000 g/kg m2/g)
+            tau_sw_cld_liq = cldpath_liq * k_sw_cld_liq
+            tau_sw_cld_ice = cldpath_ice * k_sw_cld_ice
 
-            tau_sw_cld          = tau_sw_cld_ice + tau_sw_cld_liq
-            tau_sw_scat_cld     = tau_sw_scat_cld_liq + tau_sw_scat_cld_ice 
-            g_tau_scat_sw_cld   = g_tau_scat_sw_cld_liq + g_tau_scat_sw_cld_ice 
-            # g_sw_cld = torch.where(tau_sw_scat_cld == 0, torch.zeros_like(tau_sw_scat_cld), g_tau_scat_sw_cld / tau_sw_scat_cld)
-            # g_sw_cld            =  g_tau_scat_sw_cld / tau_sw_scat_cld
-            g_sw_cld            = g_tau_scat_sw_cld / (tau_sw_scat_cld + cldeps)
+            if self.use_ksca_kscag:
+                tau_sw_scat_cld_liq   = cldpath_liq * ksca_sw_cld_liq
+                tau_sw_scat_cld_ice   = cldpath_ice * ksca_sw_cld_ice
+                g_tau_scat_sw_cld_liq = cldpath_liq * kscag_sw_cld_liq
+                g_tau_scat_sw_cld_ice = cldpath_ice * kscag_sw_cld_ice
+                del ksca_sw_cld_liq, k_sw_cld_ice, ksca_sw_cld_ice
+            else:
+                # ssa/g still in scope, untouched by cldpath -- reuse tau instead of
+                # recomputing ksca/kscag from scratch (saves 2 multiplies per phase)
+                tau_sw_scat_cld_liq   = tau_sw_cld_liq * ssa_sw_cld_liq
+                tau_sw_scat_cld_ice   = tau_sw_cld_ice * ssa_sw_cld_ice
+                g_tau_scat_sw_cld_liq = tau_sw_scat_cld_liq * g_sw_cld_liq
+                g_tau_scat_sw_cld_ice = tau_sw_scat_cld_ice * g_sw_cld_ice
+
+            tau_sw_cld         = tau_sw_cld_ice + tau_sw_cld_liq
+            tau_sw_scat_cld    = tau_sw_scat_cld_liq + tau_sw_scat_cld_ice
+            g_tau_scat_sw_cld  = g_tau_scat_sw_cld_liq + g_tau_scat_sw_cld_ice
+            g_sw_cld = g_tau_scat_sw_cld / (tau_sw_scat_cld + cldeps)
             if self.printdebug:
               print("max min mean gswcld", g_sw_cld.max().item(), g_sw_cld.min().item(),  g_sw_cld.mean().item())
               print("min max mean tau_sw", tau_sw.min().item(), tau_sw.max().item(), tau_sw.mean().item())
@@ -1102,7 +1095,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
               print("max mean tau_sw_cld*ssa*g", g_tau_scat_sw_cld.max().item(), g_tau_scat_sw_cld.min().item(),g_tau_scat_sw_cld.mean().item())
 
             del tau_sw_cld_ice, tau_sw_cld_liq, tau_sw_scat_cld_liq, tau_sw_scat_cld_ice, g_tau_scat_sw_cld_liq
-            del g_tau_scat_sw_cld_ice, g_tau_scat_sw_cld, k_sw_cld_liq, ksca_sw_cld_liq, k_sw_cld_ice, ksca_sw_cld_ice
+            del g_tau_scat_sw_cld_ice, g_tau_scat_sw_cld, k_sw_cld_liq
 
           else: 
             sw_optprops = self.cloud_optics_sw(x_cld)
@@ -1322,263 +1315,122 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
 
       # ------- COMPUTE SURFACE SPECTRAL ALBEDO TO DIRECT AND DIFFUSE RADIATION --
-      aldif  = inputs_aux[:, 7].view(1, -1)
-      aldir  = inputs_aux[:, 8].view(1, -1)
-      asdif  = inputs_aux[:, 9].view(1, -1)
-      asdir  = inputs_aux[:, 10].view(1, -1)
+      w_vis = self.make_sw_visible_weights(
+          device=device,
+          dtype=flux_lw_dn.dtype,
+      )
 
-      # print("mean aldif", aldif.mean(), "aldir", aldir.mean(), "asdif", asdif.mean(), asdir.mean())
-      albedo_surf_dir_sw  = torch.ones(self.ng_sw, batch_size, device=device)
-      albedo_surf_diff_sw = torch.ones(self.ng_sw, batch_size, device=device)
+      w_nir = 1.0 - w_vis
 
-      if self.use_new_sw_gas_optics:
+      # [2, ng], ordered as NIR then visible.
+      surface_weights = torch.stack(
+          (w_nir, w_vis),
+          dim=0,
+      )
 
-        if self.general_band_mapping:
-          gas = self.gas_optics_model_sw1
-          i_nir_end   = gas.i_gpt_nir_end          # last g-point fully NIR (exclusive)
-          i_vis_start = gas.i_gpt_vis_start        # first g-point fully visible (inclusive)
-          # vis_frac    = gas.vis_transition_fraction # fraction of transition g-points that are visible
-          vis_frac = self.sigmoid(self.vis_frac)
-          # Fully NIR g-points
-          n_nir = i_nir_end
-          if n_nir > 0:
-              albedo_surf_dir_sw [0:i_nir_end] = aldir.expand(n_nir, -1)
-              albedo_surf_diff_sw[0:i_nir_end] = aldif.expand(n_nir, -1)
+      # Keep these as [batch, 1].
+      aldif = inputs_aux[:, 7:8]
+      aldir = inputs_aux[:, 8:9]
+      asdif = inputs_aux[:, 9:10]
+      asdir = inputs_aux[:, 10:11]
 
-          # Transition g-points (may be empty if i_nir_end == i_vis_start)
-          n_trans = i_vis_start - i_nir_end
-          if n_trans > 0:
-              albedo_surf_dir_sw [i_nir_end:i_vis_start] = (
-                  (1.0 - vis_frac) * aldir.expand(n_trans, -1) + vis_frac * asdir.expand(n_trans, -1)
-              )
-              albedo_surf_diff_sw[i_nir_end:i_vis_start] = (
-                  (1.0 - vis_frac) * aldif.expand(n_trans, -1) + vis_frac * asdif.expand(n_trans, -1)
-              )
-          # Fully visible g-points
-          n_vis = self.ng_sw - i_vis_start
-          if n_vis > 0:
-              albedo_surf_dir_sw [i_vis_start:] = asdir.expand(n_vis, -1)
-              albedo_surf_diff_sw[i_vis_start:] = asdif.expand(n_vis, -1)
-        else:
-          bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
+      w_vis_2d = w_vis.unsqueeze(0)  # [1, ng]
 
-          if self.gas_optics_model_sw1.num_bands==6:
-            # Bands 1+2+3 (820–14286 cm-1): near-IR
-            albedo_surf_dir_sw [bb[0]:bb[3]] = aldir.expand(bb[3] - bb[0], -1)
-            albedo_surf_diff_sw[bb[0]:bb[3]] = aldif.expand(bb[3] - bb[0], -1)
-            # Bands 4+5+6 (14286–50000 cm-1): visible/UV
-            albedo_surf_dir_sw [bb[3]:bb[6]] = asdir.expand(bb[6] - bb[3], -1)
-            albedo_surf_diff_sw[bb[3]:bb[6]] = asdif.expand(bb[6] - bb[3], -1)
-          else:
-            # New 5-band gas optics with exact spectral boundaries:
-            #   band 1 (bb[0]:bb[1]): 250–4200   cm-1  → pure NIR  → aldir/aldif
-            #   band 2 (bb[1]:bb[2]): 4200–14500 cm-1  → pure NIR  → aldir/aldif
-            #   band 3 (bb[2]:bb[3]): 14500–16000 cm-1 → transition (~0.69–0.625 µm) → blend
-            #   band 4 (bb[3]:bb[4]): 16000–22000 cm-1 → pure vis   → asdir/asdif
-            #   band 5 (bb[4]:bb[5]): 22000–50000 cm-1 → pure UV    → asdir/asdif
-            # print("got here, bb", bb, "wavenums", self.gas_optics_model_sw1.wavenum_bounds)
+      # Directly create [batch, ng] in the desired flattened order.
+      albedo_surf_dir_sw = (
+          aldir + (asdir - aldir) * w_vis_2d
+      )
 
-            ng_b1  = bb[1] - bb[0]
-            ng_b2  = bb[2] - bb[1]
-            ng_b3  = bb[3] - bb[2]
-            ng_b4  = bb[4] - bb[3]
-            ng_b5  = bb[5] - bb[4]
-            # Bands 1+2: near-IR
-            albedo_surf_dir_sw [bb[0]:bb[2]] = aldir.expand(ng_b1 + ng_b2, -1)
-            albedo_surf_diff_sw[bb[0]:bb[2]] = aldif.expand(ng_b1 + ng_b2, -1)
-            # Band 3: transition — blend 50/50, matching the 0.7 µm boundary intent
-            albedo_surf_dir_sw [bb[2]:bb[3]] = 0.5 * (aldir.expand(ng_b3, -1) + asdir.expand(ng_b3, -1))
-            albedo_surf_diff_sw[bb[2]:bb[3]] = 0.5 * (aldif.expand(ng_b3, -1) + asdif.expand(ng_b3, -1))
-            # Bands 4+5: visible/UV
-            albedo_surf_dir_sw [bb[3]:bb[5]] = asdir.expand(ng_b4 + ng_b5, -1)
-            albedo_surf_diff_sw[bb[3]:bb[5]] = asdif.expand(ng_b4 + ng_b5, -1)
-              
-      else:
-        # ------- COMPUTE SURFACE SPECTRAL ALBEDO TO DIRECT AND DIFFUSE RADIATION --
-        # 
-        # Here the input surface albedos are given only in 4 bands and don't match our k-distribution, so we need to do a simple mapping
-        # If we are using RRTMGP(-NN), the mapping below should match the subroutine set_albedo in E3SM/components/eam/src/physics/rrtmgp/radiation.F90
-        # If we are learning a new gas optics NN on the fly, or an extraNN to shrink the spectral dim of RRTMGP-NN, then below its assumed to be a good
-        # idea to follow RRTMGP in how much of the spectral space is allocated to near-IR versus visible
-        # band g-points:  1,10 | 11,18 | 19,29 | 30,37 | 38,46 | 47,56 | 57,67 | 68,71 | 72,80 | 81,89 | 90, 96 | 97, 102 | 103, 109 | 110, 112 
-        # wavenum limits: 820, 2680 | 2680, 3250 | 3250, 4000 | 4000, 4650 | 4650, 5150  | 5150, 6150 | 6150, 7700 | 7700, 8050  | 12850, 16000 | 
-        # 16000, 22650 | 22650, 29000 | 29000, 38000 | 38000, 50000 |
-        # ! sols(pcols)      Direct solar rad on surface (< 0.7)
-        # ! soll(pcols)      Direct solar rad on surface (>= 0.7)
-        # Old proportional mapping following RRTMGP band 10 transition
-        iend_ir = int(round((80/112)*self.ng_sw)) # RRTMGP bands 1-9 (g-points 1-80) encompass 820-12850 cm-1 (near-ir), see data/rrtmgp-data-sw-g112-210809.nc
-        iend_mix= int(round((89/112)*self.ng_sw)) # RRTMGP band 10 is in between UV/visible and near-IR, and bands 11-14 (89-112) are fully in visible range (> 14286 ! cm^-1)
-        ng_ir    = iend_ir
-        ng_mix   = iend_mix - iend_ir
-        ng_vis   = self.ng_sw - iend_mix
+      albedo_surf_diff_sw = (
+          aldif + (asdif - aldif) * w_vis_2d
+      )
 
-        albedo_surf_dir_sw [0:iend_ir]        = aldir.expand(ng_ir,  -1)
-        albedo_surf_dir_sw [iend_ir:iend_mix] = 0.5 * (aldir.expand(ng_mix, -1) + asdir.expand(ng_mix, -1))
-        albedo_surf_dir_sw [iend_mix:]        = asdir.expand(ng_vis, -1)
-        albedo_surf_diff_sw[0:iend_ir]        = aldif.expand(ng_ir,  -1)
-        albedo_surf_diff_sw[iend_ir:iend_mix] = 0.5 * (aldif.expand(ng_mix, -1) + asdif.expand(ng_mix, -1))
-        albedo_surf_diff_sw[iend_mix:]        = asdif.expand(ng_vis, -1)
-
-      albedo_surf_dir_sw    = torch.transpose(albedo_surf_dir_sw,0,1).contiguous()
-      albedo_surf_diff_sw   = torch.transpose(albedo_surf_diff_sw,0,1).contiguous()
-
-      if self.experimental_rad:
-        # Repeat to sub-grid regions (TripleClouds scheme)
-        albedo_surf_dir_sw   = torch.repeat_interleave(albedo_surf_dir_sw.unsqueeze(2), self.nreg, dim=2)
-        albedo_surf_diff_sw  = torch.repeat_interleave(albedo_surf_diff_sw.unsqueeze(2), self.nreg, dim=2)
-
-      albedo_surf_dir_sw    = albedo_surf_dir_sw.view(-1)
-      albedo_surf_diff_sw   = albedo_surf_diff_sw.view(-1)
-
-      # print("albedo_surf_dir_sw mean", albedo_surf_dir_sw.mean(), "albedo_surf_diff_sw", albedo_surf_diff_sw.mean())
+      albedo_surf_dir_sw = albedo_surf_dir_sw.reshape(-1)
+      albedo_surf_diff_sw = albedo_surf_diff_sw.reshape(-1)
 
       # --------- SW RADIATIVE TRANSFER USING ADDING METHOD -----------
-      if self.experimental_rad:
-        if True:
-          # xx = torch.permute(qn_crm,(1,2,0)) # qn_crm(nlev,nb,nreg) --> (nb,nreg,nlev)
-          xx = torch.permute(rnn_mem,(1,2,0)) # qn_crm(nlev,nb,nreg) --> (nb,nreg,nlev)
+      # if self.experimental_rad:
+      #   if True:
+      #     # xx = torch.permute(qn_crm,(1,2,0)) # qn_crm(nlev,nb,nreg) --> (nb,nreg,nlev)
+      #     xx = torch.permute(rnn_mem,(1,2,0)) # qn_crm(nlev,nb,nreg) --> (nb,nreg,nlev)
     
-          # v_mat = self.softmax_dim1(self.conv_vmat(xx)) # (nb, nreg*nreg, nlev)
-          # v_mat = torch.permute(v_mat,(2,0,1)).contiguous()
-          # v_mat = v_mat.view(self.nlev_crm-1, batch_size, self.nreg, self.nreg)
+      #     # v_mat = self.softmax_dim1(self.conv_vmat(xx)) # (nb, nreg*nreg, nlev)
+      #     # v_mat = torch.permute(v_mat,(2,0,1)).contiguous()
+      #     # v_mat = v_mat.view(self.nlev_crm-1, batch_size, self.nreg, self.nreg)
 
-          frac_th = 1e-14
-          conv_vmat = self.conv_vmat(xx) # (nb, nreg*nreg, nlev)
-          conv_vmat = torch.permute(conv_vmat,(2,0,1)).contiguous()
-          conv_vmat = conv_vmat.view(self.nlev_crm-1, batch_size, self.nreg, self.nreg)
-          # Predict "conditional" overlap matrices (will sum to 1 across nreg*nreg after multiplying with area_frac)
-          conv_vmat = torch.softmax(conv_vmat,dim=-1)
-          empty = area_frac[0:-1].unsqueeze(-1) < frac_th  # (nlev, nbatch, nreg, 1)
-          v_mat = conv_vmat.masked_fill(empty, 0.0)      # (nlev, nbatch, jupper, jlower)
-          v_mat = v_mat.transpose(-1, -2).contiguous()
-          v_mat = torch.repeat_interleave(v_mat.unsqueeze(2), self.ng_sw, dim=2)
+      #     frac_th = 1e-14
+      #     conv_vmat = self.conv_vmat(xx) # (nb, nreg*nreg, nlev)
+      #     conv_vmat = torch.permute(conv_vmat,(2,0,1)).contiguous()
+      #     conv_vmat = conv_vmat.view(self.nlev_crm-1, batch_size, self.nreg, self.nreg)
+      #     # Predict "conditional" overlap matrices (will sum to 1 across nreg*nreg after multiplying with area_frac)
+      #     conv_vmat = torch.softmax(conv_vmat,dim=-1)
+      #     empty = area_frac[0:-1].unsqueeze(-1) < frac_th  # (nlev, nbatch, nreg, 1)
+      #     v_mat = conv_vmat.masked_fill(empty, 0.0)      # (nlev, nbatch, jupper, jlower)
+      #     v_mat = v_mat.transpose(-1, -2).contiguous()
+      #     v_mat = torch.repeat_interleave(v_mat.unsqueeze(2), self.ng_sw, dim=2)
 
-          ones  = torch.zeros(1, batch_size, self.ng_sw,self.nreg,self.nreg, device=device)
-          oness  = torch.zeros(11, batch_size, self.ng_sw,self.nreg,self.nreg, device=device)
-          ones[:,:,:,0,0] = 1.0; oness[:,:,:,0,0] = 1.0
-          ones = ones.view(1, batch_size, self.ng_sw*self.nreg*self.nreg)
-          oness = oness.view(11, batch_size, self.ng_sw*self.nreg*self.nreg)
-          v_mat = torch.cat((oness, v_mat.view(self.nlev_crm-1, batch_size, self.ng_sw*self.nreg*self.nreg), ones), dim=0)
+      #     ones  = torch.zeros(1, batch_size, self.ng_sw,self.nreg,self.nreg, device=device)
+      #     oness  = torch.zeros(11, batch_size, self.ng_sw,self.nreg,self.nreg, device=device)
+      #     ones[:,:,:,0,0] = 1.0; oness[:,:,:,0,0] = 1.0
+      #     ones = ones.view(1, batch_size, self.ng_sw*self.nreg*self.nreg)
+      #     oness = oness.view(11, batch_size, self.ng_sw*self.nreg*self.nreg)
+      #     v_mat = torch.cat((oness, v_mat.view(self.nlev_crm-1, batch_size, self.ng_sw*self.nreg*self.nreg), ones), dim=0)
 
-          del ones, oness
-        else:
-          overlap_param = self.sigmoid(self.mlp_overlap(rnn_mem[0:-1])).squeeze()
-          region_fracs = area_frac.transpose(1,2).contiguous()
-          # print("shape regfrac", region_fracs.shape, "op", overlap_param.shape)
-          v_mat = calc_overlap_matrices(region_fracs, overlap_param)
-          # print("shape v mat", v_mat.shape) # (3,3,nlev,nb) -> (nlev,nb,3,3)
-          v_mat = torch.permute(v_mat,(2,3,0,1)).contiguous()
-          oness  = torch.zeros(10, batch_size, self.nreg, self.nreg, device=device)
-          oness[:,:,0,0] = 1.0
-          v_mat = torch.cat((oness, v_mat), dim=0)
-          v_mat = v_mat.unsqueeze(2).expand(self.nlev+1, batch_size, self.ng_sw, 3, 3).contiguous()
-          # print("shape v mat 2", v_mat.shape) 
+      #     del ones, oness
+      #   else:
+      #     overlap_param = self.sigmoid(self.mlp_overlap(rnn_mem[0:-1])).squeeze()
+      #     region_fracs = area_frac.transpose(1,2).contiguous()
+      #     # print("shape regfrac", region_fracs.shape, "op", overlap_param.shape)
+      #     v_mat = calc_overlap_matrices(region_fracs, overlap_param)
+      #     # print("shape v mat", v_mat.shape) # (3,3,nlev,nb) -> (nlev,nb,3,3)
+      #     v_mat = torch.permute(v_mat,(2,3,0,1)).contiguous()
+      #     oness  = torch.zeros(10, batch_size, self.nreg, self.nreg, device=device)
+      #     oness[:,:,0,0] = 1.0
+      #     v_mat = torch.cat((oness, v_mat), dim=0)
+      #     v_mat = v_mat.unsqueeze(2).expand(self.nlev+1, batch_size, self.ng_sw, 3, 3).contiguous()
+      #     # print("shape v mat 2", v_mat.shape) 
                 
-        flux_sw_up, flux_sw_dn_diffuse, flux_sw_dn_direct = adding_tc_sw_batchlast_opt(incoming_toa, 
-                    albedo_surf_diff_sw, albedo_surf_dir_sw, ref_diff, 
-                    trans_diff, ref_dir, trans_dir_diff, trans_dir_dir, v_mat, self.nreg)
-      else:
-        flux_sw_up, flux_sw_dn_diffuse, flux_sw_dn_direct = adding_ica_sw(
-                    incoming_toa, albedo_surf_diff_sw, albedo_surf_dir_sw, 
-                    ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir)
-            
-      del ref_diff, trans_diff, ref_dir, trans_dir_diff, trans_dir_dir
+      #   flux_sw_up, flux_sw_dn_diffuse, flux_sw_dn_direct = adding_tc_sw_batchlast_opt(incoming_toa, 
+      #               albedo_surf_diff_sw, albedo_surf_dir_sw, ref_diff, 
+      #               trans_diff, ref_dir, trans_dir_diff, trans_dir_dir, v_mat, self.nreg)
+      # else:
+      flux_sw_net, surface_direct, surface_diffuse = (
+          adding_ica_sw_reduced(
+              incoming_toa,
+              albedo_surf_diff_sw,
+              albedo_surf_dir_sw,
+              ref_diff,
+              trans_diff,
+              ref_dir,
+              trans_dir_diff,
+              trans_dir_dir,
+              surface_weights,
+          )
+      )
 
-      if self.experimental_rad:
-        # sum over region dimension
-        flux_sw_up          = torch.sum(flux_sw_up.view(nlev+1, batch_size, self.ng_sw, self.nreg),dim=-1)
-        flux_sw_dn_diffuse  = torch.sum(flux_sw_dn_diffuse.view(nlev+1, batch_size, self.ng_sw, self.nreg),dim=-1)
-        flux_sw_dn_direct   = torch.sum(flux_sw_dn_direct.view(nlev+1, batch_size, self.ng_sw, self.nreg),dim=-1)
-      else:
-        flux_sw_up = torch.reshape(flux_sw_up, (nlev+1, batch_size, self.ng_sw))
-        flux_sw_dn_diffuse = torch.reshape(flux_sw_dn_diffuse, (nlev+1, batch_size, self.ng_sw))
-        flux_sw_dn_direct = torch.reshape(flux_sw_dn_direct, (nlev+1, batch_size, self.ng_sw))
+      # Rows of surface_weights were [NIR, visible].
+      SOLL = surface_direct[:, 0:1]
+      SOLS = surface_direct[:, 1:2]
 
+      SOLLD = surface_diffuse[:, 0:1]
+      SOLSD = surface_diffuse[:, 1:2]
 
-      if self.use_new_sw_gas_optics:
-          if self.general_band_mapping:
-            gas = self.gas_optics_model_sw1
-            i_nir_end  = gas.i_gpt_nir_end          # e.g. 4  for 5-band
-            i_vis_start = gas.i_gpt_vis_start       # e.g. 13 for 5-band
-            # vis_frac   = gas.vis_transition_fraction # e.g. ~0.87 for 5-band
-            # vis_frac = self.sigmoid(self.vis_frac)
-            # print("vis frac", vis_frac.item())
+      NETSW = flux_sw_net[-1].unsqueeze(1)
 
-            # Transition band g-points (may be empty if boundary falls exactly on band edge)
-            sw_dir_dn_trans  = torch.sum(flux_sw_dn_direct [-1, :, i_nir_end:i_vis_start],  dim=-1, keepdim=True)
-            sw_diff_dn_trans = torch.sum(flux_sw_dn_diffuse[-1, :, i_nir_end:i_vis_start], dim=-1, keepdim=True)
+      day_mask = (
+          inputs_aux[:, 6] >= min_mu
+      ).to(dtype=flux_sw_net.dtype)
 
-            SOLL  = torch.sum(flux_sw_dn_direct [-1, :, :i_nir_end], dim=-1, keepdim=True) \
-                    + (1.0 - vis_frac) * sw_dir_dn_trans
-            SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, :i_nir_end], dim=-1, keepdim=True) \
-                    + (1.0 - vis_frac) * sw_diff_dn_trans
-            SOLS  = torch.sum(flux_sw_dn_direct [-1, :, i_vis_start:], dim=-1, keepdim=True) \
-                    + vis_frac * sw_dir_dn_trans
-            SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, i_vis_start:], dim=-1, keepdim=True) \
-                    + vis_frac * sw_diff_dn_trans
-          else:
+      flux_sw_net = flux_sw_net * day_mask.unsqueeze(0)
 
-            # print("1 mean SOLL", SOLL.mean().item(), "SOLLD", SOLLD.mean().item())
-            # print("1 mean SOLS", SOLS.mean().item(), "SOLSD", SOLSD.mean().item())
+      surface_mask = day_mask.unsqueeze(1)
 
-            # Sum over whole / parts of spectral dimension to get broadband / band-wise fluxes
-            bb = self.gas_optics_model_sw1.band_bounds  # List[int], length 6
-            if self.gas_optics_model_sw1.num_bands==6:
-              
-              # For 6-band model the 14286 cm-1 NIR/vis boundary falls exactly at bb[3],
-              # so no transition blending needed
-              SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[3]], dim=-1, keepdim=True)
-              SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[3]], dim=-1, keepdim=True)
-              SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[6]], dim=-1, keepdim=True)
-              SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[6]], dim=-1, keepdim=True)
+      SOLL = SOLL * surface_mask
+      SOLS = SOLS * surface_mask
+      SOLLD = SOLLD * surface_mask
+      SOLSD = SOLSD * surface_mask
 
-            elif self.gas_optics_model_sw1.num_bands==5:
-              # Band 3 is the transition band (~0.69–0.625 µm), split 50/50 into NIR and visible
-              sw_dir_dn_mixband  = torch.sum(flux_sw_dn_direct [-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
-              sw_diff_dn_mixband = torch.sum(flux_sw_dn_diffuse[-1, :, bb[2]:bb[3]], dim=-1, keepdim=True)
-
-              # SOLL/SOLLD: near-IR (bands 1+2 + half of band 3)
-              SOLL  = torch.sum(flux_sw_dn_direct [-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
-              SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[0]:bb[2]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
-
-              # SOLS/SOLSD: visible/UV (bands 4+5 + half of band 3)
-              SOLS  = torch.sum(flux_sw_dn_direct [-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
-              SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, bb[3]:bb[5]], dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
-              # print("2 mean SOLL", SOLL.mean().item(), "SOLLD", SOLLD.mean().item())
-              # print("2 mean SOLS", SOLS.mean().item(), "SOLSD", SOLSD.mean().item())
-     
-            else:
-              raise NotImplementedError("Only 5 or 6 band ML-GasOptics supported")
-      else:
-        sw_dir_dn_mixband  = torch.sum(flux_sw_dn_direct [-1, :, iend_ir:iend_mix], dim=-1, keepdim=True)
-        SOLL  = torch.sum(flux_sw_dn_direct [-1, :, 0:iend_ir],   dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
-        SOLS  = torch.sum(flux_sw_dn_direct [-1, :, iend_mix:],   dim=-1, keepdim=True) + 0.5 * sw_dir_dn_mixband
-        sw_diff_dn_mixband = torch.sum(flux_sw_dn_diffuse[-1, :, iend_ir:iend_mix], dim=-1, keepdim=True)
-        SOLLD = torch.sum(flux_sw_dn_diffuse[-1, :, 0:iend_ir],   dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
-        SOLSD = torch.sum(flux_sw_dn_diffuse[-1, :, iend_mix:],   dim=-1, keepdim=True) + 0.5 * sw_diff_dn_mixband
-        
-      flux_sw_up          = torch.sum(flux_sw_up,dim=2)
-      flux_sw_dn_diffuse  = torch.sum(flux_sw_dn_diffuse,dim=2)
-      flux_sw_dn_direct   = torch.sum(flux_sw_dn_direct,dim=2)
-      
-      flux_sw_dn      = flux_sw_dn_diffuse + flux_sw_dn_direct
-      flux_sw_net     = flux_sw_dn - flux_sw_up
-      NETSW           = flux_sw_net[-1,:].unsqueeze(1)     # net SW radiation at surface        
-
-      # We did SW computations in all columns, so now we need to zero out nighttime columns
-      inds_zero = inputs_aux[:,6] < min_mu
-      flux_sw_net[:,inds_zero] = 0.0
-      NETSW[inds_zero] = 0.0
-      SOLL[inds_zero] = 0.0
-      SOLS[inds_zero] = 0.0
-      SOLLD[inds_zero] = 0.0
-      SOLSD[inds_zero] = 0.0
-
-      if self.printdebug:
-        print("flux sw dn ", flux_sw_dn.mean(dim=1))
-        print("flux sw dndir ", flux_sw_dn_direct.mean(dim=1))
-        print("flux sw up ", flux_sw_up.mean(dim=1))
-        # print("mu0", inputs_aux[500,6:7])
+      NETSW = flux_sw_net[-1].unsqueeze(1)
 
       FLWDS           = flux_lw_dn[-1,:].unsqueeze(1)   # downwelling longwave radiation at surface 
       flux_lw_net     = flux_lw_dn - flux_lw_up
@@ -1591,6 +1443,107 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       out_sfc_rad = out_sfc_rad * self.yscale_sca_rad
 
       return dT_rad, out_sfc_rad
+
+    def make_sw_visible_weights(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        gpoint = torch.arange(
+            self.ng_sw,
+            device=device,
+        )
+
+        if self.use_new_sw_gas_optics:
+            gas = self.gas_optics_model_sw1
+
+            if self.general_band_mapping:
+                i_nir_end = gas.i_gpt_nir_end
+                i_vis_start = gas.i_gpt_vis_start
+
+                vis_frac = torch.sigmoid(self.vis_frac).to(dtype=dtype)
+
+                fully_visible = (
+                    gpoint >= i_vis_start
+                ).to(dtype=dtype)
+
+                transition = (
+                    (gpoint >= i_nir_end)
+                    & (gpoint < i_vis_start)
+                ).to(dtype=dtype)
+
+                w_vis = fully_visible + transition * vis_frac
+
+            else:
+                gas = self.gas_optics_model_sw1
+                bb = gas.band_bounds
+                num_bands = gas.num_bands
+
+                gpoint = torch.arange(
+                    self.ng_sw,
+                    device=device,
+                )
+
+                if num_bands == 6:
+                    # Bands 1–3: NIR
+                    # Bands 4–6: visible/UV
+                    #
+                    # w_vis:
+                    #   0.0 on [bb[0], bb[3])
+                    #   1.0 on [bb[3], bb[6])
+                    is_visible = (
+                        (gpoint >= bb[3])
+                        & (gpoint < bb[6])
+                    )
+
+                    w_vis = is_visible.to(dtype=dtype)
+
+                elif num_bands == 5:
+                    # Bands 1–2: NIR
+                    # Band 3: 50/50 transition
+                    # Bands 4–5: visible/UV
+                    #
+                    # w_vis:
+                    #   0.0 on [bb[0], bb[2])
+                    #   0.5 on [bb[2], bb[3])
+                    #   1.0 on [bb[3], bb[5])
+                    is_transition = (
+                        (gpoint >= bb[2])
+                        & (gpoint < bb[3])
+                    )
+
+                    is_visible = (
+                        (gpoint >= bb[3])
+                        & (gpoint < bb[5])
+                    )
+
+                    w_vis = (
+                        0.5 * is_transition.to(dtype=dtype)
+                        + is_visible.to(dtype=dtype)
+                    )
+
+                else:
+                    raise NotImplementedError(
+                        "Only 5-band and 6-band ML gas optics are supported"
+                    )
+
+        else:
+            iend_ir = int(round((80 / 112) * self.ng_sw))
+            iend_mix = int(round((89 / 112) * self.ng_sw))
+
+            fully_visible = (
+                gpoint >= iend_mix
+            ).to(dtype=dtype)
+
+            mixed = (
+                (gpoint >= iend_ir)
+                & (gpoint < iend_mix)
+            ).to(dtype=dtype)
+
+            w_vis = fully_visible + 0.5 * mixed
+
+        return w_vis
 
     def forward(self, inp_list : List[Tensor]):
         inputs_main     = inp_list[0]

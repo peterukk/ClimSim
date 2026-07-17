@@ -766,10 +766,12 @@ def main(cfg: DictConfig):
           all_layers = [name for name, _ in model.named_children()]
           # all_layers.remove("rnn3")
           # all_layers.remove("mlp_output")
-          unfreeze_layers = ["rnn3","mlp_output","mlp_latent","gas_optics_lw_reduce1","gas_optics_lw_reduce2"]
+        #   unfreeze_layers = ["rnn3","mlp_output","mlp_latent","gas_optics_lw_reduce1","gas_optics_lw_reduce2"]
+          unfreeze_layers = ["rnn3","mlp_output"]
+
           for layer in unfreeze_layers:
             all_layers.remove(layer)
-          print("Freezing weights of all layers except stochastic RNN")
+          print("Freezing weights of all layers except {}".format(unfreeze_layers))
           for name, param in model.named_parameters():
               # Get the top-level parent layer name (e.g., 'layer1' from 'layer1.0.weight')
               base_layer_name = name.split('.')[0]
@@ -1059,7 +1061,7 @@ def main(cfg: DictConfig):
                 fig.subplots_adjust(hspace=0)
                 plt.savefig('val_eval/' + MODEL_STR + 'val_R2.pdf')
 
-            plt.clf()
+            plt.close()
             rmse = val_runner.metrics["rmse_perlev"]
             fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
             for i in range(6):
@@ -1069,8 +1071,7 @@ def main(cfg: DictConfig):
                 axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
             fig.subplots_adjust(hspace=0.6)                                                     
             plt.savefig('val_eval/' + MODEL_STR + 'val_rmse.pdf')
-
-            plt.clf()
+            plt.close()
             bias = val_runner.metrics["bias_perlev"]
             fig, axs = plt.subplots(ncols=1, nrows=6, figsize=(7.0, 12.0)) #layout="constrained")
             for i in range(6):
@@ -1080,7 +1081,7 @@ def main(cfg: DictConfig):
                 axs[i].axvspan(0, 30, facecolor='0.2', alpha=0.2)
             fig.subplots_adjust(hspace=0.6)                                                     
             plt.savefig('val_eval/' + MODEL_STR + 'val_bias.pdf')
-
+            plt.close()
             if batch_size_val==384:
                 dt_diff = val_runner.epoch_bias_collev[:,:,0]
                 q_diff = val_runner.epoch_bias_collev[:,:,1]

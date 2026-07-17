@@ -493,75 +493,134 @@ class MyStochasticGRULayer4(jit.ScriptModule):
 
         return torch.stack(outputs)
     
-class MyStochasticGRULayer5(jit.ScriptModule):
+# class MyStochasticGRULayer5(jit.ScriptModule):
+#     use_bias: Final[bool]
+
+#     def __init__(self, input_size, hidden_size, use_bias=False):
+#         super().__init__()
+#         # self.cell = cell(*cell_args)
+#         self.input_size = input_size
+#         self.hidden_size = hidden_size
+#         self.weight_ih = Parameter(torch.randn((input_size, 3 * hidden_size)))
+#         self.weight_zh = Parameter(torch.randn((hidden_size, 3 * hidden_size)))
+
+#         self.use_bias = use_bias
+#         if self.use_bias:
+#             self.bias_ih = Parameter(torch.randn((3 * hidden_size)))
+#             self.bias_zh = Parameter(torch.randn((3 * hidden_size)))
+
+#         self.weight_encoder =  Parameter(torch.randn((hidden_size, 2*hidden_size)))
+
+#         self.reset_parameters()
+
+#     def reset_parameters(self):
+#         std = 1.0 / math.sqrt(self.hidden_size)
+#         for w in self.parameters():
+#             w.data.uniform_(-std, std)
+            
+#     @torch.compile
+#     def forward(
+#         self, input_seq: Tensor, hidden: Tensor) -> Tensor: #Tuple[Tensor, Tensor]:
+        
+#         nseq, batch_size, nx = input_seq.shape
+
+#         # epss = torch.randn_like(input_seq)
+#         epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device)
+#         epss = epss.unbind(0)
+        
+#         inputs = input_seq.unbind(0)
+#         outputs = torch.jit.annotate(List[Tensor], [])
+        
+#         for i in range(len(input_seq)):
+#             x = inputs[i]
+#             eps = epss[i]
+            
+#             predicted_distribution = torch.mm(hidden, self.weight_encoder) 
+#             mean_, z = predicted_distribution.chunk(2,1)
+            
+#             z = mean_ + eps * torch.exp(0.5*z)
+            
+#             if self.use_bias:
+#                 x_results = torch.mm(x, self.weight_ih) + self.bias_ih
+#                 z_results = torch.mm(z, self.weight_zh)  + self.bias_zh
+#             else:
+#                 x_results = torch.mm(x, self.weight_ih) 
+#                 z_results = torch.mm(z, self.weight_zh) 
+
+#             # i_r, i_z, i_n = x_results.chunk(3, 1)
+#             # z_r, z_z, z_n = z_results.chunk(3, 1)
+#             r, z, n = x_results.chunk(3, 1)
+#             z_r, z_z, z_n = z_results.chunk(3, 1)
+            
+#             r = torch.sigmoid(r + z_r)
+#             z = torch.sigmoid(z + z_z)
+#             n = torch.tanh(n + r * z_n)
+                
+#             hidden = n + torch.mul(z, (hidden - n))
+
+#             outputs += [hidden]
+
+#         return torch.stack(outputs)
+    
+class MyStochasticGRULayer5(nn.Module):
     use_bias: Final[bool]
 
     def __init__(self, input_size, hidden_size, use_bias=False):
         super().__init__()
-        # self.cell = cell(*cell_args)
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.weight_ih = Parameter(torch.randn((input_size, 3 * hidden_size)))
         self.weight_zh = Parameter(torch.randn((hidden_size, 3 * hidden_size)))
-
         self.use_bias = use_bias
         if self.use_bias:
             self.bias_ih = Parameter(torch.randn((3 * hidden_size)))
             self.bias_zh = Parameter(torch.randn((3 * hidden_size)))
-
-        self.weight_encoder =  Parameter(torch.randn((hidden_size, 2*hidden_size)))
-
+        self.weight_encoder = Parameter(torch.randn((hidden_size, 2 * hidden_size)))
         self.reset_parameters()
 
     def reset_parameters(self):
         std = 1.0 / math.sqrt(self.hidden_size)
         for w in self.parameters():
             w.data.uniform_(-std, std)
-            
+
     @torch.compile
-    def forward(
-        self, input_seq: Tensor, hidden: Tensor) -> Tensor: #Tuple[Tensor, Tensor]:
-        
+    def forward(self, input_seq: Tensor, hidden: Tensor) -> Tensor:
         nseq, batch_size, nx = input_seq.shape
 
-        epss = torch.randn_like(input_seq)
-        epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device)
-        epss = epss.unbind(0)
-        
-        inputs = input_seq.unbind(0)
+        eps = torch.randn((nseq, batch_size, self.hidden_size), device=input_seq.device)
+
+        # Hoisted: input->hidden projection doesn't depend on the recurrence,
+        # so do it as one big GEMM instead of nseq small ones.
+        flat_x = input_seq.reshape(nseq * batch_size, nx)
+        x_results = (torch.addmm(self.bias_ih, flat_x, self.weight_ih) if self.use_bias
+                     else flat_x @ self.weight_ih)
+        x_results = x_results.view(nseq, batch_size, 3 * self.hidden_size)
+        r_all, z_gate_all, n_all = x_results.chunk(3, dim=2)
+
+        eps_u = eps.unbind(0)
+        r_u = r_all.unbind(0)
+        zg_u = z_gate_all.unbind(0)
+        n_u = n_all.unbind(0)
+
         outputs = torch.jit.annotate(List[Tensor], [])
-        
-        for i in range(len(input_seq)):
-            x = inputs[i]
-            eps = epss[i]
-            
-            predicted_distribution = torch.mm(hidden, self.weight_encoder) 
-            mean_, z = predicted_distribution.chunk(2,1)
-            
-            z = mean_ + eps * torch.exp(0.5*z)
-            
-            if self.use_bias:
-                x_results = torch.mm(x, self.weight_ih) + self.bias_ih
-                z_results = torch.mm(z, self.weight_zh)  + self.bias_zh
-            else:
-                x_results = torch.mm(x, self.weight_ih) 
-                z_results = torch.mm(z, self.weight_zh) 
+        for i in range(nseq):
+            predicted_distribution = torch.mm(hidden, self.weight_encoder)
+            mean_, logvar = predicted_distribution.chunk(2, 1)
+            z = mean_ + eps_u[i] * torch.exp(0.5 * logvar)
 
-            # i_r, i_z, i_n = x_results.chunk(3, 1)
-            # z_r, z_z, z_n = z_results.chunk(3, 1)
-            r, z, n = x_results.chunk(3, 1)
+            z_results = (torch.addmm(self.bias_zh, z, self.weight_zh) if self.use_bias
+                         else z @ self.weight_zh)
             z_r, z_z, z_n = z_results.chunk(3, 1)
-            
-            r = torch.sigmoid(r + z_r)
-            z = torch.sigmoid(z + z_z)
-            n = torch.tanh(n + r * z_n)
-                
-            hidden = n + torch.mul(z, (hidden - n))
 
+            r = torch.sigmoid(r_u[i] + z_r)
+            z_gate = torch.sigmoid(zg_u[i] + z_z)
+            n = torch.tanh(n_u[i] + r * z_n)
+
+            hidden = n + z_gate * (hidden - n)
             outputs += [hidden]
 
         return torch.stack(outputs)
-    
+
 class MyStochasticGRULayer5_MLP_fused(jit.ScriptModule):
     use_bias: Final[bool]
 

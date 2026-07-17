@@ -866,3 +866,352 @@ def calc_overlap_matrices(
         frac_upper = frac_lower
  
     return v_matrix
+
+
+
+@torch.compile(dynamic=False)
+def adding_ica_sw_reduced_train(
+    incoming_toa: Tensor,
+    albedo_surf_diffuse: Tensor,
+    albedo_surf_direct: Tensor,
+    reflectance: Tensor,
+    transmittance: Tensor,
+    ref_dir: Tensor,
+    trans_dir_diff: Tensor,
+    trans_dir_dir: Tensor,
+    surface_weights: Tensor,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """
+    Shortwave adding solver with spectral reduction inside the solver.
+
+    Args:
+        incoming_toa:
+            Flattened [ncol * ng].
+
+        albedo_surf_diffuse:
+            Flattened [ncol * ng].
+
+        albedo_surf_direct:
+            Flattened [ncol * ng].
+
+        reflectance, transmittance, ref_dir,
+        trans_dir_diff, trans_dir_dir:
+            [nlev, ncol * ng].
+
+        surface_weights:
+            [2, ng].
+
+            Row 0 contains the NIR contribution of each g-point.
+            Row 1 contains the visible contribution of each g-point.
+
+            For example, a transition g-point might have weights
+            [1 - vis_frac, vis_frac].
+
+    Returns:
+        flux_net_broadband:
+            [nlev + 1, ncol].
+
+        surface_direct:
+            [ncol, 2], ordered as [NIR, visible].
+
+        surface_diffuse:
+            [ncol, 2], ordered as [NIR, visible].
+    """
+    nlev, nbatch = reflectance.shape
+    ng = surface_weights.shape[1]
+    ncol = nbatch // ng
+
+    torch._assert(
+        nbatch == ncol * ng,
+        "Flattened spectral batch must be ncol * ng",
+    )
+
+    # ------------------------------------------------------------------
+    # Upward sweep: effective diffuse and direct albedo beneath each level
+    # ------------------------------------------------------------------
+
+    albedo = torch.jit.annotate(List[Tensor], [])
+    albedodir = torch.jit.annotate(List[Tensor], [])
+
+    albedo0 = albedo_surf_diffuse
+    albedodir0 = albedo_surf_direct
+
+    albedo.append(albedo0)
+    albedodir.append(albedodir0)
+
+    for jlev in range(nlev - 1, -1, -1):
+        R = reflectance[jlev]
+        T = transmittance[jlev]
+
+        inv_denom = 1.0 / (1.0 - albedo0 * R)
+
+        albedodir0 = (
+            ref_dir[jlev]
+            + (
+                trans_dir_dir[jlev] * albedodir0
+                + trans_dir_diff[jlev] * albedo0
+            )
+            * T
+            * inv_denom
+        )
+
+        albedo0 = R + T.square() * albedo0 * inv_denom
+
+        albedodir.append(albedodir0)
+        albedo.append(albedo0)
+
+    # Convert from surface-to-TOA storage to TOA-to-surface storage.
+    albedo.reverse()
+    albedodir.reverse()
+
+    # ------------------------------------------------------------------
+    # Downward sweep
+    # ------------------------------------------------------------------
+
+    fluxdndir = incoming_toa
+    fluxdndiff = torch.zeros_like(incoming_toa)
+
+    flux_net_broadband = torch.jit.annotate(List[Tensor], [])
+
+    # TOA values.
+    incoming_2d = incoming_toa.reshape(ncol, ng)
+    toa_albedodir_2d = albedodir[0].reshape(ncol, ng)
+
+    # No diffuse downwelling flux at TOA.
+    direct_bb = incoming_2d.sum(dim=1)
+    up_bb = (incoming_2d * toa_albedodir_2d).sum(dim=1)
+
+    flux_net_broadband.append(direct_bb - up_bb)
+
+    for jlev in range(nlev):
+        R = reflectance[jlev]
+        T = transmittance[jlev]
+
+        alb_below = albedo[jlev + 1]
+        albedodir_below = albedodir[jlev + 1]
+
+        fluxdndiff = (
+            T * fluxdndiff
+            + fluxdndir
+            * (
+                T * albedodir_below * R
+                + trans_dir_diff[jlev]
+            )
+        ) / (1.0 - R * alb_below)
+
+        fluxdndir = fluxdndir * trans_dir_dir[jlev]
+
+        # Reduce this level immediately.
+        direct_2d = fluxdndir.reshape(ncol, ng)
+        diffuse_2d = fluxdndiff.reshape(ncol, ng)
+        alb_2d = alb_below.reshape(ncol, ng)
+        albedodir_2d = albedodir_below.reshape(ncol, ng)
+
+        direct_bb = direct_2d.sum(dim=1)
+        diffuse_bb = diffuse_2d.sum(dim=1)
+
+        # Avoid creating/storing a full spectral flux_up output.
+        up_bb = (
+            direct_2d * albedodir_2d
+            + diffuse_2d * alb_2d
+        ).sum(dim=1)
+
+        flux_net_broadband.append(
+            direct_bb + diffuse_bb - up_bb
+        )
+
+    flux_net_broadband_tensor = torch.stack(
+        flux_net_broadband,
+        dim=0,
+    )
+
+    # fluxdndir and fluxdndiff now contain surface spectral fluxes.
+    surface_direct_spectral = fluxdndir.reshape(ncol, ng)
+    surface_diffuse_spectral = fluxdndiff.reshape(ncol, ng)
+
+    # [ncol, ng] @ [ng, 2] -> [ncol, 2]
+    weights_t = surface_weights.transpose(0, 1)
+
+    surface_direct = surface_direct_spectral @ weights_t
+    surface_diffuse = surface_diffuse_spectral @ weights_t
+
+    return (
+        flux_net_broadband_tensor,
+        surface_direct,
+        surface_diffuse,
+    )
+
+@torch.compile(dynamic=False)
+def adding_ica_sw_reduced_inference(
+    incoming_toa: Tensor,
+    albedo_surf_diffuse: Tensor,
+    albedo_surf_direct: Tensor,
+    reflectance: Tensor,
+    transmittance: Tensor,
+    ref_dir: Tensor,
+    trans_dir_diff: Tensor,
+    trans_dir_dir: Tensor,
+    surface_weights: Tensor,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    nlev, nbatch = reflectance.shape
+    ng = surface_weights.shape[1]
+    ncol = nbatch // ng
+
+    torch._assert(
+        nbatch == ncol * ng,
+        "Flattened spectral batch must be ncol * ng",
+    )
+
+    dtype = reflectance.dtype
+    device = reflectance.device
+
+    # These still need full spectral storage because the downward sweep
+    # accesses the effective albedo beneath every level.
+    albedo = torch.empty(
+        nlev + 1,
+        nbatch,
+        dtype=dtype,
+        device=device,
+    )
+    albedodir = torch.empty(
+        nlev + 1,
+        nbatch,
+        dtype=dtype,
+        device=device,
+    )
+
+    albedo[0] = albedo_surf_diffuse
+    albedodir[0] = albedo_surf_direct
+
+    alb0 = albedo_surf_diffuse
+    adir0 = albedo_surf_direct
+
+    # Stored in surface-to-TOA order.
+    for k in range(nlev):
+        jlev = nlev - 1 - k
+
+        R = reflectance[jlev]
+        T = transmittance[jlev]
+
+        inv_denom = 1.0 / (1.0 - alb0 * R)
+
+        adir0 = (
+            ref_dir[jlev]
+            + (
+                trans_dir_dir[jlev] * adir0
+                + trans_dir_diff[jlev] * alb0
+            )
+            * T
+            * inv_denom
+        )
+
+        alb0 = R + T.square() * alb0 * inv_denom
+
+        albedo[k + 1] = alb0
+        albedodir[k + 1] = adir0
+
+    flux_net_broadband = torch.empty(
+        nlev + 1,
+        ncol,
+        dtype=dtype,
+        device=device,
+    )
+
+    fluxdndir = incoming_toa
+    fluxdndiff = torch.zeros_like(incoming_toa)
+
+    incoming_2d = incoming_toa.reshape(ncol, ng)
+    toa_albedodir_2d = albedodir[nlev].reshape(ncol, ng)
+
+    direct_bb = incoming_2d.sum(dim=1)
+    up_bb = (incoming_2d * toa_albedodir_2d).sum(dim=1)
+
+    flux_net_broadband[0] = direct_bb - up_bb
+
+    for jlev in range(nlev):
+        R = reflectance[jlev]
+        T = transmittance[jlev]
+
+        below = nlev - (jlev + 1)
+
+        alb_below = albedo[below]
+        albedodir_below = albedodir[below]
+
+        fluxdndiff = (
+            T * fluxdndiff
+            + fluxdndir
+            * (
+                T * albedodir_below * R
+                + trans_dir_diff[jlev]
+            )
+        ) / (1.0 - R * alb_below)
+
+        fluxdndir = fluxdndir * trans_dir_dir[jlev]
+
+        direct_2d = fluxdndir.reshape(ncol, ng)
+        diffuse_2d = fluxdndiff.reshape(ncol, ng)
+        alb_2d = alb_below.reshape(ncol, ng)
+        albedodir_2d = albedodir_below.reshape(ncol, ng)
+
+        direct_bb = direct_2d.sum(dim=1)
+        diffuse_bb = diffuse_2d.sum(dim=1)
+
+        up_bb = (
+            direct_2d * albedodir_2d
+            + diffuse_2d * alb_2d
+        ).sum(dim=1)
+
+        flux_net_broadband[jlev + 1] = (
+            direct_bb + diffuse_bb - up_bb
+        )
+
+    surface_direct_spectral = fluxdndir.reshape(ncol, ng)
+    surface_diffuse_spectral = fluxdndiff.reshape(ncol, ng)
+
+    weights_t = surface_weights.transpose(0, 1)
+
+    surface_direct = surface_direct_spectral @ weights_t
+    surface_diffuse = surface_diffuse_spectral @ weights_t
+
+    return (
+        flux_net_broadband,
+        surface_direct,
+        surface_diffuse,
+    )
+
+def adding_ica_sw_reduced(
+    incoming_toa: Tensor,
+    albedo_surf_diffuse: Tensor,
+    albedo_surf_direct: Tensor,
+    reflectance: Tensor,
+    transmittance: Tensor,
+    ref_dir: Tensor,
+    trans_dir_diff: Tensor,
+    trans_dir_dir: Tensor,
+    surface_weights: Tensor,
+) -> Tuple[Tensor, Tensor, Tensor]:
+
+    if torch.is_grad_enabled():
+        return adding_ica_sw_reduced_train(
+            incoming_toa,
+            albedo_surf_diffuse,
+            albedo_surf_direct,
+            reflectance,
+            transmittance,
+            ref_dir,
+            trans_dir_diff,
+            trans_dir_dir,
+            surface_weights,
+        )
+    else:
+        return adding_ica_sw_reduced_inference(
+            incoming_toa,
+            albedo_surf_diffuse,
+            albedo_surf_direct,
+            reflectance,
+            transmittance,
+            ref_dir,
+            trans_dir_diff,
+            trans_dir_dir,
+            surface_weights,
+        )
