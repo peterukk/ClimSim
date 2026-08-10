@@ -1266,14 +1266,14 @@ class train_or_eval_one_epoch:
                         del wcon_p_long, wcon_t_long 
 
                         # Relative humidity metric 
-                        if self.cfg.use_rh_loss:
-                          if self.cfg.include_q_input:
-                            qv_before = x_lay_raw[:,:,-1:]
-                          elif self.rh_input_to_q:
-                            qv_before = x_lay_raw[:,:,1]
+                        # if self.cfg.use_rh_loss:
+                        if self.cfg.include_q_input:
+                          qv_before = x_lay_raw[:,:,-1:]
+                        elif self.rh_input_to_q:
+                          qv_before = x_lay_raw[:,:,1]
 
-                          rh_mse = self.metric_rh(ypo_lay, yto_lay, x_lay_raw, qv_before, surf_pres_denorm)
-                          running_rh_mse += rh_mse.detach().cpu().numpy()
+                        rh_mse = self.metric_rh(ypo_lay, yto_lay, x_lay_raw, qv_before, surf_pres_denorm)
+                        running_rh_mse += rh_mse.detach().cpu().numpy()
 
                         # Positive cloud water metric 
 
@@ -1383,8 +1383,8 @@ class train_or_eval_one_epoch:
                     h_con = h_con.detach() 
                     wcon = wcon.detach()
                     wcon_long = wcon_long.detach()
-                    if self.cfg.use_rh_loss: 
-                        rh_mse = rh_mse.detach()
+                    # if self.cfg.use_rh_loss: 
+                    rh_mse = rh_mse.detach()
                     cloudpath_err = cloudpath_err.detach()
                     # if self.cfg.use_water_positivity_loss and self.cfg.mp_mode!=-2:
                     if True: # self.cfg.predict_fluxes: 
@@ -1443,8 +1443,8 @@ class train_or_eval_one_epoch:
                             epoch_hcon  += h_con.item()
                             epoch_wcon  += wcon.item()
                             epoch_wcon_long += wcon_long.item()
-                            if self.cfg.use_rh_loss:
-                                epoch_rh_mse  += rh_mse.item()
+                            # if self.cfg.use_rh_loss:
+                            epoch_rh_mse  += rh_mse.item()
                             epoch_accumprec += precip_sum_mse.item()
                             if True: #self.cfg.predict_fluxes:
                                 epoch_qv_pos += qv_pos_loss.item()
@@ -1603,8 +1603,8 @@ class train_or_eval_one_epoch:
                         running_qn_pos = running_qn_pos / fac
                     running_bias = running_bias / fac
                     running_precip = running_precip / fac
-                    if self.cfg.use_rh_loss:
-                        running_rh_mse = running_rh_mse / fac
+                    # if self.cfg.use_rh_loss:
+                    running_rh_mse = running_rh_mse / fac
                     running_wcon = running_wcon/fac
                     running_wcon_true = running_wcon_true/fac
 
@@ -1711,8 +1711,8 @@ class train_or_eval_one_epoch:
         self.metrics["h_conservation"] =  epoch_hcon / k
         self.metrics["water_conservation"] =  epoch_wcon / k
         self.metrics["water_con_long"] =  epoch_wcon_long / k
-        if self.cfg.use_rh_loss:
-            self.metrics["rh_mse"] =  epoch_rh_mse / k
+        # if self.cfg.use_rh_loss:
+        self.metrics["rh_mse"] =  epoch_rh_mse / k
         self.metrics["precip_accum_mse"] = epoch_accumprec / k
         self.metrics["qv_pos"] = epoch_qv_pos / k
         if self.cfg.mp_mode != -2:
