@@ -336,9 +336,9 @@ def main(cfg: DictConfig):
         if cfg.rh_input_to_q:
             from norm_coefficients import q_min_lev, q_max_lev, q_mean_lev
             if cfg.include_q_input:
-                xmax_lev = np.concatenate((xmax_lev, q_max_lev.reshape((1,-1))),axis=1)
-                xmin_lev = np.concatenate((xmin_lev, q_min_lev.reshape((1,-1))),axis=1)
-                xmean_lev = np.concatenate((xmean_lev,  np.zeros((1,60), dtype=np.float32)),axis=1)
+                xmax_lev = np.concatenate((xmax_lev, q_max_lev.reshape((-1,1))),axis=1)
+                xmin_lev = np.concatenate((xmin_lev, q_min_lev.reshape((-1,1))),axis=1)
+                xmean_lev = np.concatenate((xmean_lev,  np.zeros((60,1), dtype=np.float32)),axis=1)
             else:
                 xmin_lev[:,1] = q_min_lev 
                 xmax_lev[:,1] = q_max_lev 
@@ -983,11 +983,11 @@ def main(cfg: DictConfig):
             labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
             # if True:
             if cfg.save_model:
-              if val_loss < best_val_loss or epoch in [3,5,7,11,19,39,49,59,69]:
-                if val_loss < best_val_loss:
-                  SAVE_PATH       = "saved_models/" + MODEL_STR + "_BEST.pt"
-                else:
+              if val_loss < best_val_loss or epoch in [3,5,7,11,19,29,39,49,59,69]:
+                if epoch in [3,5,7,11,19,29,39,49,59,69]:
                   SAVE_PATH       = "saved_models/" + MODEL_STR + "_ep{}".format(epoch+1) + ".pt"
+                else:
+                  SAVE_PATH       = "saved_models/" + MODEL_STR + "_BEST.pt"
 
                 print("saving model to", SAVE_PATH)
                 # print("New best validation result obtained, saving model to", SAVE_PATH)
