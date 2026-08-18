@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 # matplotlib.use('TkAgg')
 matplotlib.use('Agg')
 import os
-# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "backend:cudaMallocAsync"
 # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "graph_capture_record_stream_reuse:True"
@@ -53,7 +53,8 @@ import torch.nn as nn
 cuda = torch.cuda.is_available() 
 device = torch.device("cuda" if cuda else "cpu")
 print(device)
-
+import torch._functorch.config as functorch_config
+functorch_config.activation_memory_budget = 0.5
 from torch.utils.data import DataLoader
 from torchinfo import summary
 from utils import train_or_eval_one_epoch, generator_xy, BatchSampler, plot_bias_diff,  load_gas_optics_model,load_reduced_gas_optics_model, model_wrapper
@@ -506,6 +507,7 @@ def main(cfg: DictConfig):
     if cfg.autoregressive:
 
       if cfg.model_type in ["LSTM","GRU"]:
+        print("training regular RNN_autoreg")
         from models.models import RNN_autoreg
         model = RNN_autoreg(cfg, coeffs, device)
   
@@ -822,8 +824,8 @@ def main(cfg: DictConfig):
         #   scripted_model = scripted_model.eval()
         #   scripted_model.save(save_file_torch1)
 
-          dummy_input_lay = torch.zeros(384, 60, model.nx0)
-          dummy_input_sfc = torch.zeros(384, model.nx_sfc0)
+          dummy_input_lay = torch.zeros(384, 60, model.nx)
+          dummy_input_sfc = torch.zeros(384, model.nx_sfc)
           dummy_mem  = torch.zeros(384,model.nlev_mem, model.nh_mem)
           inp_list = [dummy_input_lay, dummy_input_sfc, dummy_mem, dummy_input_lay]
           scripted_model = torch.jit.trace(model, example_inputs=(inp_list,))

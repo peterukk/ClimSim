@@ -4,6 +4,7 @@ import sys
 import torch
 import torch.nn as nn
 import torch.nn.parameter as Parameter
+from torch.utils.checkpoint import checkpoint
 from layers import * #LayerPressure, LevelPressure
 import torch.nn.functional as F
 from typing import List, Tuple, Final, Optional
@@ -65,6 +66,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     reduce_lw_gas_optics: Final[bool] # ...which may be combined with another MLP to shrink the spectral dim to e.g. 16 (otherwise expensive)
     reduce_sw_gas_optics: Final[bool]
     use_new_sw_gas_optics: Final[bool]
+    use_fused_mlp: Final[bool]
     printdebug: Final[bool]
 
     def __init__(self, 
@@ -154,46 +156,54 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           num_reg_cld  = self.nreg -1 
         else:
           num_reg_cld = self.nreg    
+        self.pred_subgrid_liq_frac = cfg.pred_subgrid_liq_frac #True
         # 
         # -------------------------------------------------------------------------------------------------
         # ---- Linear layers predicting variables needed in moist physics module from RNN hidden state ----
         # --- Flux terms ---
-        self.mlp_massflux   = nn.Linear(self.nh_rnn2, self.nreg)
-        # if self.do_heat_advection:
-        if self.pred_subgrid_temp:
-          self.mlp_eddy_diff  = nn.Linear(self.nh_rnn2, self.nreg)
+        do_fused=False
+        if ((self.pred_subgrid_temp) and (self.ice_sedimentation) and (not self.pred_subgrid_liq_frac) and (do_fused)):
+          print("Using FUSED MLP for microphysics / convection terms!")
+          self.nheads = 11
+          self.use_fused_mlp = True
+          self.mlp_heads = nn.Linear(
+              self.nh_rnn2,
+              self.nheads * self.nreg
+          )
         else:
-          self.mlp_eddy_diff  = nn.Linear(self.nh_rnn2, 1)
+          self.use_fused_mlp = False
+          self.mlp_massflux   = nn.Linear(self.nh_rnn2, self.nreg)
 
-        # --- Microphysical process rates ---
-        self.mlp_evap_cond_vapor_crm  = nn.Linear(self.nh_rnn2, num_reg_cld)
-        self.mlp_evap_prec_crm        = nn.Linear(self.nh_rnn2, self.nreg)
-        self.mlp_mp_aa_crm            = nn.Linear(self.nh_rnn2, self.nreg)
-        if self.ice_sedimentation:
-          self.mlp_sed_qn_crm         = nn.Linear(self.nh_rnn2, self.nreg)        
-        
-        # --- Decoders for "downscaling" grid mean values to sub-grid values ---
-        # nx_decoder = self.nh_mem0 
-        nx_decoder = self.nh_rnn2
-        self.mlp_qv_crm     = nn.Linear(nx_decoder, self.nreg)
-        self.mlp_qn_crm     = nn.Linear(nx_decoder, num_reg_cld)
+          if self.pred_subgrid_temp:
+            self.mlp_eddy_diff  = nn.Linear(self.nh_rnn2, self.nreg)
+            self.mlp_t_crm      = nn.Linear(self.nh_rnn2, self.nreg) # nx_decoder
+          else:
+            self.mlp_eddy_diff  = nn.Linear(self.nh_rnn2, 1)
 
-        if self.pred_subgrid_temp:
-          self.mlp_t_crm      = nn.Linear(nx_decoder, self.nreg)
-        if self.use_mp_constraint:
-          self.mlp_qice_crm = nn.Linear(nx_decoder, self.nreg)
-        else:
-          self.mlp_qice_crm = nn.Linear(nx_decoder, self.nreg)
-          self.mlp_qliq_crm = nn.Linear(nx_decoder, self.nreg)
+          # --- Microphysical process rates ---
+          self.mlp_evap_cond_vapor_crm  = nn.Linear(self.nh_rnn2, num_reg_cld)
+          self.mlp_evap_prec_crm        = nn.Linear(self.nh_rnn2, self.nreg)
+          self.mlp_mp_aa_crm            = nn.Linear(self.nh_rnn2, self.nreg)
+          if self.ice_sedimentation:
+            self.mlp_sed_qn_crm         = nn.Linear(self.nh_rnn2, self.nreg)     
 
-        self.pred_subgrid_liq_frac = cfg.pred_subgrid_liq_frac #True
-        if self.pred_subgrid_liq_frac:
-          self.mlp_liq_frac_crm = nn.Linear(nx_decoder, self.nreg)
+          self.mlp_subgrid_area_frac = nn.Linear(self.nh_rnn2, self.nreg)
+          # --- Other decoders for "downscaling" grid mean values to sub-grid values ---
+          # nx_decoder = self.nh_mem0 
+          # nx_decoder = self.nh_rnn2
+          self.mlp_qv_crm     = nn.Linear(self.nh_rnn2, self.nreg)
+          self.mlp_qn_crm     = nn.Linear(self.nh_rnn2, num_reg_cld)
+          self.mlp_qice_crm = nn.Linear(self.nh_rnn2, self.nreg)
+          if self.pred_subgrid_liq_frac:
+            self.mlp_liq_frac_crm = nn.Linear(self.nh_rnn2, self.nreg)
 
-        self.mlp_subgrid_area_frac = nn.Linear(self.nh_rnn2, self.nreg)
+        if not self.use_mp_constraint:
+          # self.mlp_qliq_crm = nn.Linear(nx_decoder, self.nreg)
+          raise NotImplementedError("use_mp_constraint must be True")
             
         if self.predict_liq_frac:
-          self.mlp_predfrac = nn.Linear(self.nh_mem, 1)
+          # self.mlp_predfrac = nn.Linear(self.nh_mem, 1)
+          raise NotImplementedError("use_mp_constraint must be True, predict liq frac must be False")
 
         # Physical coefficients
         self.g = 9.806650000
@@ -423,15 +433,36 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # --------------- 1. Expand current state-variables into "sub-grid" values, preserving mean -------------------
         #   1.1 Predict with local MLPs
         latent_state = rnn2out 
-        # latent_state =  rnn_mem # rnn_mem_prev 
-        qv_crm    = self.softplus(self.mlp_qv_crm(latent_state)) 
-        qn_crm    = self.softplus(self.mlp_qn_crm(latent_state))
+        if self.use_fused_mlp:
+          x = self.mlp_heads(latent_state)
+          x = x.view(*latent_state.shape[:-1], self.nheads, self.nreg)
+
+          qv_crm      = x[..., 0, :].contiguous()
+          qn_crm      = x[..., 1, :].contiguous()
+          area_frac   = x[..., 2, :].contiguous()
+          deltaT      = x[..., 3, :].contiguous()
+          flux1       = x[..., 4, :].contiguous()
+          eddy_diff   = x[..., 5, :].contiguous()
+          qice_crm    = x[..., 6, :].contiguous()
+          sed         = x[..., 7, :].contiguous()
+          dqv_evap_prec = x[..., 8, :].contiguous()
+          dq_cond_evap_vapor = x[..., 9, :].contiguous()
+          alpha       =x [..., 10, :].contiguous()
+
+        # latent_state =  rnn_mem # rnn_mem_prev
+        if not self.use_fused_mlp:
+          qv_crm    = self.mlp_qv_crm(latent_state) 
+          qn_crm    = self.mlp_qn_crm(latent_state) 
+
+        qv_crm    = self.softplus(qv_crm) 
+        qn_crm    = self.softplus(qn_crm)
         if self.use_clear_sky_region:
           zeroes_lev = torch.zeros(self.nlev_crm, batch_size, 1, device=inputs_denorm.device)
           qn_crm = torch.cat((zeroes_lev, qn_crm),dim=-1)
 
         #   1.2 Scale with GCM values 
-        area_frac = self.softmax(self.mlp_subgrid_area_frac(rnn2out))
+        if not self.use_fused_mlp: area_frac = self.mlp_subgrid_area_frac(rnn2out)
+        area_frac = self.softmax(area_frac)
 
         qv_mean_old = (qv_crm * area_frac).sum(dim=-1, keepdim=True)
         scale = torch.where(qv_mean_old == 0, torch.ones_like(qv_mean_old), qv_gcm / qv_mean_old)
@@ -443,7 +474,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
         if self.pred_subgrid_temp:
           # shift, don't scale?
-          deltaT = self.mlp_t_crm(latent_state)
+          if not self.use_fused_mlp: deltaT = self.mlp_t_crm(latent_state)
           deltaT = deltaT - (deltaT * area_frac).sum(dim=-1, keepdim=True) # enforce zero mean
           T_crm = T_gcm + deltaT                             # add back grid mean
           # print("min max T crm", T_crm.min().item(), T_crm.max().item(), "mean", T_crm.mean().item())
@@ -452,31 +483,33 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         else:
           T_crm = T_gcm 
 
-        if not self.use_mp_constraint:
-          qliq_crm = self.softplus(self.mlp_qliq_crm(latent_state)) 
-          qice_crm = self.softplus(self.mlp_qice_crm(latent_state)) 
+        # if not self.use_mp_constraint:
+        #   qliq_crm = self.softplus(self.mlp_qliq_crm(latent_state)) 
+        #   qice_crm = self.softplus(self.mlp_qice_crm(latent_state)) 
 
-          qliq_mean_old = (qliq_crm * area_frac).sum(dim=-1, keepdim=True)
-          scale = torch.where(qliq_mean_old == 0, torch.ones_like(qliq_mean_old), qliq_gcm / qliq_mean_old)
-          qliq_crm = qliq_crm * scale
+        #   qliq_mean_old = (qliq_crm * area_frac).sum(dim=-1, keepdim=True)
+        #   scale = torch.where(qliq_mean_old == 0, torch.ones_like(qliq_mean_old), qliq_gcm / qliq_mean_old)
+        #   qliq_crm = qliq_crm * scale
 
-          qice_mean_old = (qice_crm * area_frac).sum(dim=-1, keepdim=True)
-          scale = torch.where(qice_mean_old == 0, torch.ones_like(qice_mean_old), qice_gcm / qice_mean_old)
-          qice_crm = qice_crm * scale
+        #   qice_mean_old = (qice_crm * area_frac).sum(dim=-1, keepdim=True)
+        #   scale = torch.where(qice_mean_old == 0, torch.ones_like(qice_mean_old), qice_gcm / qice_mean_old)
+        #   qice_crm = qice_crm * scale
 
         # --------------- 2. Compute vertical fluxes -------------------
-        flux1     = self.mlp_massflux(rnn2out)
-        eddy_diff = self.mlp_eddy_diff(rnn2out)
+        # 2.1. Sub-grid luxes and resulting temperature change
+        if not self.use_fused_mlp:
+          flux1     = self.mlp_massflux(rnn2out)
+          eddy_diff = self.mlp_eddy_diff(rnn2out)
 
         zeroes_single_level = torch.zeros(1, batch_size, self.nreg, device=inputs_denorm.device)
+
         preslay_diff0 = play[self.ilev_crm:] - play[self.ilev_crm-1:-1]
         flux_net_H = eddy_diff*(self.cp/self.g)*T_crm*preslay_diff0 #  cp/g · T · Δp 
-        # flux_net_H[-1] = -self.relu(flux_net_H[-1]) # net downward flux at sfc must be upwards or zero
+
         if self.pred_subgrid_temp:
           zer = zeroes_single_level
         else:
           zer = torch.zeros(1, batch_size, 1, device=inputs_denorm.device)
-        # flux_net_H = torch.cat((zer,flux_net_H),dim=0)
         flux_net_H = torch.cat((zer,flux_net_H[0:-1], zer),dim=0)
         flux_t_dp = (scaling_factor/self.cp)*( (flux_net_H[1:] - flux_net_H[0:-1]) * one_over_pres_diff) 
         del flux_net_H, eddy_diff
@@ -486,13 +519,17 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         flux_net_qn = flux_mult_coeff*flux1*qn_crm
         if self.ice_sedimentation:
           if self.use_mp_constraint:
-            qice_crm  = self.softplus(self.mlp_qice_crm(latent_state))
+            if not self.use_fused_mlp:
+              qice_crm = self.mlp_qice_crm(latent_state)
+            qice_crm  = self.softplus(qice_crm)
             qi_mean_old = (qice_crm * area_frac).sum(dim=-1, keepdim=True)
             scale = torch.where( #  rescale to enforce constraint exactly
                 qi_mean_old == 0, torch.ones_like(qi_mean_old), qice_gcm / qi_mean_old)
             qice_crm = qice_crm * scale       
 
-          sed = self.relu(self.mlp_sed_qn_crm(rnn2out))
+          if not self.use_fused_mlp:
+            sed = self.mlp_sed_qn_crm(rnn2out)
+          sed = self.relu(sed)
           sed = sed*self.g*qice_crm*torch.reshape(self.yscale_lev[self.ilev_crm:,2],(-1,1,1))
           # sedimentation = torch.mean( sed[:,-1], 1)
           sedimentation = torch.sum( area_frac[-1]*sed[-1], -1)
@@ -502,18 +539,20 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         else:
           sedimentation = 0
 
+        # Enforce zero transport out of the column: flux is zero at surface and top-of-atmosphere
         flux_net_qv = torch.cat((zeroes_single_level,flux_net_qv[0:-1], zeroes_single_level),dim=0)
-        flux_net_qn = torch.cat((zeroes_single_level,flux_net_qn[0:-1], zeroes_single_level),dim=0)
-
         flux_qv_dp = scaling_factor*( (flux_net_qv[1:] - flux_net_qv[0:-1]) * one_over_pres_diff) 
+
+        flux_net_qn = torch.cat((zeroes_single_level,flux_net_qn[0:-1], zeroes_single_level),dim=0)
         flux_qn_dp = scaling_factor*( (flux_net_qn[1:] - flux_net_qn[0:-1]) * one_over_pres_diff) 
+
         del flux1, flux_net_qv, flux_net_qn
 
         # --------------- 3. Compute MP rates -------------------
         #   3.1: Predict rates with nonlocal MLPs
-        dqv_evap_prec       = self.mlp_evap_prec_crm(rnn2out)
+        if not self.use_fused_mlp: dqv_evap_prec = self.mlp_evap_prec_crm(rnn2out)
         dqv_evap_prec       = self.relu(dqv_evap_prec) + 1.0e-6 # force positive
-        dq_cond_evap_vapor  = self.mlp_evap_cond_vapor_crm(rnn2out)
+        if not self.use_fused_mlp: dq_cond_evap_vapor  = self.mlp_evap_cond_vapor_crm(rnn2out)
         if self.use_clear_sky_region:
           dq_cond_evap_vapor = torch.cat((zeroes_lev, dq_cond_evap_vapor),dim=-1)
 
@@ -526,7 +565,9 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # Accretion + autoconversion. 
         # To enforce dependence on existing cloud water (more water --> more conversion), 
         # we predict "alpha" (usually a tunable parameter in MP schemes) and multiply with existing cloud water
-        alpha = self.relu(self.mlp_mp_aa_crm(rnn2out)) #+ 1.0e-6 # force positive
+        if not self.use_fused_mlp:
+          alpha = self.mlp_mp_aa_crm(rnn2out) 
+        alpha = self.relu(alpha) #+ 1.0e-6 # force positive
 
         dqn_aa = alpha*qn_crm*torch.reshape(self.yscale_lev[self.ilev_crm:,2],(-1,1,1)) 
         # If simulations have too much cloud water, might help to enforce nonlinear dependence on qn
@@ -586,10 +627,10 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           ice_frac_crm = 1 - liq_frac_crm
           net_condensation_crm = (1/self.cp)*((liq_frac_crm*self.Lv + ice_frac_crm*self.Ls)*dq_cond_evap_vapor - self.Lv*dqv_evap_prec)  
         else:
-          # Just use the grid-mean liquid fraction when computing latent heat. This is an approximation because it ignores sub-grid variability in liquid 
+          # Here we use the grid-mean liquid fraction when computing latent heat. This is an approximation because it ignores sub-grid variability in liquid 
           # cloud fraction, but should not matter too much for the purposes of latent heat from phase changes as Ls and Lv are quite similar
-          temp = T_gcm.squeeze() + dT_crm.squeeze()/self.yscale_lev[self.ilev_crm:,0:1] * 1200
-          liq_frac    = torch.unsqueeze(self.temperature_scaling(temp),2); ice_frac = 1 - liq_frac
+          temp_updated = T_gcm.squeeze() + dT_crm.squeeze()/self.yscale_lev[self.ilev_crm:,0:1] * 1200
+          liq_frac    = torch.unsqueeze(self.temperature_scaling(temp_updated),2); ice_frac = 1 - liq_frac # Liquid cloud fraction is a simple linear function of temperature following Hu et al. 2025
           dq_cond_evap_vapor_s = torch.sum(area_frac*dq_cond_evap_vapor, 2, keepdim=True)
           dqv_evap_prec_s      = torch.sum(area_frac*dqv_evap_prec, 2, keepdim=True)
           net_condensation_crm = (1/self.cp)*((liq_frac*self.Lv + ice_frac*self.Ls)*dq_cond_evap_vapor_s - self.Lv*dqv_evap_prec_s)
@@ -767,7 +808,10 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     #       raise NotImplementedError("Only 5 or 6 band ML-GasOptics supported")
   
     #     return out
-
+    @torch.jit.unused
+    def _run_gas_optics(self, model, x_gas, col_dry):
+        return checkpoint(model, x_gas, col_dry, use_reentrant=False)
+       
     @torch.compile(dynamic=False)
     def rad_optical_props(self, inputs_main, inputs_aux0, inputs_denorm, play, plev, delta_plev, rnn_mem, 
                 liq_frac_crm, qv_crm, qn_crm, T_new, qv_new, qn_new, area_frac, rnn2out):
@@ -941,7 +985,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         if self.use_existing_gas_optics_sw:
             # inputs: ['tlay' 'play' 'h2o' 'o3' 'co2' 'n2o' 'ch4']
           if self.include_qv_variability:
-            # Account for sub-grid variability of water vapor by taking the two most likely values and doing two passes with gas opt MLP
+            # Account for sub-grid variability of water vapor by taking the two most likely values and doing two passes with gasopt-MLP
             qv_crm = torch.clamp(qv_crm, max=0.05)
             vmr_h2o_crm = (qv_crm / (1.0-qv_crm))*1.608079364 
 
@@ -970,17 +1014,22 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             x_gas_2[:, :, 2:3] = (vmr_h2o_2 - self.gas_optics_model_sw1.xmin[2:3]) / self.gas_optics_model_sw1.xdiv[2:3]
             # Use SW gas optics absorption NN : two passes to sample water vapor sub-grid variability, then merge
             # print("x_gas_1 min max", x_gas_1.min(), x_gas_1.max(), "col dry mean", col_dry_crm_1.mean())
-            tau_sw1     = self.gas_optics_model_sw1(x_gas_1, col_dry_crm_1) # Absorption optical depth
-            tau_sw_scat1= self.gas_optics_model_sw2(x_gas_1, col_dry_crm_1) # Scattering optical depth
-            tau_sw2     = self.gas_optics_model_sw1(x_gas_2, col_dry_crm_2)
-            tau_sw_scat2= self.gas_optics_model_sw2(x_gas_2, col_dry_crm_2)
-
+            if not torch.jit.is_scripting() and self.training and torch.is_grad_enabled():
+              tau_sw1      = self._run_gas_optics(self.gas_optics_model_sw1, x_gas_1, col_dry_crm_1)
+              tau_sw_scat1 = self._run_gas_optics(self.gas_optics_model_sw2, x_gas_1, col_dry_crm_1)
+              tau_sw2      = self._run_gas_optics(self.gas_optics_model_sw1, x_gas_2, col_dry_crm_2)
+              tau_sw_scat2 = self._run_gas_optics(self.gas_optics_model_sw2, x_gas_2, col_dry_crm_2)
+            else:
+              tau_sw1     = self.gas_optics_model_sw1(x_gas_1, col_dry_crm_1) # Absorption optical depth
+              tau_sw_scat1= self.gas_optics_model_sw2(x_gas_1, col_dry_crm_1) # Scattering optical depth
+              tau_sw2     = self.gas_optics_model_sw1(x_gas_2, col_dry_crm_2)
+              tau_sw_scat2= self.gas_optics_model_sw2(x_gas_2, col_dry_crm_2)
             mask          = torch.rand_like(tau_sw1) < 0.5
             tau_sw        = torch.where(mask, tau_sw1, tau_sw2)
             tau_sw_scat   = torch.where(mask, tau_sw_scat1, tau_sw_scat2)
             # tau_sw        = 0.5*(tau_sw1+tau_sw2)
             # tau_sw_scat   = 0.5*(tau_sw_scat1+tau_sw_scat2)
-
+            del tau_sw1, tau_sw2, tau_sw_scat1, tau_sw_scat2
           else:
 
             x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, n2o, ch4), dim=2)
@@ -1290,12 +1339,9 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
       incoming_toa    = inputs_aux[:,1:2]
 
-      # if self.printdebug: print("incoming toa", incoming_toa[500:530])
-
       if (self.use_existing_gas_optics_sw and (not self.reduce_sw_gas_optics)):
         if self.use_new_sw_gas_optics: # new spectrally reduced (ng=12..32) gas optics models
           toa_spectral =  self.gas_optics_model_sw1.get_solar_weights()
-          # print("toa spectral shape", toa_spectral.shape, "sum -1", toa_spectral.sum(dim=-1), "raw", toa_spectral)
         else:
           toa_spectral = self.sw_solar_weights 
       else:
@@ -1494,8 +1540,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                     #   1.0 on [bb[3], bb[6])
                     is_visible = (
                         (gpoint >= bb[3])
-                        & (gpoint < bb[6])
-                    )
+                        & (gpoint < bb[6]))
 
                     w_vis = is_visible.to(dtype=dtype)
 
@@ -1509,24 +1554,17 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                     #   0.5 on [bb[2], bb[3])
                     #   1.0 on [bb[3], bb[5])
                     is_transition = (
-                        (gpoint >= bb[2])
-                        & (gpoint < bb[3])
-                    )
+                        (gpoint >= bb[2]) & (gpoint < bb[3]))
 
                     is_visible = (
-                        (gpoint >= bb[3])
-                        & (gpoint < bb[5])
-                    )
+                        (gpoint >= bb[3]) & (gpoint < bb[5]))
 
                     w_vis = (
                         0.5 * is_transition.to(dtype=dtype)
                         + is_visible.to(dtype=dtype)
                     )
-
                 else:
-                    raise NotImplementedError(
-                        "Only 5-band and 6-band ML gas optics are supported"
-                    )
+                    raise NotImplementedError("Only 5-band and 6-band ML gas optics are supported")
 
         else:
             iend_ir = int(round((80 / 112) * self.ng_sw))
@@ -1555,7 +1593,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         else:
           out_new_true = rnn_mem # dummy
 
-        # print("shape inp main", inputs_main.shape, "aux", inputs_aux.shape, "mem", rnn_mem.shape, "denorm", inputs_denorm.shape)
         # if self.store_precip: 
         P_old = rnn_mem[-1,:,-1] # if self.store_precip is False, this is a dummy variable not used for anything 
 
@@ -1750,14 +1787,12 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           dT_rad = dT_rad.unsqueeze(2)
           # print("elapsed radiative_transfer {}".format(time.time() - t0))
 
-        # print("dT_rad 2  min max", torch.min(dT_rad[:,:]).item(), torch.max(dT_rad[:,:]).item())
-        # print("shape out", out_new.shape, "dt", dT_rad.shape)
         out_new[:,:,0:1] = out_new[:,:,0:1] + dT_rad
 
         # # rad predicts everything except PRECSC, PRECC
         out_sfc =  torch.cat((out_sfc_rad[:,0:2], precsc, precc, out_sfc_rad[:,2:]),dim=1)
 
-        if self.predict_liq_frac:
+        if self.predict_liq_frac: # not currently implemented
           # T = T + out_new[:,:,0:1] / self.yscale_lev[0:1]
           liq_frac_diagnosed0    = self.temperature_scaling(T.squeeze())
           liq_frac = liq_frac_diagnosed0

@@ -21,6 +21,235 @@ import torch.jit as jit
 from torch import Tensor
 import gc
 
+import math
+# import torch
+# import torch.nn as nn
+# from torch import Tensor
+from torch.utils.cpp_extension import load_inline
+cuda_source = """
+#include <torch/extension.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
+
+// --- Forward Kernels ---
+__global__ void reparam_forward_kernel(
+    const float* __restrict__ pred_dist, const float* __restrict__ eps_t,
+    float* __restrict__ z, float* __restrict__ exp_half_logvar,
+    int num_elements, int hidden_size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < num_elements) {
+        int batch_idx = idx / hidden_size;
+        int h_idx = idx % hidden_size;
+        int dist_base = batch_idx * (2 * hidden_size) + h_idx;
+
+        float mean_val = pred_dist[dist_base];
+        float logvar_val = pred_dist[dist_base + hidden_size];
+
+        float exp_half = expf(0.5f * logvar_val);
+        exp_half_logvar[idx] = exp_half;
+        z[idx] = mean_val + eps_t[idx] * exp_half;
+    }
+}
+
+__global__ void gru_gate_forward_kernel(
+    const float* __restrict__ r_u, const float* __restrict__ zg_u, const float* __restrict__ n_u,
+    const float* __restrict__ z_results, const float* __restrict__ hidden,
+    float* __restrict__ next_hidden, float* __restrict__ r_out,
+    float* __restrict__ zg_out, float* __restrict__ n_out, float* __restrict__ z_n_out,
+    int num_elements, int hidden_size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < num_elements) {
+        int batch_idx = idx / hidden_size;
+        int h_idx = idx % hidden_size;
+        int base_3h = batch_idx * (3 * hidden_size) + h_idx;
+
+        float z_r = z_results[base_3h];
+        float z_z = z_results[base_3h + hidden_size];
+        float z_n = z_results[base_3h + 2 * hidden_size];
+
+        float r_val = 1.0f / (1.0f + expf(-(r_u[idx] + z_r)));
+        float zg_val = 1.0f / (1.0f + expf(-(zg_u[idx] + z_z)));
+        float n_val = tanhf(n_u[idx] + r_val * z_n);
+
+        float hp = hidden[idx];
+        next_hidden[idx] = n_val + zg_val * (hp - n_val);
+
+        r_out[idx] = r_val; zg_out[idx] = zg_val;
+        n_out[idx] = n_val; z_n_out[idx] = z_n;
+    }
+}
+
+// --- Backward Kernel ---
+__global__ void stochastic_gru_backward_elem_kernel(
+    const float* __restrict__ grad_h_total, const float* __restrict__ h_prev,
+    const float* __restrict__ r, const float* __restrict__ z_gate,
+    const float* __restrict__ n, const float* __restrict__ z_n,
+    float* __restrict__ grad_z_results, float* __restrict__ grad_r_t,
+    float* __restrict__ grad_zg_t, float* __restrict__ grad_n_t,
+    float* __restrict__ grad_h_prev_elem, int num_elements, int hidden_size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < num_elements) {
+        int batch_idx = idx / hidden_size;
+        int h_idx = idx % hidden_size;
+
+        float dh = grad_h_total[idx];
+        float zg = z_gate[idx];
+        float n_val = n[idx];
+        float hp = h_prev[idx];
+        float r_val = r[idx];
+        float zn_val = z_n[idx];
+
+        float dn = dh * (1.0f - zg);
+        float dzg = dh * (hp - n_val);
+        grad_h_prev_elem[idx] = dh * zg;
+
+        float dn_pre = dn * (1.0f - n_val * n_val);
+        grad_n_t[idx] = dn_pre;
+        
+        float dr = dn_pre * zn_val;
+        float dzn = dn_pre * r_val;
+
+        float dzg_pre = dzg * zg * (1.0f - zg);
+        grad_zg_t[idx] = dzg_pre;
+
+        float dr_pre = dr * r_val * (1.0f - r_val);
+        grad_r_t[idx] = dr_pre;
+
+        int base_out = batch_idx * (3 * hidden_size) + h_idx;
+        grad_z_results[base_out] = dr_pre;
+        grad_z_results[base_out + hidden_size] = dzg_pre;
+        grad_z_results[base_out + 2 * hidden_size] = dzn;
+    }
+}
+
+// --- C++ Sequence Loop Wrappers ---
+std::vector<at::Tensor> stochastic_gru_forward_seq_cuda(
+    at::Tensor eps, at::Tensor r_all, at::Tensor zg_all, at::Tensor n_all,
+    at::Tensor initial_hidden, at::Tensor weight_encoder, 
+    at::Tensor weight_zh, at::Tensor bias_zh, bool use_bias
+) {
+    int seq_len = r_all.size(0);
+    int batch_size = r_all.size(1);
+    int hidden_size = r_all.size(2);
+    int num_elements = batch_size * hidden_size;
+    auto options = initial_hidden.options();
+
+    auto all_h = at::empty({seq_len + 1, batch_size, hidden_size}, options);
+    all_h[0] = initial_hidden;
+
+    auto all_z = at::empty({seq_len, batch_size, hidden_size}, options);
+    auto all_exp = at::empty({seq_len, batch_size, hidden_size}, options);
+    auto all_r = at::empty({seq_len, batch_size, hidden_size}, options);
+    auto all_zg = at::empty({seq_len, batch_size, hidden_size}, options);
+    auto all_n = at::empty({seq_len, batch_size, hidden_size}, options);
+    auto all_zn = at::empty({seq_len, batch_size, hidden_size}, options);
+
+    const int threads = 256;
+    const int blocks = (num_elements + threads - 1) / threads;
+
+    for (int t = 0; t < seq_len; ++t) {
+        auto h_t = all_h[t];
+        auto pred_dist = at::matmul(h_t, weight_encoder);
+        
+        reparam_forward_kernel<<<blocks, threads>>>(
+            pred_dist.data_ptr<float>(), eps[t].data_ptr<float>(),
+            all_z[t].data_ptr<float>(), all_exp[t].data_ptr<float>(),
+            num_elements, hidden_size
+        );
+
+        at::Tensor z_results = use_bias ? at::addmm(bias_zh, all_z[t], weight_zh) : at::matmul(all_z[t], weight_zh);
+
+        gru_gate_forward_kernel<<<blocks, threads>>>(
+            r_all[t].data_ptr<float>(), zg_all[t].data_ptr<float>(), n_all[t].data_ptr<float>(),
+            z_results.data_ptr<float>(), h_t.data_ptr<float>(), all_h[t + 1].data_ptr<float>(), 
+            all_r[t].data_ptr<float>(), all_zg[t].data_ptr<float>(),
+            all_n[t].data_ptr<float>(), all_zn[t].data_ptr<float>(),
+            num_elements, hidden_size
+        );
+    }
+    return {all_h, all_z, all_exp, all_r, all_zg, all_n, all_zn};
+}
+
+std::vector<at::Tensor> stochastic_gru_backward_seq_cuda(
+    at::Tensor grad_outputs, at::Tensor all_h, at::Tensor eps, 
+    at::Tensor all_z, at::Tensor all_exp, at::Tensor all_r, 
+    at::Tensor all_zg, at::Tensor all_n, at::Tensor all_zn,
+    at::Tensor weight_encoder, at::Tensor weight_zh, bool use_bias
+) {
+    int seq_len = eps.size(0); int batch_size = eps.size(1); int hidden_size = eps.size(2);
+    int num_elements = batch_size * hidden_size;
+    auto options = eps.options();
+
+    auto grad_eps = at::empty_like(eps);
+    auto grad_r_all = at::empty_like(eps);
+    auto grad_zg_all = at::empty_like(eps);
+    auto grad_n_all = at::empty_like(eps);
+
+    auto grad_weight_encoder = at::zeros_like(weight_encoder);
+    auto grad_weight_zh = at::zeros_like(weight_zh);
+    auto grad_bias_zh = at::zeros({3 * hidden_size}, options);
+
+    auto grad_h_next = at::zeros({batch_size, hidden_size}, options);
+    auto grad_z_results = at::empty({batch_size, 3 * hidden_size}, options);
+    auto grad_r_t = at::empty({batch_size, hidden_size}, options);
+    auto grad_zg_t = at::empty({batch_size, hidden_size}, options);
+    auto grad_n_t = at::empty({batch_size, hidden_size}, options);
+    auto grad_h_prev_elem = at::empty({batch_size, hidden_size}, options);
+
+    const int threads = 256;
+    const int blocks = (num_elements + threads - 1) / threads;
+
+    for (int t = seq_len - 1; t >= 0; --t) {
+        auto grad_h_total = grad_outputs[t] + grad_h_next;
+
+        stochastic_gru_backward_elem_kernel<<<blocks, threads>>>(
+            grad_h_total.data_ptr<float>(), all_h[t].data_ptr<float>(),
+            all_r[t].data_ptr<float>(), all_zg[t].data_ptr<float>(), 
+            all_n[t].data_ptr<float>(), all_zn[t].data_ptr<float>(),
+            grad_z_results.data_ptr<float>(), grad_r_t.data_ptr<float>(),
+            grad_zg_t.data_ptr<float>(), grad_n_t.data_ptr<float>(),
+            grad_h_prev_elem.data_ptr<float>(), num_elements, hidden_size
+        );
+
+        auto grad_z_t = at::matmul(grad_z_results, weight_zh.t());
+        grad_weight_zh += at::matmul(all_z[t].t(), grad_z_results);
+        if (use_bias) grad_bias_zh += grad_z_results.sum(0);
+
+        auto grad_eps_t = grad_z_t * all_exp[t];
+        grad_eps[t] = grad_eps_t;
+        auto grad_logvar = grad_z_t * eps[t] * all_exp[t] * 0.5f;
+
+        auto grad_pred_dist = at::cat({grad_z_t, grad_logvar}, 1);
+        grad_weight_encoder += at::matmul(all_h[t].t(), grad_pred_dist);
+        grad_h_next = grad_h_prev_elem + at::matmul(grad_pred_dist, weight_encoder.t());
+
+        grad_r_all[t] = grad_r_t; grad_zg_all[t] = grad_zg_t; grad_n_all[t] = grad_n_t;
+    }
+    return {grad_h_next, grad_eps, grad_r_all, grad_zg_all, grad_n_all, grad_weight_encoder, grad_weight_zh, grad_bias_zh};
+}
+"""
+
+cpp_source = """
+std::vector<at::Tensor> stochastic_gru_forward_seq_cuda(
+    at::Tensor eps, at::Tensor r_all, at::Tensor zg_all, at::Tensor n_all,
+    at::Tensor initial_hidden, at::Tensor weight_encoder, 
+    at::Tensor weight_zh, at::Tensor bias_zh, bool use_bias);
+std::vector<at::Tensor> stochastic_gru_backward_seq_cuda(
+    at::Tensor grad_outputs, at::Tensor all_h, at::Tensor eps, 
+    at::Tensor all_z, at::Tensor all_exp, at::Tensor all_r, 
+    at::Tensor all_zg, at::Tensor all_n, at::Tensor all_zn,
+    at::Tensor weight_encoder, at::Tensor weight_zh, bool use_bias);
+"""
+
+stochastic_gru_seq_cuda = load_inline(
+    name="stochastic_gru_seq_cuda",
+    cpp_sources=cpp_source, cuda_sources=cuda_source,
+    functions=["stochastic_gru_forward_seq_cuda", "stochastic_gru_backward_seq_cuda"],
+    verbose=False
+)
 
 class SRU(nn.Module):
     """ Simple Recurrent Unit https://arxiv.org/pdf/1709.02755.pdf """
@@ -493,89 +722,128 @@ class MyStochasticGRULayer4(jit.ScriptModule):
 
         return torch.stack(outputs)
     
-# class MyStochasticGRULayer5(jit.ScriptModule):
+    
+# class MyStochasticGRULayer5(nn.Module):
 #     use_bias: Final[bool]
 
 #     def __init__(self, input_size, hidden_size, use_bias=False):
 #         super().__init__()
-#         # self.cell = cell(*cell_args)
 #         self.input_size = input_size
 #         self.hidden_size = hidden_size
 #         self.weight_ih = Parameter(torch.randn((input_size, 3 * hidden_size)))
 #         self.weight_zh = Parameter(torch.randn((hidden_size, 3 * hidden_size)))
-
 #         self.use_bias = use_bias
 #         if self.use_bias:
 #             self.bias_ih = Parameter(torch.randn((3 * hidden_size)))
 #             self.bias_zh = Parameter(torch.randn((3 * hidden_size)))
-
-#         self.weight_encoder =  Parameter(torch.randn((hidden_size, 2*hidden_size)))
-
+#         self.weight_encoder = Parameter(torch.randn((hidden_size, 2 * hidden_size)))
 #         self.reset_parameters()
 
 #     def reset_parameters(self):
 #         std = 1.0 / math.sqrt(self.hidden_size)
 #         for w in self.parameters():
 #             w.data.uniform_(-std, std)
-            
+
 #     @torch.compile
-#     def forward(
-#         self, input_seq: Tensor, hidden: Tensor) -> Tensor: #Tuple[Tensor, Tensor]:
-        
+#     def forward(self, input_seq: Tensor, hidden: Tensor) -> Tensor:
 #         nseq, batch_size, nx = input_seq.shape
 
-#         # epss = torch.randn_like(input_seq)
-#         epss = torch.randn((nseq, batch_size, self.hidden_size),device=input_seq.device)
-#         epss = epss.unbind(0)
-        
-#         inputs = input_seq.unbind(0)
-#         outputs = torch.jit.annotate(List[Tensor], [])
-        
-#         for i in range(len(input_seq)):
-#             x = inputs[i]
-#             eps = epss[i]
-            
-#             predicted_distribution = torch.mm(hidden, self.weight_encoder) 
-#             mean_, z = predicted_distribution.chunk(2,1)
-            
-#             z = mean_ + eps * torch.exp(0.5*z)
-            
-#             if self.use_bias:
-#                 x_results = torch.mm(x, self.weight_ih) + self.bias_ih
-#                 z_results = torch.mm(z, self.weight_zh)  + self.bias_zh
-#             else:
-#                 x_results = torch.mm(x, self.weight_ih) 
-#                 z_results = torch.mm(z, self.weight_zh) 
+#         eps = torch.randn((nseq, batch_size, self.hidden_size), device=input_seq.device)
 
-#             # i_r, i_z, i_n = x_results.chunk(3, 1)
-#             # z_r, z_z, z_n = z_results.chunk(3, 1)
-#             r, z, n = x_results.chunk(3, 1)
+#         # Hoisted: input->hidden projection doesn't depend on the recurrence,
+#         # so do it as one big GEMM instead of nseq small ones.
+#         flat_x = input_seq.reshape(nseq * batch_size, nx)
+#         x_results = (torch.addmm(self.bias_ih, flat_x, self.weight_ih) if self.use_bias
+#                      else flat_x @ self.weight_ih)
+#         x_results = x_results.view(nseq, batch_size, 3 * self.hidden_size)
+#         r_all, z_gate_all, n_all = x_results.chunk(3, dim=2)
+
+#         eps_u = eps.unbind(0)
+#         r_u = r_all.unbind(0)
+#         zg_u = z_gate_all.unbind(0)
+#         n_u = n_all.unbind(0)
+
+#         # outputs = torch.jit.annotate(List[Tensor], [])
+#         outputs = torch.empty((nseq, batch_size, self.hidden_size), device=input_seq.device)
+#         for i in range(nseq):
+#             predicted_distribution = torch.mm(hidden, self.weight_encoder)
+#             mean_, logvar = predicted_distribution.chunk(2, 1)
+#             z = mean_ + eps_u[i] * torch.exp(0.5 * logvar)
+
+#             z_results = (torch.addmm(self.bias_zh, z, self.weight_zh) if self.use_bias
+#                          else z @ self.weight_zh)
 #             z_r, z_z, z_n = z_results.chunk(3, 1)
-            
-#             r = torch.sigmoid(r + z_r)
-#             z = torch.sigmoid(z + z_z)
-#             n = torch.tanh(n + r * z_n)
-                
-#             hidden = n + torch.mul(z, (hidden - n))
 
-#             outputs += [hidden]
+#             r = torch.sigmoid(r_u[i] + z_r)
+#             z_gate = torch.sigmoid(zg_u[i] + z_z)
+#             n = torch.tanh(n_u[i] + r * z_n)
 
-#         return torch.stack(outputs)
-    
+#             hidden = n + z_gate * (hidden - n)
+#             # outputs += [hidden]
+#             outputs[i] = hidden
+
+#         # for i in range(nseq):
+#         #     # Calls your custom forward pass and registers your custom backward pass
+#         #     hidden = FusedCUDAStochasticGRUStep.apply(
+#         #         hidden, eps_u[i], r_u[i], zg_u[i], n_u[i], 
+#         #         self.weight_encoder, self.weight_zh #, self.bias_zh, self.use_bias
+#         #     )
+#         #     outputs[i] = hidden
+
+        return outputs # torch.stack(outputs)
+
+class FusedCUDAStochasticGRUSequence(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, eps, r_all, zg_all, n_all, initial_hidden, weight_encoder, weight_zh, bias_zh, use_bias):
+        # We must ensure inputs are contiguous for direct C++ pointer access
+        eps, r_all = eps.contiguous(), r_all.contiguous()
+        zg_all, n_all = zg_all.contiguous(), n_all.contiguous()
+        initial_hidden = initial_hidden.contiguous()
+        
+        dummy_bias = bias_zh if use_bias else torch.empty(0, device=eps.device)
+
+        # 1. Run the entire 50-step sequence in a single C++ execution
+        all_h, all_z, all_exp, all_r, all_zg, all_n, all_zn = \
+            stochastic_gru_seq_cuda.stochastic_gru_forward_seq_cuda(
+                eps, r_all, zg_all, n_all, initial_hidden, 
+                weight_encoder, weight_zh, dummy_bias, use_bias
+            )
+
+        # 2. Save contiguous history for the backward pass
+        ctx.save_for_backward(all_h, eps, all_z, all_exp, all_r, all_zg, all_n, all_zn, weight_encoder, weight_zh)
+        ctx.use_bias = use_bias
+
+        # Return outputs (excluding the initial hidden state at index 0)
+        return all_h[1:]
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        saved = ctx.saved_tensors
+        use_bias = ctx.use_bias
+
+        # 1. Run the entire backward sequence loop in C++
+        grad_h0, grad_eps, grad_r, grad_zg, grad_n, grad_we, grad_wz, grad_bz = \
+            stochastic_gru_seq_cuda.stochastic_gru_backward_seq_cuda(
+                grad_outputs.contiguous(), *saved, use_bias
+            )
+
+        grad_bz = grad_bz if use_bias else None
+        return grad_eps, grad_r, grad_zg, grad_n, grad_h0, grad_we, grad_wz, grad_bz, None
+
+
 class MyStochasticGRULayer5(nn.Module):
-    use_bias: Final[bool]
-
     def __init__(self, input_size, hidden_size, use_bias=False):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
-        self.weight_ih = Parameter(torch.randn((input_size, 3 * hidden_size)))
-        self.weight_zh = Parameter(torch.randn((hidden_size, 3 * hidden_size)))
         self.use_bias = use_bias
+
+        self.weight_ih = nn.Parameter(torch.randn((input_size, 3 * hidden_size)))
+        self.weight_zh = nn.Parameter(torch.randn((hidden_size, 3 * hidden_size)))
         if self.use_bias:
-            self.bias_ih = Parameter(torch.randn((3 * hidden_size)))
-            self.bias_zh = Parameter(torch.randn((3 * hidden_size)))
-        self.weight_encoder = Parameter(torch.randn((hidden_size, 2 * hidden_size)))
+            self.bias_ih = nn.Parameter(torch.randn((3 * hidden_size)))
+            self.bias_zh = nn.Parameter(torch.randn((3 * hidden_size)))
+        self.weight_encoder = nn.Parameter(torch.randn((hidden_size, 2 * hidden_size)))
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -583,43 +851,45 @@ class MyStochasticGRULayer5(nn.Module):
         for w in self.parameters():
             w.data.uniform_(-std, std)
 
-    @torch.compile
     def forward(self, input_seq: Tensor, hidden: Tensor) -> Tensor:
         nseq, batch_size, nx = input_seq.shape
-
         eps = torch.randn((nseq, batch_size, self.hidden_size), device=input_seq.device)
 
-        # Hoisted: input->hidden projection doesn't depend on the recurrence,
-        # so do it as one big GEMM instead of nseq small ones.
+        # Batched input projection outside the loop
         flat_x = input_seq.reshape(nseq * batch_size, nx)
-        x_results = (torch.addmm(self.bias_ih, flat_x, self.weight_ih) if self.use_bias
-                     else flat_x @ self.weight_ih)
+        x_results = (torch.addmm(self.bias_ih, flat_x, self.weight_ih) if self.use_bias else flat_x @ self.weight_ih)
         x_results = x_results.view(nseq, batch_size, 3 * self.hidden_size)
-        r_all, z_gate_all, n_all = x_results.chunk(3, dim=2)
+        r_all, zg_all, n_all = x_results.chunk(3, dim=2)
+        
+        bias_zh = self.bias_zh if self.use_bias else None
 
-        eps_u = eps.unbind(0)
-        r_u = r_all.unbind(0)
-        zg_u = z_gate_all.unbind(0)
-        n_u = n_all.unbind(0)
+        # --- DEVICE ROUTING ---
+        if input_seq.is_cuda:
+            # High-Speed C++ Fused Loop (Training/GPU Inference)
+            return FusedCUDAStochasticGRUSequence.apply(
+                eps, r_all, zg_all, n_all, hidden, 
+                self.weight_encoder, self.weight_zh, bias_zh, self.use_bias
+            )
+        else:
+            # Pure PyTorch CPU Loop (CPU Inference / Testing)
+            outputs = torch.empty((nseq, batch_size, self.hidden_size), device=input_seq.device)
+            for t in range(nseq):
+                pred_dist = torch.mm(hidden, self.weight_encoder)
+                mean_, logvar = pred_dist.chunk(2, 1)
+                z = mean_ + eps[t] * torch.exp(0.5 * logvar)
 
-        outputs = torch.jit.annotate(List[Tensor], [])
-        for i in range(nseq):
-            predicted_distribution = torch.mm(hidden, self.weight_encoder)
-            mean_, logvar = predicted_distribution.chunk(2, 1)
-            z = mean_ + eps_u[i] * torch.exp(0.5 * logvar)
+                z_results = (torch.addmm(self.bias_zh, z, self.weight_zh) if self.use_bias else z @ self.weight_zh)
+                z_r, z_z, z_n = z_results.chunk(3, 1)
 
-            z_results = (torch.addmm(self.bias_zh, z, self.weight_zh) if self.use_bias
-                         else z @ self.weight_zh)
-            z_r, z_z, z_n = z_results.chunk(3, 1)
+                r = torch.sigmoid(r_all[t] + z_r)
+                z_gate = torch.sigmoid(zg_all[t] + z_z)
+                n = torch.tanh(n_all[t] + r * z_n)
 
-            r = torch.sigmoid(r_u[i] + z_r)
-            z_gate = torch.sigmoid(zg_u[i] + z_z)
-            n = torch.tanh(n_u[i] + r * z_n)
+                hidden = n + z_gate * (hidden - n)
+                outputs[t] = hidden
 
-            hidden = n + z_gate * (hidden - n)
-            outputs += [hidden]
+            return outputs
 
-        return torch.stack(outputs)
 
 class MyStochasticGRULayer5_MLP_fused(jit.ScriptModule):
     use_bias: Final[bool]

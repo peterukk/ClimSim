@@ -27,6 +27,7 @@ import random
 import types
 from typing import List, Tuple, Final, Optional
 from torchinfo import summary
+from pickle import dump
 
 # Custom NN SW gas optics model in data/sw_gasopt_ng16_nh32_alpha0.10_*.pt
 # Band	Wavenum (cm⁻¹)	Wavelength (µm)	Summary
@@ -1692,6 +1693,10 @@ class train_or_eval_one_epoch:
             #     # tell CUDA to stop recording memory allocations now
             #     torch.cuda.memory._record_memory_history(enabled=None)
             #     print("SNAPSHOT SAVED")
+            #     print(torch.cuda.memory_allocated() / 1e9, "GB allocated (live tensors)")
+            #     print(torch.cuda.memory_reserved() / 1e9, "GB reserved (held by allocator pool)")
+            #     print(torch.cuda.max_memory_reserved() / 1e9, "GB peak reserved")
+            #     print(torch.cuda.memory_summary())
             #     ff
                 
             del x_lay_chk, x_sfc_chk, targets_lay_chk, targets_sfc_chk, x_lay_raw_chk
