@@ -83,9 +83,9 @@ def main(cfg: DictConfig):
     print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000, flush=True)
 
     if cfg.save_loaded_model_and_quit:
-      import settings 
-      disable_compile=True
-      settings.change_compile_setting(disable_compile)
+    #   import settings 
+    #   disable_compile=True
+    #   settings.change_compile_setting(disable_compile)
       cfg.use_wandb=False
 
     # torch.autograd.set_detect_anomaly(True)
@@ -757,13 +757,41 @@ def main(cfg: DictConfig):
     
     start_epoch=0
 
+    def filter_mismatched_keys(checkpoint_state_dict, model):
+        model_state_dict = model.state_dict()
+        filtered = {}
+        skipped = []
+
+        for k, v in checkpoint_state_dict.items():
+            if k in model_state_dict:
+                if v.shape == model_state_dict[k].shape:
+                    filtered[k] = v
+                else:
+                    skipped.append((k, v.shape, model_state_dict[k].shape))
+            else:
+                skipped.append((k, v.shape, None))
+
+        for k, ckpt_shape, model_shape in skipped:
+            print(f"Skipping {k}: checkpoint {ckpt_shape} vs model {model_shape}")
+
+        return filtered
+
+
     # load from checkpoint of it exists
     if len(cfg.model_file_checkpoint)>0:
         print("loading existing model from {}".format(cfg.model_file_checkpoint))
         checkpoint = torch.load("saved_models/"+cfg.model_file_checkpoint,weights_only=True)
-              
+        filtered_state_dict = filter_mismatched_keys(checkpoint['model_state_dict'], model)
+
+        # checkpoint.preslay
+        # remove_layers = ["preslay"]
+        # for layer in remove_layers:
+        #     del checkpoint[layer]
+
         if cfg.retrain_det_model:
-          model.load_state_dict(checkpoint['model_state_dict'],strict=False)
+        #   model.load_state_dict(checkpoint['model_state_dict'],strict=False)
+          model.load_state_dict(filtered_state_dict,strict=False)
+
           # all_layers = list(model.named_children())
           all_layers = [name for name, _ in model.named_children()]
           # all_layers.remove("rnn3")
@@ -796,63 +824,47 @@ def main(cfg: DictConfig):
         # print("update qv", model.update_qv_for_rad)
           
 
-        if cfg.save_loaded_model_and_quit:
-          MODEL_STR=cfg.model_file_checkpoint.split(".pt")[0]
-          save_file_torch1 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
-          save_file_torch1_gpu = "saved_models/" + MODEL_STR + "_script_gpu.pt"
-          save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu2.pt"
-          save_file_torch2_gpu = "saved_models/" + MODEL_STR + "_script_gpu2.pt"
-          if is_stochastic:
-              model.use_ensemble=False
-          if cfg.predict_fluxes:
-              return_neg_precip=False
-              if model.return_neg_precip:
-                  return_neg_precip=True 
-              model.return_neg_precip = False
-          print("model allow xtra heating: {} ".format(model.allow_extra_heating))
-          model.train(False)
-          model = model.eval()
-
-        #   # model.compile(mode="max-autotune")
-        #   scripted_model = torch . jit . script ( model )
+        # if cfg.save_loaded_model_and_quit:
+        #   MODEL_STR=cfg.model_file_checkpoint.split(".pt")[0]
+        #   save_file_torch1 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
+        #   save_file_torch1_gpu = "saved_models/" + MODEL_STR + "_script_gpu.pt"
+        #   save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu2.pt"
+        #   save_file_torch2_gpu = "saved_models/" + MODEL_STR + "_script_gpu2.pt"
+        #   if is_stochastic:
+        #       model.use_ensemble=False
+        #   if cfg.predict_fluxes:
+        #       return_neg_precip=False
+        #       if model.return_neg_precip:
+        #           return_neg_precip=True 
+        #       model.return_neg_precip = False
+        #   print("model allow xtra heating: {} ".format(model.allow_extra_heating))
+        #   model.train(False)
+        #   model = model.eval()
+        #   model = model.to("cpu")
+        #   dummy_input_lay = torch.zeros(384, 60, model.nx)
+        #   dummy_input_sfc = torch.zeros(384, model.nx_sfc)
+        #   dummy_mem  = torch.zeros(384,model.nlev_mem, model.nh_mem)
+        #   inp_list = [dummy_input_lay, dummy_input_sfc, dummy_mem, dummy_input_lay]
+        #   scripted_model = torch.jit.trace(model, example_inputs=(inp_list,))
         #   scripted_model = scripted_model.eval()
-        #   scripted_model.save(save_file_torch1_gpu)
-        #   # model.compile(mode="max-autotune")
-        #   print("model train:", model.training)
-          model = model.to("cpu")
-        #   scripted_model = torch . jit . script ( model )
-        #   scripted_model = scripted_model.eval()
-        #   scripted_model.save(save_file_torch1)
+        #   # scripted_model = torch.jit.optimize_for_inference(scripted_model)
+        #   scripted_model.save(save_file_torch2)
+        #   print("saved model to: ", save_file_torch2)
+        #   # scripted_model = torch.export.export(model, args=(inp_list,))
+        #   # torch.export.save(scripted_model,save_file_torch2)
+        #   # print(scripted_model)
+        #   model = model.to(device)
+        #   dummy_input_lay = dummy_input_lay.to(device)
+        #   dummy_input_sfc = dummy_input_sfc.to(device)
+        #   dummy_mem = dummy_mem.to(device)
+        #   inp_list = [dummy_input_lay, dummy_input_sfc, dummy_mem, dummy_input_lay]
+        #   scripted_model = torch.jit.trace(model, example_inputs=(inp_list,))
+        #   scripted_model.save(save_file_torch2_gpu)
+        #   print("saved model to: ", save_file_torch2_gpu)
+        #   import torch_tensorrt
+        #   quit()
 
-          dummy_input_lay = torch.zeros(384, 60, model.nx)
-          dummy_input_sfc = torch.zeros(384, model.nx_sfc)
-          dummy_mem  = torch.zeros(384,model.nlev_mem, model.nh_mem)
-          inp_list = [dummy_input_lay, dummy_input_sfc, dummy_mem, dummy_input_lay]
-          scripted_model = torch.jit.trace(model, example_inputs=(inp_list,))
-          scripted_model = scripted_model.eval()
-          # scripted_model = torch.jit.optimize_for_inference(scripted_model)
-          scripted_model.save(save_file_torch2)
-          print("saved model to: ", save_file_torch2)
-
-          # scripted_model = torch.export.export(model, args=(inp_list,))
-          # torch.export.save(scripted_model,save_file_torch2)
-          # print(scripted_model)
- 
-          model = model.to(device)
-          dummy_input_lay = dummy_input_lay.to(device)
-          dummy_input_sfc = dummy_input_sfc.to(device)
-          dummy_mem = dummy_mem.to(device)
-          inp_list = [dummy_input_lay, dummy_input_sfc, dummy_mem, dummy_input_lay]
-          scripted_model = torch.jit.trace(model, example_inputs=(inp_list,))
-          scripted_model.save(save_file_torch2_gpu)
-          print("saved model to: ", save_file_torch2_gpu)
-
-          import torch_tensorrt
-          save_file_torch2_gpu = "saved_models/" + MODEL_STR + "_script_gpu2.ts"
-
-          quit()
-
-    if False: # test saving to TorchScript
+    if cfg.save_loaded_model_and_quit: # test saving to TorchScript
       save_file_torch1 = "saved_models/" + MODEL_STR + "_script_gpu.pt"
       save_file_torch2 = "saved_models/" + MODEL_STR + "_script_cpu.pt"
       print("saving model to", save_file_torch2)
@@ -985,11 +997,13 @@ def main(cfg: DictConfig):
             labels = ["dT/dt", "dq/dt", "dqliq/dt", "dqice/dt", "dU/dt", "dV/dt"]
             # if True:
             if cfg.save_model:
-              if val_loss < best_val_loss or epoch in [3,5,7,11,19,29,39,49,59,69]:
-                if epoch in [3,5,7,11,19,29,39,49,59,69]:
+              always_save_epochs = [3,5,7,11,19,29,39,49,59,69]
+              if val_loss < best_val_loss or epoch in always_save_epochs:
+                if epoch in always_save_epochs:
                   SAVE_PATH       = "saved_models/" + MODEL_STR + "_ep{}".format(epoch+1) + ".pt"
                 else:
                   SAVE_PATH       = "saved_models/" + MODEL_STR + "_BEST.pt"
+                  best_val_loss = val_loss 
 
                 print("saving model to", SAVE_PATH)
                 # print("New best validation result obtained, saving model to", SAVE_PATH)
@@ -1035,7 +1049,6 @@ def main(cfg: DictConfig):
                 save_file_torch_wrap = SAVE_PATH.split(".pt")[0] + "_script_cpu_wrapped.pt"
                 scripted_model_wrapped_cpu.save(save_file_torch_wrap)
     
-                best_val_loss = val_loss 
                 model = model.to(device)
                 model.train(True)
                 # model.compile(mode="default")

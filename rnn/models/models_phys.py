@@ -435,19 +435,19 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         latent_state = rnn2out 
         if self.use_fused_mlp:
           x = self.mlp_heads(latent_state)
-          x = x.view(*latent_state.shape[:-1], self.nheads, self.nreg)
+          x = x.view(self.nlev_crm, batch_size, self.nheads, self.nreg)
 
-          qv_crm      = x[..., 0, :].contiguous()
-          qn_crm      = x[..., 1, :].contiguous()
-          area_frac   = x[..., 2, :].contiguous()
-          deltaT      = x[..., 3, :].contiguous()
-          flux1       = x[..., 4, :].contiguous()
-          eddy_diff   = x[..., 5, :].contiguous()
-          qice_crm    = x[..., 6, :].contiguous()
-          sed         = x[..., 7, :].contiguous()
-          dqv_evap_prec = x[..., 8, :].contiguous()
-          dq_cond_evap_vapor = x[..., 9, :].contiguous()
-          alpha       =x [..., 10, :].contiguous()
+          qv_crm      = x[:,:, 0, :].contiguous()
+          qn_crm      = x[:,:, 1, :].contiguous()
+          area_frac   = x[:,:, 2, :].contiguous()
+          deltaT      = x[:,:, 3, :].contiguous()
+          flux1       = x[:,:, 4, :].contiguous()
+          eddy_diff   = x[:,:, 5, :].contiguous()
+          qice_crm    = x[:,:, 6, :].contiguous()
+          sed         = x[:,:, 7, :].contiguous()
+          dqv_evap_prec = x[:,:, 8, :].contiguous()
+          dq_cond_evap_vapor = x[:,:, 9, :].contiguous()
+          alpha       = x[:,:, 10, :].contiguous()
 
         # latent_state =  rnn_mem # rnn_mem_prev
         if not self.use_fused_mlp:
@@ -531,7 +531,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             sed = self.mlp_sed_qn_crm(rnn2out)
           sed = self.relu(sed)
           sed = sed*self.g*qice_crm*torch.reshape(self.yscale_lev[self.ilev_crm:,2],(-1,1,1))
-          # sedimentation = torch.mean( sed[:,-1], 1)
           sedimentation = torch.sum( area_frac[-1]*sed[-1], -1)
           sed = torch.cat((zeroes_single_level,sed),dim=0)
           sed_qn_dp = scaling_factor*( (sed[1:] - sed[0:-1]) * one_over_pres_diff) 
@@ -647,25 +646,25 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # Water vapor
         dqv = torch.sum(area_frac*dqv_crm, 2, keepdim=True)
         # Cloud tendencies
-        if self.use_mp_constraint:
-          # Predicting dqn
-          dqn = torch.sum(area_frac*dqn_crm, 2, keepdim=True) 
-        else:
-          # Predicting dqliq, dqice
-          T_crm = T_crm + dT_crm/self.yscale_lev[self.ilev_crm:,0:1].unsqueeze(2)
-          liq_frac_crm_new = self.temperature_scaling(T_crm)
-          # liq_frac_crm_new = liq_frac_crm_old
-          # print("mean liq fracm gcm", liq_frac.mean().item(), "crm", liq_frac_crm_new.mean().item())
-          # print("std liq fracm gcm", liq_frac.std().item(), "crm", liq_frac_crm_new.std().item())
-          # print("mean qn_crm", qn_crm.mean().item(), "dqn crm", dqn_crm.mean().item(), "max", dqn_crm.max().item())
-          qn_crm        = qn_crm + dqn_crm/self.yscale_lev[self.ilev_crm:,2:3].unsqueeze(2)
-          # print("mean qn_crm 2", qn_crm.mean().item())
-          qliq_crm_new  = qn_crm * liq_frac_crm_new
-          qice_crm_new  = qn_crm * (1-liq_frac_crm_new)
-          dqliq = ((qliq_crm_new - qliq_crm)*area_frac).sum(dim=-1)/1200 
-          dqice = ((qice_crm_new - qice_crm)*area_frac).sum(dim=-1)/1200 
-          dqliq = dqliq*self.yscale_lev[self.ilev_crm:,2].unsqueeze(2) 
-          dqice = dqice*self.yscale_lev[self.ilev_crm:,3].unsqueeze(2)
+        # if self.use_mp_constraint:
+        # Predicting dqn
+        dqn = torch.sum(area_frac*dqn_crm, 2, keepdim=True) 
+        # else:
+        #   # Predicting dqliq, dqice
+        #   T_crm = T_crm + dT_crm/self.yscale_lev[self.ilev_crm:,0:1].unsqueeze(2)
+        #   liq_frac_crm_new = self.temperature_scaling(T_crm)
+        #   # liq_frac_crm_new = liq_frac_crm_old
+        #   # print("mean liq fracm gcm", liq_frac.mean().item(), "crm", liq_frac_crm_new.mean().item())
+        #   # print("std liq fracm gcm", liq_frac.std().item(), "crm", liq_frac_crm_new.std().item())
+        #   # print("mean qn_crm", qn_crm.mean().item(), "dqn crm", dqn_crm.mean().item(), "max", dqn_crm.max().item())
+        #   qn_crm        = qn_crm + dqn_crm/self.yscale_lev[self.ilev_crm:,2:3].unsqueeze(2)
+        #   # print("mean qn_crm 2", qn_crm.mean().item())
+        #   qliq_crm_new  = qn_crm * liq_frac_crm_new
+        #   qice_crm_new  = qn_crm * (1-liq_frac_crm_new)
+        #   dqliq = ((qliq_crm_new - qliq_crm)*area_frac).sum(dim=-1)/1200 
+        #   dqice = ((qice_crm_new - qice_crm)*area_frac).sum(dim=-1)/1200 
+        #   dqliq = dqliq*self.yscale_lev[self.ilev_crm:,2].unsqueeze(2) 
+        #   dqice = dqice*self.yscale_lev[self.ilev_crm:,3].unsqueeze(2)
 
         #                              precipitation  source,       sink    (signs already reversed w.r.t. above)
         d_precip_sourcesink    = torch.sum(area_frac*(dqn_aa      - dqv_evap_prec),2)
@@ -700,13 +699,12 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # We need some physical limit on the amount of falling precipitation in the column
           Tsfc = inputs_denorm[-1,:,0]
           Pmax = 1000 *  self.yscale_sca[3] * 5.58e-18*torch.exp(0.077*Tsfc) # approximate fit from data
-          water_excess = water_stored - Pmax
-          water_excess = self.relu(water_excess)
+          water_excess = self.relu(water_stored - Pmax)
           water_stored = water_stored - water_excess
-          water_stored_lev  = torch.unsqueeze(water_stored,dim=0)
+          water_stored_lev = torch.unsqueeze(water_stored,dim=0)
           water_stored_lev = torch.unsqueeze(torch.repeat_interleave(water_stored_lev,self.nlev_mem,dim=0),dim=2)
           rnn_mem = torch.cat((rnn_mem[:,:,0:self.nh_mem], water_stored_lev),dim=2)
-          precip=  sedimentation + water_released + water_excess # - prec_negative
+          precip = sedimentation + water_released + water_excess # - prec_negative
         else:
           prec_negative = self.relu(-water_new) # punish model for diagnosing negative precip from column water changes?
           water_new = self.relu(water_new)
@@ -948,8 +946,11 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # for i in range(len(gasopt_vars)):
           #   print("x_gas {} min {} max {}".format(gasopt_vars[i],torch.min(x_gas[:,:,i]).item(), torch.max(x_gas[:,:,i]).item()))
           x_gas = self.relu(x_gas)
-          
-          tau_lw, pfrac = self.gas_optics_model_lw(x_gas, col_dry)
+
+          if not torch.jit.is_scripting() and self.training and torch.is_grad_enabled():
+            tau_lw, pfrac = checkpoint(self.gas_optics_model_lw, x_gas, col_dry, use_reentrant=False)
+          else:
+            tau_lw, pfrac = self.gas_optics_model_lw(x_gas, col_dry)
 
           if self.reduce_lw_gas_optics: # we used an existing gas optics scheme, but want to shrink the spectral dimension with an MLP
             pfrac   = self.softmax(self.gas_optics_lw_reduce2(pfrac)) # (nlev, nb, g)
@@ -1382,7 +1383,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
       w_vis_2d = w_vis.unsqueeze(0)  # [1, ng]
 
-      # Directly create [batch, ng] in the desired flattened order.
       albedo_surf_dir_sw = (
           aldir + (asdir - aldir) * w_vis_2d
       )
@@ -1583,42 +1583,11 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
         return w_vis
 
-    def forward(self, inp_list : List[Tensor]):
-        inputs_main     = inp_list[0]
-        inputs_aux      = inp_list[1]
-        rnn_mem         = inp_list[2]
-        inputs_denorm   = inp_list[3]
-        if self.training:
-          out_new_true = inp_list[4]
-        else:
-          out_new_true = rnn_mem # dummy
-
-        # if self.store_precip: 
-        P_old = rnn_mem[-1,:,-1] # if self.store_precip is False, this is a dummy variable not used for anything 
-
-        batch_size  = inputs_main.shape[0]
-        nlev        = inputs_main.shape[1]
-        device      = inputs_main.device
-
-        # t0 = time.time()
-        inputs_main = torch.transpose(inputs_main,0,1).contiguous()
-        inputs_denorm = torch.transpose(inputs_denorm,0,1).contiguous()
-
-        if self.add_pres:
-            sp = torch.unsqueeze(inputs_aux[:,0:1],0)
-            # undo scaling
-            sp = sp*self.xdiv_sca[0:1] + self.xmean_sca[0:1]
-            pres  = self.preslay(sp)
-            inputs_main = torch.cat((inputs_main,pres),dim=2)
-            play = self.preslay_nonorm(sp)
-            delta_plev = self.presdelta(sp)
-            plev = self.preslev_nonorm(sp)
-
-        if self.use_physrad or self.separate_radiation:
-          # Do not use inputs -2,-3,-4 (O3, CH4, N2O) or first 10 levels
-          inputs_main_crm = torch.cat((inputs_main[self.ilev_crm:,:,0:-4], inputs_main[self.ilev_crm:,:,-1:]),dim=2)
-        else:
-          inputs_main_crm = inputs_main 
+    @torch.compile(dynamic=False)
+    def base_model(self, inputs_main_crm, inputs_aux, rnn_mem):
+        batch_size  = inputs_main_crm.shape[1]
+        nlev        = inputs_main_crm.shape[0]
+        device      = inputs_main_crm.device
 
         if self.use_initial_mlp:
             inputs_main_crm = self.mlp_initial(inputs_main_crm)
@@ -1666,6 +1635,47 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         rnn2out, last_h = self.rnn2(rnn1out, hidden2)
         if self.use_lstm: 
           (last_h, last_c) = last_h
+
+        return rnn2out, last_h
+
+    def forward(self, inp_list : List[Tensor]):
+        inputs_main     = inp_list[0]
+        inputs_aux      = inp_list[1]
+        rnn_mem         = inp_list[2]
+        inputs_denorm   = inp_list[3]
+        if self.training:
+          out_new_true = inp_list[4]
+        else:
+          out_new_true = rnn_mem # dummy
+
+        # if self.store_precip: 
+        P_old = rnn_mem[-1,:,-1] # if self.store_precip is False, this is a dummy variable not used for anything 
+
+        batch_size  = inputs_main.shape[0]
+        nlev        = inputs_main.shape[1]
+        device      = inputs_main.device
+
+        # t0 = time.time()
+        inputs_main = torch.transpose(inputs_main,0,1).contiguous()
+        inputs_denorm = torch.transpose(inputs_denorm,0,1).contiguous()
+
+        if self.add_pres:
+            sp = torch.unsqueeze(inputs_aux[:,0:1],0)
+            # undo scaling
+            sp = sp*self.xdiv_sca[0:1] + self.xmean_sca[0:1]
+            pres  = self.preslay(sp)
+            inputs_main = torch.cat((inputs_main,pres),dim=2)
+            play = self.preslay_nonorm(sp)
+            delta_plev = self.presdelta(sp)
+            plev = self.preslev_nonorm(sp)
+
+        if self.use_physrad or self.separate_radiation:
+          # Do not use inputs -2,-3,-4 (O3, CH4, N2O) or first 10 levels
+          inputs_main_crm = torch.cat((inputs_main[self.ilev_crm:,:,0:-4], inputs_main[self.ilev_crm:,:,-1:]),dim=2)
+        else:
+          inputs_main_crm = inputs_main 
+
+        rnn2out, last_h = self.base_model(inputs_main_crm, inputs_aux, rnn_mem)
 
         if self.add_stochastic_layer:
           input_srnn = rnn2out
@@ -1777,6 +1787,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                   dqn = torch.repeat_interleave(dqn,repeats=nens,dim=1)
                 qn = self.relu(qn + dqn)
           # t0 = time.time()
+          
           tau_lw, source_lev, source_sfc, tau_sw, ssa_sw, g_sw = self.rad_optical_props(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
                                       rnn_mem, liq_frac_crm, qv_crm, qn_crm, T, qv, qn, area_frac, rnn2out)
           # print("elapsed rad_optical_props {}".format(time.time() - t0))

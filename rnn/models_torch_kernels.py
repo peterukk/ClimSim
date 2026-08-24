@@ -832,6 +832,7 @@ class FusedCUDAStochasticGRUSequence(torch.autograd.Function):
 
 
 class MyStochasticGRULayer5(nn.Module):
+    use_bias: Final[bool]
     def __init__(self, input_size, hidden_size, use_bias=False):
         super().__init__()
         self.input_size = input_size
@@ -840,9 +841,9 @@ class MyStochasticGRULayer5(nn.Module):
 
         self.weight_ih = nn.Parameter(torch.randn((input_size, 3 * hidden_size)))
         self.weight_zh = nn.Parameter(torch.randn((hidden_size, 3 * hidden_size)))
-        if self.use_bias:
-            self.bias_ih = nn.Parameter(torch.randn((3 * hidden_size)))
-            self.bias_zh = nn.Parameter(torch.randn((3 * hidden_size)))
+        # if self.use_bias:
+            # self.bias_ih = nn.Parameter(torch.randn((3 * hidden_size)))
+            # self.bias_zh = nn.Parameter(torch.randn((3 * hidden_size)))
         self.weight_encoder = nn.Parameter(torch.randn((hidden_size, 2 * hidden_size)))
         self.reset_parameters()
 
@@ -857,14 +858,16 @@ class MyStochasticGRULayer5(nn.Module):
 
         # Batched input projection outside the loop
         flat_x = input_seq.reshape(nseq * batch_size, nx)
-        x_results = (torch.addmm(self.bias_ih, flat_x, self.weight_ih) if self.use_bias else flat_x @ self.weight_ih)
+        # x_results = (torch.addmm(self.bias_ih, flat_x, self.weight_ih) if self.use_bias else flat_x @ self.weight_ih)
+        x_results = flat_x @ self.weight_ih
         x_results = x_results.view(nseq, batch_size, 3 * self.hidden_size)
         r_all, zg_all, n_all = x_results.chunk(3, dim=2)
         
-        bias_zh = self.bias_zh if self.use_bias else None
+        # bias_zh = self.bias_zh if self.use_bias else None
+        bias_zh = None
 
         # --- DEVICE ROUTING ---
-        if input_seq.is_cuda:
+        if not torch.jit.is_scripting() and input_seq.is_cuda:
             # High-Speed C++ Fused Loop (Training/GPU Inference)
             return FusedCUDAStochasticGRUSequence.apply(
                 eps, r_all, zg_all, n_all, hidden, 
@@ -878,7 +881,8 @@ class MyStochasticGRULayer5(nn.Module):
                 mean_, logvar = pred_dist.chunk(2, 1)
                 z = mean_ + eps[t] * torch.exp(0.5 * logvar)
 
-                z_results = (torch.addmm(self.bias_zh, z, self.weight_zh) if self.use_bias else z @ self.weight_zh)
+                # z_results = (torch.addmm(self.bias_zh, z, self.weight_zh) if self.use_bias else z @ self.weight_zh)
+                z_results = z @ self.weight_zh
                 z_r, z_z, z_n = z_results.chunk(3, 1)
 
                 r = torch.sigmoid(r_all[t] + z_r)
