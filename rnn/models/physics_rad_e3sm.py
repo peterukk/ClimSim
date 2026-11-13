@@ -365,7 +365,9 @@ def e3sm_cloud_optics_sw(
         torch.tensor([0.7, 1.25, 2.38], dtype=re.dtype, device=re.device),
         right=True,
     )
+    # above reproduces E3SM ?bug?, in the paper the bounds are 0.25-0.69, 0.69-1.19, 1.19-2.38, 2.38-4
 
+    # print("wavenum_bounds", wavenum_bounds, "nu_low", nu_low, "wavmax", "slingo idx", slingo_idx)
 
     # Expand gas-band mapping to g-points if requested.
     # This preserves the user's gas-optics ordering, assumed to be

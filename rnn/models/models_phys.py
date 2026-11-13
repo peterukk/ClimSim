@@ -17,7 +17,6 @@ from .physics_rad import calc_ref_trans_sw, adding_ica_sw_batchlast_opt, adding_
 from .physics_rad import stratified_sample, interpolate_tlev_batchfirst, interpolate_tlev_batchlast
 from .physics_rad_e3sm import reitab, reltab, slingo_liq_cloud_optics_sw, ec_ice_optics_sw, e3sm_cloud_optics_sw
 from metrics import specific_to_relative_humidity_torch_cc
-from norm_coefficients import rrtmgp_sw_solar_source
 import numpy as np 
 from typing import Final 
 import time
@@ -316,6 +315,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
                 self.reduce_sw_gas_optics = True 
               elif self.ng_sw==112: # RRTMGP-NN 
+                from norm_coefficients import rrtmgp_sw_solar_source
                 rrtmgp_sw_solar_source = rrtmgp_sw_solar_source/np.sum(rrtmgp_sw_solar_source)
                 sw_solar_weights = torch.tensor(rrtmgp_sw_solar_source, device=device).unsqueeze(0)
                 self.register_buffer('sw_solar_weights', sw_solar_weights)
@@ -468,6 +468,17 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         scale = torch.where(qv_mean_old == 0, torch.ones_like(qv_mean_old), qv_gcm / qv_mean_old)
         qv_crm = qv_crm * scale
 
+        # deltaqv = self.mlp_qv_crm(latent_state)
+        # deltaqv = deltaqv - (deltaqv * area_frac).sum(dim=-1, keepdim=True) # enforce zero mean
+        # qvmax = 1.5*qv_gcm 
+        # qvmin = 0.5*qv_gcm
+        # s_pos = (qvmax - qv_gcm) / deltaqv.max(dim=-1, keepdim=True).values.clamp(min=1e-8)
+        # s_neg = (qv_gcm- qvmin) / (-deltaqv).max(dim=-1, keepdim=True).values.clamp(min=1e-8)  # distance to 0
+        # scale = torch.minimum(s_pos, s_neg).clamp(max=1.0)
+        # qv_crm = qv_gcm + scale * deltaqv   
+        # weighted_mean = (qv_crm[-1, 1000, :] * area_frac[-1, 1000, :]).sum()
+        # print("qv gcm", qv_gcm[-1,1000], "crm", qv_crm[-1,1000,:], "mean", torch.mean(qv_crm[-1,1000,:]), "weighted", weighted_mean)
+
         qn_mean_old = (qn_crm * area_frac).sum(dim=-1, keepdim=True)
         scale = torch.where(qn_mean_old == 0, torch.ones_like(qn_mean_old), qn_gcm / qn_mean_old)
         qn_crm = qn_crm * scale
@@ -476,7 +487,15 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # shift, don't scale?
           if not self.use_fused_mlp: deltaT = self.mlp_t_crm(latent_state)
           deltaT = deltaT - (deltaT * area_frac).sum(dim=-1, keepdim=True) # enforce zero mean
-          T_crm = T_gcm + deltaT                             # add back grid mean
+
+          # Compute maximum allowable scalar scale factor to keep values in (Tmin, Tmax)
+          Tmax = T_gcm + 8 
+          Tmin = T_gcm - 8
+          s_pos = (Tmax - T_gcm) / deltaT.max(dim=-1, keepdim=True).values.clamp(min=1e-8)
+          s_neg = (T_gcm-Tmin) / (-deltaT).max(dim=-1, keepdim=True).values.clamp(min=1e-8)  # distance to 0
+          scale = torch.minimum(s_pos, s_neg).clamp(max=1.0)
+
+          T_crm = T_gcm + scale*deltaT                             # add back grid mean
           # print("min max T crm", T_crm.min().item(), T_crm.max().item(), "mean", T_crm.mean().item())
           # print("min max T crm -1", T_crm[100,-1,:].min().item(), T_crm[100,-1,:].max().item())
           # print("min max T gcm", T_gcm.min().item(), T_gcm.max().item(), " ean", T_gcm.mean().item())
@@ -814,11 +833,10 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
     def rad_optical_props(self, inputs_main, inputs_aux0, inputs_denorm, play, plev, delta_plev, rnn_mem, 
                 liq_frac_crm, qv_crm, qn_crm, T_new, qv_new, qn_new, area_frac, rnn2out):
       """
-      Prediction of atmospheric (gas + cloud) optical properties for SW and LW using correlated-k or similar methods
+      Prediction of atmospheric (gas + cloud) optical properties for SW and LW 
       Fully parallelizable (no vertical loops)
-      This module is a bit complicated mainly because we are lacking pre-trained spectrally reduced gas and cloud optics
-      NNs. We can use pre-existing RRTMGP-NN models (Ukkonen & Hogan 2022) but these have high spectral resolution (112-118)
-      so we probably want to combine this with training a new MLP to shrink the dimension (reduce_LW_gas_optics)
+      This module is a bit complicated mainly because we support pre-existing RRTMGP-NN models (Ukkonen & Hogan 2022),
+      but these have high spectral resolution (112-118) so we combine this with training a new MLP to shrink the dimension (reduce_LW_gas_optics)
       Furthermore there various options for:
         - using or not using the cloud optics scheme from E3SM 
         - representing water vapor sub-grid variability in gas optics (include_qv_variability)
@@ -833,6 +851,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       
       # Water vapor specific humidity to volume mixing ratio - needed by gas optics
       vmr_h2o = (qv_new / ( 1.0 - qv_new))  *  1.608079364 # 28.97 / 18.01528 # mol_weight_air / mol_weight_gas
+      vmr_h2o_top = vmr_h2o[0:10]
       fact = 1/ (1 + vmr_h2o)
       m_air = (0.04698 + vmr_h2o)*fact # (m_dry + m_h2o * vmr_h2o) * fact 
       # Compute path number of dry air molecules in a column N (mol m−2) - used for scaling predicted optical properties
@@ -877,9 +896,6 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             # idx               = torch.randperm(self.nreg) 
             # qn_crm            = qn_crm[:,:,idx]
             # T_crm             = T_crm[:,:,idx]
-            #   2) True McICA? Sample from sub-grid states according to their probability p (area_frac) until we have ng samples (g-points)
-            #  For a given sample, a low-p cloud state may not selected at all, but because we do random draws we will occasionally
-            #  sample also low-p states and the estimate will be unbiased (but noisy) 
 
             if self.use_clear_sky_region: # the first index (area_frac[:,:,0]) is a clear-sky region without clouds
               p_flat = area_frac[:,:,1:]
@@ -901,18 +917,40 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             if self.pred_subgrid_liq_frac or self.pred_subgrid_temp:
               liq_frac_crm_flat = liq_frac_crm.view(-1, nreg)
 
-            # indices = torch.multinomial(p_flat, num_samples=self.ng_sw, replacement=True)
-            # T_crm = torch.gather(T_crm_flat, dim=-1, index=indices).reshape(self.nlev_crm, batch_size, self.ng_sw)
-            # qn_crm = torch.gather(qn_crm_flat, dim=-1, index=indices).reshape(self.nlev_crm, batch_size, self.ng_sw)
+            do_stratified_sampling = False
 
-            # #  3) Rather than purely random assignment, deterministically partition g-points among states proportional to p, then shuffle.
-            # # Same cost as McICA, zero bias, lower variance
-            indices = self.stratified_sample(p_flat, self.ng_lw) #, shuffle=False)
+            if not do_stratified_sampling:
+              #   2) True McICA? Sample from sub-grid states according to their probability p (area_frac) until we have ng samples (g-points)
+              #  For a given sample, a low-p cloud state may not selected at all, but because we do random draws we will occasionally
+              #  sample also low-p states and the estimate will be unbiased (but noisy)  
+
+              indices = torch.multinomial(p_flat, num_samples=self.ng_lw, replacement=True)
+              if self.ng_lw != self.ng_sw:
+                indices_sw = torch.multinomial(p_flat, num_samples=self.ng_sw, replacement=True)
+            else:
+              # 3) Rather than purely random assignment, deterministically partition g-points among states proportional to p, then shuffle.
+              # For instance, if first cloud region has a p of 0.5, then half of the spectral points will use this cloud region. 
+              # Same cost as McICA, lower variance but higher bias? Low-probability cloud states may not be sampled at all given low ng. 
+              shuffle=True
+              indices = self.stratified_sample(p_flat, self.ng_lw, shuffle=shuffle)
+              if self.ng_lw != self.ng_sw:
+                indices_sw = self.stratified_sample(p_flat, self.ng_sw, shuffle=shuffle)
             # if self.pred_subgrid_temp and not self.pred_subgrid_liq_frac:
             #   T_crm = torch.gather(T_crm_flat, dim=-1, index=indices).view(self.nlev_crm, batch_size, self.ng_lw)
             qn_crm = torch.gather(qn_crm_flat, dim=-1, index=indices).view(self.nlev_crm, batch_size, self.ng_lw)
+            if self.ng_lw != self.ng_sw:
+              qn_crm_sw = torch.gather(qn_crm_flat, dim=-1, index=indices_sw).view(self.nlev_crm, batch_size, self.ng_sw)
+            else:
+              qn_crm_sw = qn_crm # to avoid TorchScript "not defined"
+
             if self.pred_subgrid_liq_frac or self.pred_subgrid_temp:
               liq_frac_crm = torch.gather(liq_frac_crm_flat, dim=-1, index=indices).view(self.nlev_crm, batch_size, self.ng_lw)
+              if self.ng_lw != self.ng_sw:
+                liq_frac_crm_sw = torch.gather(liq_frac_crm_flat, dim=-1, index=indices_sw).view(self.nlev_crm, batch_size, self.ng_sw)
+              else:
+                liq_frac_crm_sw = liq_frac_crm # to avoid TorchScript "not defined"
+          else:
+            qn_crm_sw, liq_frac_crm_sw  = qn_crm, liq_frac_crm # to avoid TorchScript "not defined"
 
           # This would be how things are done in the underlying CRM: temperature on CRM grid is used to diagnose cloud into liquid and ice
           # if not self.pred_subgrid_liq_frac:
@@ -926,10 +964,16 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           cldpath_tot       = 1000*(delta_plev[self.ilev_crm:]/self.g)*qn_crm
           cldpath_liq       = liq_frac_crm * cldpath_tot 
           cldpath_ice       = (1-liq_frac_crm) * cldpath_tot
+          if self.ng_lw != self.ng_sw:
+            cldpath_tot_sw       = 1000*(delta_plev[self.ilev_crm:]/self.g)*qn_crm_sw
+            cldpath_liq_sw       = liq_frac_crm_sw * cldpath_tot_sw 
+            cldpath_ice_sw       = (1-liq_frac_crm_sw) * cldpath_tot_sw   
+          else:
+            cldpath_tot_sw, cldpath_liq_sw, cldpath_ice_sw = cldpath_tot, cldpath_liq, cldpath_ice
 
         else: # if not self.use_e3sm_cloud_optics:
           # t_new_crm   = (T_crm - 160 ) / (180)
-          t_new_crm   = (T_new - 160 ) / (180)
+          t_new_crm   = (T_new[self.ilev_crm:] - 160 ) / (180)
           liq_eff_rad_normed  = liq_eff_rad / 13.5
           ice_eff_rad_normed   = ice_eff_rad / 125.0
           x_cld =  torch.cat((t_new_crm, ice_eff_rad_normed, liq_eff_rad_normed, rnn_mem), dim=2)
@@ -940,26 +984,75 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # ------ LONGWAVE OPTICAL PROPERTIES -------
         if self.use_existing_gas_optics_lw:  
           zero_gases = torch.zeros(self.nlev, batch_size, 11, device=device)
-          x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, ch4, n2o, zero_gases), dim=2)
-          x_gas = (x_gas - self.gas_optics_model_lw.xmin) / self.gas_optics_model_lw.xdiv
-          # gasopt_vars = ["T","p","h2o","o3","co2","ch4","n20"]
-          # for i in range(len(gasopt_vars)):
-          #   print("x_gas {} min {} max {}".format(gasopt_vars[i],torch.min(x_gas[:,:,i]).item(), torch.max(x_gas[:,:,i]).item()))
-          x_gas = self.relu(x_gas)
 
-          if not torch.jit.is_scripting() and self.training and torch.is_grad_enabled():
-            tau_lw, pfrac = checkpoint(self.gas_optics_model_lw, x_gas, col_dry, use_reentrant=False)
+          if self.include_qv_variability:
+            qv_crm = torch.clamp(qv_crm, max=0.05)
+            vmr_h2o_crm = (qv_crm / (1.0-qv_crm))*1.608079364 
+
+            k = 2
+            i0 = torch.arange (self.nlev_crm).unsqueeze (-1).unsqueeze (-1).expand(self.nlev_crm, batch_size, k)
+            i1 = torch.arange (batch_size).unsqueeze (0).unsqueeze (-1).expand(self.nlev_crm, batch_size, k)
+            i2 =  torch.topk (area_frac, k, dim = -1).indices
+            vmr_sorted = vmr_h2o_crm[i0,i1,i2]
+            vmr_h2o_1,vmr_h2o_2 = vmr_sorted.chunk(k,2)
+
+            vmr_h2o_1 = torch.cat((vmr_h2o_top, vmr_h2o_1),dim=0).contiguous()
+            vmr_h2o_2 = torch.cat((vmr_h2o_top, vmr_h2o_2),dim=0).contiguous()
+            fact = 1/ (1 + vmr_h2o_1)
+            col_dry_1 = delta_plev * 60.2214076e23 * fact/(((0.04698 + vmr_h2o_1)*fact)*980665) 
+            vmr_h2o_1 = torch.sqrt(torch.sqrt(vmr_h2o_1))
+
+            fact = 1/ (1 + vmr_h2o_2)
+            col_dry_2 = delta_plev * 60.2214076e23 * fact/(((0.04698 + vmr_h2o_2)*fact)*980665) 
+            vmr_h2o_2 = torch.sqrt(torch.sqrt(vmr_h2o_2))
+
+            x_gas_1 =  torch.cat((T_new, pres1, vmr_h2o_1, o3, co2, ch4, n2o, zero_gases), dim=2)
+            x_gas_1 = (x_gas_1- self.gas_optics_model_lw.xmin) / self.gas_optics_model_lw.xdiv
+
+            x_gas_2 = x_gas_1.clone()
+            x_gas_2[:, :, 2:3] = (vmr_h2o_2 - self.gas_optics_model_lw.xmin[2:3]) / self.gas_optics_model_lw.xdiv[2:3]
+
+            if not torch.jit.is_scripting() and self.training and torch.is_grad_enabled() and self.add_stochastic_layer:
+              tau_lw1, pfrac1 = checkpoint(self.gas_optics_model_lw, x_gas_1, col_dry_1, use_reentrant=False)
+              tau_lw2, pfrac2 = checkpoint(self.gas_optics_model_lw, x_gas_2, col_dry_2, use_reentrant=False)
+            else:
+              tau_lw1, pfrac1 = self.gas_optics_model_lw(x_gas_1, col_dry_1)
+              tau_lw2, pfrac2 = self.gas_optics_model_lw(x_gas_2, col_dry_2)
+
+            if self.reduce_lw_gas_optics: # we used an existing gas 2optics scheme, but want to shrink the spectral dimension with an MLP
+              pfrac1   = self.softmax(self.gas_optics_lw_reduce2(pfrac1)) # (nlev, nb, g)
+              pfrac2   = self.softmax(self.gas_optics_lw_reduce2(pfrac2)) # (nlev, nb, g)
+              tau_lw1  = 0.01*self.softplus(self.gas_optics_lw_reduce1(tau_lw1))
+              tau_lw2  = 0.01*self.softplus(self.gas_optics_lw_reduce1(tau_lw2))
+
+            mask          = torch.rand_like(tau_lw1) < 0.5
+            tau_lw        = torch.where(mask, tau_lw1, tau_lw2)
+            pfrac         = torch.where(mask, pfrac1, pfrac2)
+
           else:
-            tau_lw, pfrac = self.gas_optics_model_lw(x_gas, col_dry)
+            vmr_h2o_1, vmr_h2o_2, col_dry_1, cold_dry_2 = None,None,None,None
 
-          if self.reduce_lw_gas_optics: # we used an existing gas optics scheme, but want to shrink the spectral dimension with an MLP
-            pfrac   = self.softmax(self.gas_optics_lw_reduce2(pfrac)) # (nlev, nb, g)
-            tau_lw  = self.gas_optics_lw_reduce1(tau_lw)
-            tau_lw  = 0.01*self.softplus(tau_lw)
-          
+            x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, ch4, n2o, zero_gases), dim=2)
+            x_gas = (x_gas - self.gas_optics_model_lw.xmin) / self.gas_optics_model_lw.xdiv
+            # gasopt_vars = ["T","p","h2o","o3","co2","ch4","n20"]
+            # for i in range(len(gasopt_vars)):
+            #   print("x_gas {} min {} max {}".format(gasopt_vars[i],torch.min(x_gas[:,:,i]).item(), torch.max(x_gas[:,:,i]).item()))
+            x_gas = self.relu(x_gas)
+
+            if not torch.jit.is_scripting() and self.training and torch.is_grad_enabled() and self.add_stochastic_layer:
+              tau_lw, pfrac = checkpoint(self.gas_optics_model_lw, x_gas, col_dry, use_reentrant=False)
+            else:
+              tau_lw, pfrac = self.gas_optics_model_lw(x_gas, col_dry)
+              
+            if self.reduce_lw_gas_optics: # we used an existing gas 2optics scheme, but want to shrink the spectral dimension with an MLP
+              pfrac   = self.softmax(self.gas_optics_lw_reduce2(pfrac)) # (nlev, nb, g)
+              tau_lw  = 0.01*self.softplus(self.gas_optics_lw_reduce1(tau_lw))
+              
+            
           if self.printdebug:
             print("tau_lw min max mean", tau_lw.min().item(), tau_lw.max().item(), tau_lw.mean().item())
             print("pfrac min max mean", pfrac.min().item(), pfrac.max().item(), pfrac.mean().item())
+            # print("sum pfrac mean", pfrac.sum(dim=-1).mean().item())
 
           zeroes = torch.zeros(self.ilev_crm, batch_size, self.ng_lw, device=device)
         
@@ -986,27 +1079,32 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         if self.use_existing_gas_optics_sw:
             # inputs: ['tlay' 'play' 'h2o' 'o3' 'co2' 'n2o' 'ch4']
           if self.include_qv_variability:
-            # Account for sub-grid variability of water vapor by taking the two most likely values and doing two passes with gasopt-MLP
-            qv_crm = torch.clamp(qv_crm, max=0.05)
-            vmr_h2o_crm = (qv_crm / (1.0-qv_crm))*1.608079364 
+            # # # Account for sub-grid variability of water vapor by taking the two most likely values (given by area_frac) and doing two passes with gasopt-MLP
+            # qv_crm = torch.clamp(qv_crm, max=0.05)
+            # vmr_h2o_crm = (qv_crm / (1.0-qv_crm))*1.608079364 
 
-            k = 2
-            i0 = torch.arange (self.nlev_crm).unsqueeze (-1).unsqueeze (-1).expand(self.nlev_crm, batch_size, k)
-            i1 = torch.arange (batch_size).unsqueeze (0).unsqueeze (-1).expand(self.nlev_crm, batch_size, k)
-            i2 =  torch.topk (area_frac, k, dim = -1).indices
-            vmr_sorted = vmr_h2o_crm[i0,i1,i2]
-            vmr_h2o_1,vmr_h2o_2 = vmr_sorted.chunk(k,2)
-            vmr_h2o_top = vmr_h2o[0:10]
-            vmr_h2o_1 = torch.cat((vmr_h2o_top, vmr_h2o_1),dim=0).contiguous()
-            vmr_h2o_2 = torch.cat((vmr_h2o_top, vmr_h2o_2),dim=0).contiguous()
+            # k = 2
+            # i0 = torch.arange (self.nlev_crm).unsqueeze (-1).unsqueeze (-1).expand(self.nlev_crm, batch_size, k)
+            # i1 = torch.arange (batch_size).unsqueeze (0).unsqueeze (-1).expand(self.nlev_crm, batch_size, k)
+            # i2 =  torch.topk (area_frac, k, dim = -1).indices
+            # vmr_sorted = vmr_h2o_crm[i0,i1,i2]
+            # vmr_h2o_1,vmr_h2o_2 = vmr_sorted.chunk(k,2)
+            # # ind_rnd = torch.randint(0, self.nreg, (1,)).item()
+            # # vmr_h2o_1 = vmr_h2o_crm[:,:,ind_rnd].unsqueeze(2)
+            # # ind_rnd = torch.randint(0, self.nreg, (1,)).item()
+            # # vmr_h2o_2 = vmr_h2o_crm[:,:,ind_rnd].unsqueeze(2)
 
-            fact = 1/ (1 + vmr_h2o_1)
-            col_dry_crm_1 = delta_plev * 60.2214076e23 * fact/(((0.04698 + vmr_h2o_1)*fact)*980665) 
-            vmr_h2o_1 = torch.sqrt(torch.sqrt(vmr_h2o_1))
+            # vmr_h2o_1 = torch.cat((vmr_h2o_top, vmr_h2o_1),dim=0).contiguous()
+            # vmr_h2o_2 = torch.cat((vmr_h2o_top, vmr_h2o_2),dim=0).contiguous()
+            # fact = 1/ (1 + vmr_h2o_1)
+            # col_dry_1 = delta_plev * 60.2214076e23 * fact/(((0.04698 + vmr_h2o_1)*fact)*980665) 
+            # vmr_h2o_1 = torch.sqrt(torch.sqrt(vmr_h2o_1))
 
-            fact = 1/ (1 + vmr_h2o_2)
-            col_dry_crm_2 = delta_plev * 60.2214076e23 * fact/(((0.04698 + vmr_h2o_2)*fact)*980665) 
-            vmr_h2o_2 = torch.sqrt(torch.sqrt(vmr_h2o_2))
+            # fact = 1/ (1 + vmr_h2o_2)
+            # col_dry_2 = delta_plev * 60.2214076e23 * fact/(((0.04698 + vmr_h2o_2)*fact)*980665) 
+            # vmr_h2o_2 = torch.sqrt(torch.sqrt(vmr_h2o_2))
+
+            # print("mean vmr h2o", vmr_h2o.mean().item(), "vmr_h2o_crm1", vmr_h2o_1.mean().item(), "2", vmr_h2o_2.mean().item())
 
             x_gas_1 = torch.cat((T_new, pres1, vmr_h2o_1, o3, co2, n2o, ch4), dim=2)
             x_gas_1 = (x_gas_1- self.gas_optics_model_sw1.xmin) / self.gas_optics_model_sw1.xdiv
@@ -1014,23 +1112,32 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             x_gas_2 = x_gas_1.clone()
             x_gas_2[:, :, 2:3] = (vmr_h2o_2 - self.gas_optics_model_sw1.xmin[2:3]) / self.gas_optics_model_sw1.xdiv[2:3]
             # Use SW gas optics absorption NN : two passes to sample water vapor sub-grid variability, then merge
-            # print("x_gas_1 min max", x_gas_1.min(), x_gas_1.max(), "col dry mean", col_dry_crm_1.mean())
-            if not torch.jit.is_scripting() and self.training and torch.is_grad_enabled():
-              tau_sw1      = self._run_gas_optics(self.gas_optics_model_sw1, x_gas_1, col_dry_crm_1)
-              tau_sw_scat1 = self._run_gas_optics(self.gas_optics_model_sw2, x_gas_1, col_dry_crm_1)
-              tau_sw2      = self._run_gas_optics(self.gas_optics_model_sw1, x_gas_2, col_dry_crm_2)
-              tau_sw_scat2 = self._run_gas_optics(self.gas_optics_model_sw2, x_gas_2, col_dry_crm_2)
+            # print("x_gas_1 min max", x_gas_1.min(), x_gas_1.max(), "col dry mean", col_dry_1.mean())
+            if not torch.jit.is_scripting() and self.training and torch.is_grad_enabled() and self.add_stochastic_layer:
+              tau_sw1      = self._run_gas_optics(self.gas_optics_model_sw1, x_gas_1, col_dry_1)
+              tau_sw_scat1 = self._run_gas_optics(self.gas_optics_model_sw2, x_gas_1, col_dry_1)
+              tau_sw2      = self._run_gas_optics(self.gas_optics_model_sw1, x_gas_2, col_dry_2)
+              tau_sw_scat2 = self._run_gas_optics(self.gas_optics_model_sw2, x_gas_2, col_dry_2)
             else:
-              tau_sw1     = self.gas_optics_model_sw1(x_gas_1, col_dry_crm_1) # Absorption optical depth
-              tau_sw_scat1= self.gas_optics_model_sw2(x_gas_1, col_dry_crm_1) # Scattering optical depth
-              tau_sw2     = self.gas_optics_model_sw1(x_gas_2, col_dry_crm_2)
-              tau_sw_scat2= self.gas_optics_model_sw2(x_gas_2, col_dry_crm_2)
+              tau_sw1     = self.gas_optics_model_sw1(x_gas_1, col_dry_1) # Absorption optical depth
+              tau_sw_scat1= self.gas_optics_model_sw2(x_gas_1, col_dry_1) # Scattering optical depth
+              tau_sw2     = self.gas_optics_model_sw1(x_gas_2, col_dry_2)
+              tau_sw_scat2= self.gas_optics_model_sw2(x_gas_2, col_dry_2)
             mask          = torch.rand_like(tau_sw1) < 0.5
             tau_sw        = torch.where(mask, tau_sw1, tau_sw2)
             tau_sw_scat   = torch.where(mask, tau_sw_scat1, tau_sw_scat2)
             # tau_sw        = 0.5*(tau_sw1+tau_sw2)
             # tau_sw_scat   = 0.5*(tau_sw_scat1+tau_sw_scat2)
             del tau_sw1, tau_sw2, tau_sw_scat1, tau_sw_scat2
+
+            x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, n2o, ch4), dim=2)
+            x_gas = (x_gas - self.gas_optics_model_sw1.xmin) / self.gas_optics_model_sw1.xdiv
+            tau_sw0     = self.gas_optics_model_sw1(x_gas, col_dry)
+
+            # for i in range(60):
+            #   print("jlev", i, "vmr", vmr_h2o[i,1000].item(), "vmr 1", vmr_h2o_1[i,1000].item(), "vmr 2", vmr_h2o_2[i,1000].item())
+            #   print("tausw1", tau_sw1[i,1000].mean().item(),"tausw2", tau_sw2[i,1000].mean().item(), "tausw", tau_sw[i,1000].mean().item(), "tausw0",tau_sw0[i,1000].mean().item() )
+            #   print("coldry1", col_dry_1[i,1000].item(), "coldry", col_dry[i,1000].item())
           else:
 
             x_gas = torch.cat((T_new, pres1, vmr_h2o, o3, co2, n2o, ch4), dim=2)
@@ -1105,8 +1212,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
                     kscag_sw_cld_ice = ksca_sw_cld_ice * g_sw_cld_ice
 
             if self.experimental_rad:
-                cldpath_liq = torch.repeat_interleave(cldpath_liq.unsqueeze(2), self.ng_sw, dim=2)
-                cldpath_ice = torch.repeat_interleave(cldpath_ice.unsqueeze(2), self.ng_sw, dim=2)
+                cldpath_liq_sw = torch.repeat_interleave(cldpath_liq_sw.unsqueeze(2), self.ng_sw, dim=2)
+                cldpath_ice_sw = torch.repeat_interleave(cldpath_ice_sw.unsqueeze(2), self.ng_sw, dim=2)
                 k_sw_cld_liq = torch.repeat_interleave(k_sw_cld_liq.unsqueeze(3), self.nreg, dim=3)
                 k_sw_cld_ice = torch.repeat_interleave(k_sw_cld_ice.unsqueeze(3), self.nreg, dim=3)
                 ksca_sw_cld_liq = torch.repeat_interleave(ksca_sw_cld_liq.unsqueeze(3), self.nreg, dim=3)
@@ -1116,14 +1223,14 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
 
             cldeps = 1e-7
             # optical depth (dimensionless) = cldpath (1000 kg/m2) * k (m2/g) = (kg/m2) * k (1000 g/kg m2/g)
-            tau_sw_cld_liq = cldpath_liq * k_sw_cld_liq
-            tau_sw_cld_ice = cldpath_ice * k_sw_cld_ice
+            tau_sw_cld_liq = cldpath_liq_sw * k_sw_cld_liq
+            tau_sw_cld_ice = cldpath_ice_sw * k_sw_cld_ice
 
             if self.use_ksca_kscag:
-                tau_sw_scat_cld_liq   = cldpath_liq * ksca_sw_cld_liq
-                tau_sw_scat_cld_ice   = cldpath_ice * ksca_sw_cld_ice
-                g_tau_scat_sw_cld_liq = cldpath_liq * kscag_sw_cld_liq
-                g_tau_scat_sw_cld_ice = cldpath_ice * kscag_sw_cld_ice
+                tau_sw_scat_cld_liq   = cldpath_liq_sw * ksca_sw_cld_liq
+                tau_sw_scat_cld_ice   = cldpath_ice_sw * ksca_sw_cld_ice
+                g_tau_scat_sw_cld_liq = cldpath_liq_sw * kscag_sw_cld_liq
+                g_tau_scat_sw_cld_ice = cldpath_ice_sw * kscag_sw_cld_ice
                 del ksca_sw_cld_liq, k_sw_cld_ice, ksca_sw_cld_ice
             else:
                 # ssa/g still in scope, untouched by cldpath -- reuse tau instead of
@@ -1152,7 +1259,7 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
             sw_optprops = self.cloud_optics_sw2(sw_optprops) 
             # if we're not using E3SM cloud optics, we predict cloud single-scattering albedo and asymmetry factor directly
             tau_sw_cld, ssa_sw_cld, g_sw_cld = sw_optprops.chunk(3,2 )
-            tau_sw_cld      = cldpath*self.relu(tau_sw_cld.squeeze()) # / 1000
+            tau_sw_cld      = cldpath_sw*self.relu(tau_sw_cld.squeeze()) # / 1000
             ssa_sw_cld      = self.sigmoid(ssa_sw_cld.squeeze())
             g_sw_cld        = self.sigmoid(g_sw_cld.squeeze())
             tau_sw_scat_cld = ssa_sw_cld * tau_sw_cld
@@ -1249,14 +1356,93 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       # lwup_sfc    = (inputs_aux[:,11]*self.xdiv_sca[11]) + self.xmean_sca[11]
       lwup_sfc    = inputs_aux[:,11]
 
-      # BELOW IS INCORRECT IF we just used the raw Planck fractions predicted by RRTMGP-NN, without reduction/changing last layer.
-      # RRTMGP planck fracs sum to 1 only within bands, not across all g-points. 
-      # We should be multiplying with the band-wise Planck emissions, not broadband Planck emission. 
-      source_sfc  = pfrac[-1,:,:]*lwup_sfc.unsqueeze(1)
-      lwup_lev    = torch.unsqueeze(self.outgoing_lw(tlev),2) # (nlev+1, nb, ng)
-      source_lev  = torch.zeros(nlev+1, batch_size, self.ng_lw, device=device)
-      source_lev[-1,:,:] = pfrac[-1,:,:] * lwup_lev[-1,:,:]
-      source_lev[0:-1,:,:] = pfrac[:,:,:]  * lwup_lev[0:-1,:,:]
+      # gas optics schemes like RRTMGP planck fracs sum to 1 only within bands, not across all g-points. 
+
+      if self.gas_optics_model_lw.is_rrtmgp:
+        # ---------------------------------------------------------------
+        # Original RRTMGP spectral representation:
+        #
+        # pfrac sums to ~1 WITHIN EACH BAND, hence ~16 over all 128 gpts.
+        # totplnk supplies the blackbody irradiance for each of the 16 bands.
+        # ---------------------------------------------------------------
+        temp_sfc = tlev[-1]
+        planck_band_lev = self.gas_optics_model_lw.interpolate_totplnk(tlev)
+        # (nlev, batch, 16)
+        pp = planck_band_lev.sum(dim=-1)
+
+        # planck_gpt_lev = planck_band_lev[..., self.gas_optics_model_lw.gpt_to_band]
+        planck_gpt_lev = planck_band_lev.index_select(-1, self.gas_optics_model_lw.model_gpt_to_band)
+        # (nlev, batch, 128)
+
+        planck_band_sfc = self.gas_optics_model_lw.interpolate_totplnk(temp_sfc)
+        # (batch, 16)
+
+        # planck_gpt_sfc = planck_band_sfc[..., self.gas_optics_model_lw.gpt_to_band]
+        planck_gpt_sfc = planck_band_sfc.index_select(-1, self.gas_optics_model_lw.model_gpt_to_band)
+        # (batch, 128)
+
+        # IMPORTANT:
+        # pfrac belongs to a LAYER.
+        #
+        # The same layer pfrac is used with the Planck function at both
+        # bounding levels of that layer, matching the Fortran implementation.
+        planck_top = pfrac * planck_gpt_lev[:-1]
+        planck_bot = pfrac * planck_gpt_lev[1:]
+
+        # RRTMGP uses the Planck fractions of the lowest atmospheric layer
+        # for the surface source.
+        source_sfc = pfrac[-1] * planck_gpt_sfc
+      else:
+        # if self.gas_optics_model_lw.num_bands > 1:
+        if self.gas_optics_model_lw.needs_planck_table:
+          temp_sfc = tlev[-1]
+          # Reduced learned representation with explicit physical LW bands.
+          # pfrac sums to 1 within each learned band; grouped totplnk
+          # supplies the corresponding band-integrated Planck irradiance.
+          planck_band_lev = self.gas_optics_model_lw.interpolate_totplnk(
+              tlev, table=self.gas_optics_model_lw.totplnk_model_bands
+          )
+          planck_gpt_lev = planck_band_lev.index_select(-1, self.gas_optics_model_lw.model_gpt_to_band)
+
+          planck_band_sfc = self.gas_optics_model_lw.interpolate_totplnk(
+              temp_sfc, table=self.gas_optics_model_lw.totplnk_model_bands
+          )
+          planck_gpt_sfc = planck_band_sfc.index_select(-1, self.gas_optics_model_lw.model_gpt_to_band)
+
+          # Same layer pfrac is used at both layer bounding levels.
+          # planck_top = pfrac * planck_gpt_lev[:-1]
+          # planck_bot = pfrac * planck_gpt_lev[1:]
+          source_sfc = pfrac[-1] * planck_gpt_sfc
+
+          # source_lev  = torch.zeros(nlev+1, batch_size, self.ng_lw, device=device)
+          # source_lev[0:-1,:,:] = pfrac[:,:,:]  * planck_gpt_lev[0:-1,:,:]
+          # source_lev[-1,:,:] = pfrac[-1,:,:] * planck_gpt_lev[-1,:,:]
+          # if printdebug:
+          #     broadband_planck = outgoing_lw(temp_lev)
+          #     ratio = planck_band_lev.sum(dim=-1) / broadband_planck
+          #     print(
+          #         "grouped Planck / sigmaT4 min mean max",
+          #         ratio.min().item(), ratio.mean().item(), ratio.max().item(),
+          #     )
+          #     for ib in range(self.gas_optics_model_lw.num_bands):
+          #         i0 = self.gas_optics_model_lw.band_bounds[ib]
+          #         i1 = self.gas_optics_model_lw.band_bounds[ib + 1]
+          #         print(
+          #             f"pfrac band {ib} sum mean",
+          #             pfrac[..., i0:i1].sum(dim=-1).mean().item(),
+          #         )
+        else:
+          source_sfc  = pfrac[-1,:,:]*lwup_sfc.unsqueeze(1)
+          planck_gpt_lev    = torch.unsqueeze(self.outgoing_lw(tlev),2) # (nlev+1, nb, ng)
+
+          # source_lev  = torch.zeros(nlev+1, batch_size, self.ng_lw, device=device)
+          # source_lev[-1,:,:] = pfrac[-1,:,:] * planck_gpt_lev[-1,:,:]
+          # source_lev[0:-1,:,:] = pfrac[:,:,:]  * planck_gpt_lev[0:-1,:,:]
+      planck_top = pfrac * planck_gpt_lev[:-1]
+      planck_bot = pfrac * planck_gpt_lev[1:]
+      # source_sfc = pfrac[-1] * planck_gpt_sfc
+
+
       if self.printdebug:
         print("lup sfc min max mean", lwup_sfc.min().item(), lwup_sfc.max().item(), lwup_sfc.mean().item())
         print("source_sfc min max mean", source_sfc.min().item(), source_sfc.max().item(), source_sfc.mean().item())
@@ -1267,10 +1453,10 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
         # print("source_lev 100", source_lev[100,0,0])
       del pfrac
 
-      return tau_lw, source_lev, source_sfc, tau_sw, ssa_sw, g_sw
+      return tau_lw, planck_top, planck_bot, source_sfc, tau_sw, ssa_sw, g_sw
     
 
-    def radiative_transfer(self, inputs_aux0, delta_plev, area_frac, rnn_mem, tau_lw, source_lev, source_sfc, tau_sw, ssa_sw, g_sw):
+    def radiative_transfer(self, inputs_aux0, delta_plev, area_frac, rnn_mem, tau_lw, planck_top, planck_bot, source_sfc, tau_sw, ssa_sw, g_sw):
       """
       Two-stream longwave and shortwave radiative transfer with correlated-k (or other spectral discretization)
       Arrays are structured (level, column, spectral) where we can collapse the column (batch) and spectral dims
@@ -1283,10 +1469,10 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       # -------------------------- LONGWAVE -----------------------------
       # 
       # Computation of layer-wise LW transmittances and source terms 
-      planck_top = source_lev[0:-1,:,:]
-      planck_bot = source_lev[1:,:,:]
+      # planck_top = source_lev[0:-1,:,:]
+      # planck_bot = source_lev[1:,:,:]
       source_up, source_dn, trans_lw = reftrans_lw(planck_top.view(-1),planck_bot.view(-1), tau_lw.view(-1))
-      del tau_lw, planck_top, planck_bot, source_lev
+      del tau_lw, planck_top, planck_bot #, source_lev
 
       emissivity_surf = torch.ones_like(source_sfc)
       
@@ -1299,6 +1485,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       # finally spectral reduction to get broadband flux
       flux_lw_up = torch.sum(flux_lw_up,dim=2) 
       flux_lw_dn = torch.sum(flux_lw_dn,dim=2)
+      # print("flux lw up", flux_lw_up.mean(dim=1), "dn", flux_lw_dn.mean(dim=1))
+
       if self.printdebug:
         print("source_up min max mean", source_up.min().item(), source_up.max().item(), source_up.mean().item())
         print("source_dn min max mean", source_dn.min().item(), source_dn.max().item(), source_dn.mean().item())
@@ -1484,11 +1672,23 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
       flux_diff       = flux_net[1:,:] - flux_net[0:-1,:]
       dT_rad          = -(flux_diff / delta_plev.squeeze()) * 0.009761357302 # * g/cp = 9.80665 / 1004.64
       dT_rad          = dT_rad * self.yscale_lev[:,0:1] # scaling (physical computations gave us unscaled tendency, but target outputs are scaled)
-      
+
+      flux_diff_sw      = flux_sw_net[1:,:] - flux_sw_net[0:-1,:]
+      dT_rad_sw          = -(flux_diff_sw / delta_plev.squeeze()) * 0.009761357302 # * g/cp = 9.80665 / 1004.64
+      flux_diff_lw      = flux_lw_net[1:,:] - flux_lw_net[0:-1,:]
+      dT_rad_lw          = -(flux_diff_lw / delta_plev.squeeze()) * 0.009761357302 # * g/cp = 9.80665 / 1004.64
+      # print("dT_rad_sw lev 0:2 mean", dT_rad_sw[0:2].mean().item() )
+      # print("dT_rad_lw lev 0:2 mean", dT_rad_lw[0:2].mean().item() )
+      # with RRTMGP-SW:
+      # dT_rad_sw lev 0:2 mean 3.193203156115487e-05
+      # dT_sw clear-sky cols lev 0:2 mean 1.4766809727007058e-05 d
+      # dT true clear-sky cols lev 0:2 mean -1.4072418707655743e-05 
+      # so dT_lw clear-sky should be -2.88e-5 ??
+
       out_sfc_rad = torch.cat((NETSW, FLWDS,  SOLS, SOLL, SOLSD, SOLLD ), dim=1)
       out_sfc_rad = out_sfc_rad * self.yscale_sca_rad
 
-      return dT_rad, out_sfc_rad
+      return dT_rad, out_sfc_rad, dT_rad_sw, dT_rad_lw
 
     def make_sw_visible_weights(
         self,
@@ -1700,6 +1900,8 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # h_sfc   = h_sfc + 0.01*h_sfc_perturb
           rnn2out = rnn2out*h_final_perturb
 
+          # The last hidden state is not actually used in the hybrid scheme! 
+          # surface outputs consist of radiation, for which we use RTEs, and precip, which is also predicted elsewhere
           #last_h   = last_h*h_sfc_perturb
           last_h   = h_sfc_perturb
   
@@ -1776,26 +1978,31 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
               nens = int(T.shape[1] // dT.shape[1])
               dT = torch.repeat_interleave(dT,repeats=nens,dim=1)
             T   = self.relu(T + dT)
-            if not (self.use_existing_gas_optics_sw and self.use_existing_gas_optics_lw): 
-              dqv = 1200*out_denorm[:,:,1:2]
+            # if not (self.use_existing_gas_optics_sw and self.use_existing_gas_optics_lw): 
+            dqv = 1200*out_denorm[:,:,1:2]
+            if self.use_ensemble:
+                dqv = torch.repeat_interleave(dqv,repeats=nens,dim=1)   
+            qv  = self.relu(qv + dqv)
+            if self.use_mp_constraint:
+              dqn = 1200*out_denorm[:,:,2:3]
               if self.use_ensemble:
-                  dqv = torch.repeat_interleave(dqv,repeats=nens,dim=1)   
-              qv  = self.relu(qv + dqv)
-              if self.use_mp_constraint:
-                dqn = 1200*out_denorm[:,:,2:3]
-                if self.use_ensemble:
-                  dqn = torch.repeat_interleave(dqn,repeats=nens,dim=1)
-                qn = self.relu(qn + dqn)
+                dqn = torch.repeat_interleave(dqn,repeats=nens,dim=1)
+              qn = self.relu(qn + dqn)
           # t0 = time.time()
           
-          tau_lw, source_lev, source_sfc, tau_sw, ssa_sw, g_sw = self.rad_optical_props(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
+          tau_lw, planck_top, planck_bot, source_sfc, tau_sw, ssa_sw, g_sw = self.rad_optical_props(inputs_main, inputs_aux, inputs_denorm, play, plev, delta_plev, 
                                       rnn_mem, liq_frac_crm, qv_crm, qn_crm, T, qv, qn, area_frac, rnn2out)
           # print("elapsed rad_optical_props {}".format(time.time() - t0))
 
           # t0 = time.time()
-          dT_rad, out_sfc_rad = self.radiative_transfer(inputs_aux, delta_plev, area_frac, rnn_mem, tau_lw, source_lev, source_sfc, 
+          dT_rad, out_sfc_rad, dT_rad_sw, dT_rad_lw = self.radiative_transfer(inputs_aux, delta_plev, area_frac, rnn_mem, tau_lw, planck_top, planck_bot, source_sfc, 
                                       tau_sw, ssa_sw, g_sw)
           dT_rad = dT_rad.unsqueeze(2)
+
+          # qn_new_vint = qn.sum(axis=0)
+          # inds = (qn_new_vint < 1e-6).squeeze()
+          # print("dT_sw clear-sky cols lev 0:2 mean", dT_rad_sw[0:2,inds].mean().item(), "dT_lw", dT_rad_lw[0:2,inds].mean().item())
+
           # print("elapsed radiative_transfer {}".format(time.time() - t0))
 
         out_new[:,:,0:1] = out_new[:,:,0:1] + dT_rad
@@ -1812,12 +2019,10 @@ class physical_RNN_autoreg(Base_RNN_autoreg):
           # temp = T[:,self.ilev_crm:].squeeze()
           # inds = (temp > 250.0) & (temp < 275.0)
           # x_predfrac = rnn_mem[inds]
-          # # liq_frac_pred = self.relu(self.mlp_predfrac(x_predfrac))
           # liq_frac_pred = 0.1*self.mlp_predfrac(x_predfrac)
           # liq_frac_pred = torch.reshape(liq_frac_pred,(-1,))
           # liq_frac_pred = liq_frac_pred.to(liq_frac_diagnosed.dtype)
           # liq_frac_diagnosed[inds] = liq_frac_pred
-          # # liq_frac_diagnosed[inds] = self.relu(liq_frac_diagnosed[inds] + liq_frac_pred)
           # liq_frac = torch.cat((liq_frac_diagnosed0[:,0:self.ilev_crm],liq_frac_diagnosed),dim=1)
     
           # max_frac = torch.clamp(liq_frac_diagnosed0 + 0.2, max=1.0)

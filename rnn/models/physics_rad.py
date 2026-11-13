@@ -205,11 +205,15 @@ def calc_ref_trans_sw(mu0, od, ssa, asymmetry):
     k_gamma4           = k * gamma4
 
     # Guard against one_minus_kmu0_sqr ≈ 0 (mirrors Fortran's merge/epsilon)
+    
+    # Safely bound away from zero while STRICTLY preserving the sign.
+    # Equivalent to Fortran's: merge(val, sign(eps, val), abs(val) > eps)
     safe_denom = torch.where(
-        one_minus_kmu0_sqr.abs() > eps,
-        one_minus_kmu0_sqr,
-        torch.full_like(one_minus_kmu0_sqr, eps),
+        one_minus_kmu0_sqr >= 0,
+        torch.clamp(one_minus_kmu0_sqr, min=eps),
+        torch.clamp(one_minus_kmu0_sqr, max=-eps)
     )
+
     # safe_denom = one_minus_kmu0_sqr.abs().clamp(min=eps) * one_minus_kmu0_sqr.sign()
 
     # reftrans_factor = mu0 * ssa * reftrans_factor / safe_denom
@@ -530,7 +534,7 @@ def adding_tc_sw_batchlast_opt(
 
 # -------------------------------------------- SHORTWAVE FUNCTIONS --------------------------------------------
 
-def stratified_sample(p: torch.Tensor, G: int) -> torch.Tensor:
+def stratified_sample(p: torch.Tensor, G: int, shuffle: bool =False) -> torch.Tensor:
     """
     Stratified sampling: assign G spectral points among N sub-grid states proportional to p
 
@@ -572,8 +576,8 @@ def stratified_sample(p: torch.Tensor, G: int) -> torch.Tensor:
     # print("p 100, 40 inds", state_indices[100*40,:], "p", p[100*40,:])
 
     # --- Step 3: Shuffle spectral dimension ---
-    # if shuffle:
-    #     idx = torch.randperm(G)
+    if shuffle:
+        idx = torch.randperm(G)
     #     state_indices = state_indices[:, idx]
     # --- Step 4: Gather x values ---
     # x_sampled = torch.gather(x_flat, dim=-1, state_indices)             # (B, G)

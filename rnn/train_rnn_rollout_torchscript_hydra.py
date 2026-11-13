@@ -54,7 +54,7 @@ cuda = torch.cuda.is_available()
 device = torch.device("cuda" if cuda else "cpu")
 print(device)
 import torch._functorch.config as functorch_config
-functorch_config.activation_memory_budget = 0.5
+# functorch_config.activation_memory_budget = 0.5
 from torch.utils.data import DataLoader
 from torchinfo import summary
 from utils import train_or_eval_one_epoch, generator_xy, BatchSampler, plot_bias_diff,  load_gas_optics_model,load_reduced_gas_optics_model, model_wrapper
@@ -224,6 +224,8 @@ def main(cfg: DictConfig):
         vars_2D_inp.append('state_q0003_prvphy')
         vars_2D_inp.append('state_u_prvphy')
         nx = nx + 5
+
+    print("Inputs variables:", vars_2D_inp)
     
     if cfg.include_prev_inputs:
         nx = nx + 6 
@@ -306,6 +308,7 @@ def main(cfg: DictConfig):
             else:
                 raise NotImplementedError()
             loss_weights =  yscale_lev / yscale_lev_new
+            print("Mean loss weights: ", loss_weights.mean())
             if cfg.strat_temp_weight_factor != 1.0:
                 loss_weights[0:10,0] = loss_weights[0:10,0]*cfg.strat_temp_weight_factor
                 print("HEY! Weighting heating tendencies in top 10 levels by a factor of {} in the loss".format(cfg.strat_temp_weight_factor))
@@ -407,6 +410,7 @@ def main(cfg: DictConfig):
     ycoeffs = (yscale_lev, yscale_sca)
     print("Y coeff shapes:", yscale_lev.shape, yscale_sca.shape)
     print("yscale lev 1", yscale_lev[55:,1], "2",yscale_lev[55:,2])
+    print("yscale sca", yscale_sca)
 
     xdiv_lev = xmax_lev - xmin_lev
     if xdiv_lev[-1,-1] == 0.0:
@@ -531,6 +535,10 @@ def main(cfg: DictConfig):
             mlp_gasopt_model_lw = load_gas_optics_model(cfg.existing_gasopt_file_lw, device, num_outputs_desired=ng_lw)#, lock_weights=True)
             # infostr = summary(mlp_gasopt_model_lw)
             # print(infostr)
+          else:
+             # Load newer, spectrally reduced (ng = 16) gas optics models with custom bands from a statedict
+            mlp_gasopt_model_lw  = load_reduced_gas_optics_model(
+                cfg.existing_gasopt_file_lw, device, is_longwave=True)#, model_key="gas_optics_model_sw_abs")
 
         if cfg.existing_gasopt_file_sw != "None" and cfg.use_physrad:
           print("Loading pre-existing shortwave !ABSORPTION! gas optics model from {}".format(cfg.existing_gasopt_file_sw))
@@ -545,9 +553,9 @@ def main(cfg: DictConfig):
           else:
             # Load newer, spectrally reduced (ng = 16) gas optics models with custom bands from a statedict
             mlp_gasopt_model_sw  = load_reduced_gas_optics_model(
-                cfg.existing_gasopt_file_sw, device)#, model_key="gas_optics_model_sw_abs")
+                cfg.existing_gasopt_file_sw, device, is_longwave=False)#, model_key="gas_optics_model_sw_abs")
             mlp_gasopt_model_sw2 = load_reduced_gas_optics_model(
-                cfg.existing_gasopt_file_sw2, device)#, model_key="gas_optics_model_sw_ray")
+                cfg.existing_gasopt_file_sw2, device, is_longwave=False)#, model_key="gas_optics_model_sw_ray")
             ng_sw = mlp_gasopt_model_sw.ng
 
         from models.models_phys import physical_RNN_autoreg
@@ -797,7 +805,8 @@ def main(cfg: DictConfig):
           # all_layers.remove("rnn3")
           # all_layers.remove("mlp_output")
         #   unfreeze_layers = ["rnn3","mlp_output","mlp_latent","gas_optics_lw_reduce1","gas_optics_lw_reduce2"]
-          unfreeze_layers = ["rnn3","mlp_output"]
+          # unfreeze_layers = ["rnn3","mlp_output"]
+          unfreeze_layers = ["rnn3"]
 
           for layer in unfreeze_layers:
             all_layers.remove(layer)
@@ -819,7 +828,7 @@ def main(cfg: DictConfig):
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch']
-        print("LOADED FROM MODEL CHECKPOINT SUCCESSFULLY")
+        print("LOADED FROM MODEL CHECKPOINT SUCCESSFULLY; start_epoch:", start_epoch)
         # model.update_qv_for_rad=True
         # print("update qv", model.update_qv_for_rad)
           
@@ -999,11 +1008,11 @@ def main(cfg: DictConfig):
             if cfg.save_model:
               always_save_epochs = [3,5,7,11,19,29,39,49,59,69]
               if val_loss < best_val_loss or epoch in always_save_epochs:
-                if epoch in always_save_epochs:
-                  SAVE_PATH       = "saved_models/" + MODEL_STR + "_ep{}".format(epoch+1) + ".pt"
-                else:
+                if val_loss < best_val_loss:
                   SAVE_PATH       = "saved_models/" + MODEL_STR + "_BEST.pt"
                   best_val_loss = val_loss 
+                else:
+                  SAVE_PATH       = "saved_models/" + MODEL_STR + "_ep{}".format(epoch+1) + ".pt"
 
                 print("saving model to", SAVE_PATH)
                 # print("New best validation result obtained, saving model to", SAVE_PATH)

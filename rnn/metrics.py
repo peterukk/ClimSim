@@ -698,7 +698,7 @@ def CRPS_l1(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
     loss = skill - 0.5 * spread
     return loss#, skill, spread
 
-def CRPS_anemoi(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
+def CRPS_anemoi(y, y_sfc, y_pred, y_sfc_pred, timesteps, alpha=0.95):
     """
     Calculate Continuous Ranked Probability Score.
 
@@ -736,10 +736,12 @@ def CRPS_anemoi(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1):
     # https://github.com/clessig/atmorep/blob/055f858e68f5e0151eb6fece9f6b574d3da4af8d/atmorep/utils/utils.py#L374
 
     # assert ens_size > 1, "Ensemble size must be greater than 1."
+    # −(1−ε)/(M(M−1)).
     fair = True
-    # coef = -1.0 / (ens_size * (ens_size - 1)) if fair else -1.0 / (ens_size**2)
-    coef = -1.0 / (2.0 * ens_size * (ens_size - 1)) if fair else -1.0 / (2.0 * ens_size**2)
-
+    # coef = -(1.0-alpha) / (ens_size * (ens_size - 1)) if fair else -1.0 / (ens_size**2)
+    # coef = -1.0 / (2.0 * ens_size * (ens_size - 1)) if fair else -1.0 / (2.0 * ens_size**2)
+    eps = (1.0 - alpha) / ens_size
+    coef = -(1.0 - eps) / (ens_size * (ens_size - 1)) if fair else -1.0 / (ens_size**2)
     ens_var = torch.zeros(size=y.shape, device=y.device).squeeze(0)
     for i in range(ens_size):  # loop version to reduce memory usage
         ens_var += torch.sum(torch.abs(y_pred[i:i+1,:,:] - y_pred[i + 1 :,:,:]), dim=0)
@@ -851,7 +853,7 @@ def CRPS4(y, y_sfc, y_pred, y_sfc_pred, timesteps, beta=1, return_low_var_inds=F
     # else:
     return CRPS#, MSE, ens_var
 
-def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps, sumvar=True, loss_weights=None):
+def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps, sumvar=True, loss_weights=None, use_surface_vars=False):
     """
     Calculate Continuous Ranked Probability Score (CRPS)
 
@@ -879,32 +881,49 @@ def CRPS_scoringrules(y, y_sfc, y_pred, y_sfc_pred, timesteps, sumvar=True, loss
     # yp: ntime*nbatch*nens, nseq, ny 
     import scoringrules as sr
     ns,seq_size,feature_size = y.shape
-    if loss_weights is not none:
+    if loss_weights is not None:
         y       = loss_weights*y
         y_pred  = loss_weights*y_pred
 
     batch_size = ns // timesteps
-    ens_size = y_pred.shape[0] // (timesteps*batch_size)          
+    ens_size = y_pred.shape[0] // (timesteps*batch_size)  
+    y     = torch.reshape(y,     (timesteps*batch_size, seq_size*feature_size))        
     y_pred = torch.reshape(y_pred, (timesteps, ens_size, batch_size, seq_size*feature_size))
     y_pred = torch.transpose(y_pred, 1, 2) # time, batch, ens, seq_size*feature_size))
     y_pred = torch.reshape(y_pred, (timesteps*batch_size, ens_size, seq_size*feature_size))
 
-    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps, ens_size, batch_size, -1))
-    y_sfc_pred = torch.transpose(y_sfc_pred, 1, 2) # time, batch, ens, nx_sfc))
-    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps*batch_size, ens_size, -1))
-    y_pred = torch.cat((y_pred, y_sfc_pred), axis=-1)
-
-    y     = torch.reshape(y,     (timesteps*batch_size, seq_size*feature_size))
     y_sfc = torch.reshape(y_sfc, (timesteps*batch_size, -1))
-    y = torch.cat((y, y_sfc), axis=-1)
+    y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps, ens_size, batch_size, -1))
+
+    if use_surface_vars:
+      y_sfc_pred = torch.transpose(y_sfc_pred, 1, 2) # time, batch, ens, nx_sfc))
+      y_sfc_pred = torch.reshape(y_sfc_pred, (timesteps*batch_size, ens_size, -1))
+      y_pred = torch.cat((y_pred, y_sfc_pred), axis=-1)
+      y = torch.cat((y, y_sfc), axis=-1)
+    else:
+      # y_sfc_pred = y_sfc_pred[:,0].contiguous().view(-1) 
+      # y_sfc = y_sfc.view(-1)
+      # mse_sfc = torch.mean(torch.square(y_sfc_pred - y_sfc))  
+      y_sfc_pred = y_sfc_pred[:,0].contiguous().view(timesteps*batch_size,-1) 
+      y_sfc = y_sfc.view(timesteps*batch_size,-1)
+      mse_sfc = torch.mean(torch.square(y_sfc_pred - y_sfc),dim=-2)  
+      # print("mean mse_sfc", mse_sfc)
+      mse_sfc = torch.mean(mse_sfc)
+      # print("mean mse_sfc", mse_sfc)
+
     # print("y shape and dev", y.shape, y.device, "pred", y_pred.shape, y_pred.device)
     CRPS = sr.crps_ensemble(y, y_pred, m_axis=1, backend='torch', estimator='fair')
+    # print("shape CRPS", CRPS.shape)
     if sumvar:
       CRPS = CRPS.sum(dim=-1).mean()
+      if not use_surface_vars:
+        CRPS = CRPS + 3e-2 * mse_sfc
     else:
       CRPS = CRPS.mean()
+      if not use_surface_vars:
+        CRPS = CRPS + 1e-3 * mse_sfc
 
-    # # print("CRPS shape", CRPS.shape)
+    # print("mean CRPS", CRPS.item())
     # y       = y.reshape((timesteps*batch_size,1,-1))
     # y_pred  = y_pred.reshape((timesteps*batch_size,ens_size,-1))
 
@@ -989,9 +1008,19 @@ def energy_score(y, y_sfc, y_pred, y_sfc_pred, timesteps, weights=None):
 
     es = sr.es_ensemble(y, y_pred,backend='torch', estimator='fair')
     # es = sr.es_ensemble(y, y_pred, backend='torch') #, estimator='nrg')
-    # print("es shape", CRPS.shape)
+    # print("es shape", es.shape)
     es = es.mean()
     
+    # univariate term: same fair-CRPS formula, but per (lev, var) cell,
+    # i.e. norm taken over nothing (scalar), not reduced across the feature axis
+    # M = ens_size
+    # err_abs = torch.abs(y_pred - y.unsqueeze(-2))            # (..., M, nlev*ny)
+    # e1_uni = err_abs.mean(dim=-2)                             # (..., nlev*ny)
+    # spread_abs = torch.abs(y_pred.unsqueeze(-3) - y_pred.unsqueeze(-2))  # (..., M, M, nlev*ny)
+    # e2_uni = spread_abs.sum(dim=(-3,-2)) / (M * (M - 1))     # (..., nlev*ny)
+    # es_univariate = (e1_uni - 0.5 * e2_uni).mean()  # average over lev, ny (and batch)
+    # es = es_univariate.mean()
+
     return es
 
 def ds_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
@@ -1026,9 +1055,9 @@ def ds_score(y, y_sfc, y_pred, y_sfc_pred, timesteps):
 # def get_CRPS(beta, sumvar): 
 def get_CRPS(sumvar, loss_weights=None): 
     def customCRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps):
-        # return CRPS_anemoi(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps)#, beta)
+        return CRPS_anemoi(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps)#, beta)
         # return CRPS(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, beta)
-        return CRPS_scoringrules(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, sumvar, loss_weights)
+        # return CRPS_scoringrules(y_true, y_true_sfc, y_pred, y_pred_sfc, timesteps, sumvar, loss_weights)
 
     return customCRPS
 

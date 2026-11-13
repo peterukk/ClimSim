@@ -790,7 +790,7 @@ class MyStochasticGRULayer4(jit.ScriptModule):
 #         #     )
 #         #     outputs[i] = hidden
 
-        return outputs # torch.stack(outputs)
+#        return outputs # torch.stack(outputs)
 
 class FusedCUDAStochasticGRUSequence(torch.autograd.Function):
     @staticmethod
